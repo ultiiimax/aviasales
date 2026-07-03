@@ -570,6 +570,20 @@ value_score =
 - С багажом;
 - Семейный.
 
+### 8.2.1. Implemented offer risk contract
+
+Current priced offers expose a deterministic `risk` object from
+`flight_hunter.itinerary_engine.risk`:
+
+- `level`: `low`, `medium` or `high`;
+- `flags`: `cached_price`, `stale_price`, `requires_live_confirmation`, `baggage_unknown`,
+  `provider_single_adult_ticket` or `unknown_freshness`;
+- `explanations`: deterministic text derived from domain fields, never provider free text.
+
+This contract covers existing direct priced offers only. It does not create split-ticket,
+self-transfer or hidden-city candidates. Future itinerary composition can add more flags while
+keeping the same API shape.
+
 ### 8.3. Total trip cost
 
 Помимо fare:
@@ -903,11 +917,18 @@ DELETE /api/v1/account
 - Telegram delivery failures;
 - SSE active sessions;
 - DB pool saturation.
+- `/api/v1/metrics` exposes process-local Prometheus text for provider calls, browser observation
+  starts, parser offer counts, search duration and sent alerts; labels stay low-cardinality and do
+  not include ids, tokens, URLs or message text.
 
 ### Логи
 
 - JSON structured;
 - correlation id, search run id, provider run id;
+- current safe application events: `search_started`, `provider_call`,
+  `browser_observation_started`, `parser_result`, `alert_sent`;
+- event fields stay low-cardinality and safe: ids, source/provider names, endpoint names, counts,
+  confidence/warning codes, delivery reason and durations;
 - no raw token, PII, full booking URL or card data;
 - policy denial logged as event, not exception noise.
 

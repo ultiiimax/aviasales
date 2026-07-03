@@ -29,13 +29,35 @@ def test_browser_sources_endpoint_exposes_policy_without_legal_text_or_backgroun
     response = client.get("/api/v1/browser-sources")
 
     assert response.status_code == 200
-    source = response.json()["sources"][0]
+    sources = {source["source_id"]: source for source in response.json()["sources"]}
+    source = sources["demo_browser"]
     assert source["source_id"] == "demo_browser"
     assert source["enabled"] is False
     assert source["user_action_required"] is True
     assert source["background_allowed"] is False
+    assert sources["tutu"]["enabled"] is False
+    assert sources["tutu"]["permission_status"] == "active"
+    assert sources["tutu"]["background_allowed"] is False
     assert "document_ref" not in source
     assert "secret" not in str(response.json()).lower()
+
+
+def test_browser_sources_endpoint_enables_personal_observer_sources_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_OBSERVER_ENABLED", "true")
+    monkeypatch.setenv("RU_AGGREGATORS_ENABLED", "tutu")
+    monkeypatch.setenv("PERSONAL_OBSERVER_ALLOWED_HOSTS", "www.tutu.ru,tutu.ru,avia.tutu.ru")
+    client = TestClient(create_app())
+
+    response = client.get("/api/v1/browser-sources")
+
+    sources = {source["source_id"]: source for source in response.json()["sources"]}
+    assert response.status_code == 200
+    assert sources["tutu"]["enabled"] is True
+    assert sources["tutu"]["current_health"] == "healthy"
+    assert sources["tutu"]["permission_status"] == "active"
+    assert sources["tutu"]["user_action_required"] is True
+    assert sources["tutu"]["background_allowed"] is False
+    assert sources["yandex_travel"]["enabled"] is False
 
 
 @pytest.mark.anyio

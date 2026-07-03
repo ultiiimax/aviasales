@@ -1,0 +1,24 @@
+[Unit]
+Description=Flight Hunter worker lane %i
+After=network-online.target flight-hunter-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=flight-hunter
+Group=flight-hunter
+WorkingDirectory=/opt/flight-hunter
+EnvironmentFile=/etc/flight-hunter/flight-hunter.env
+ExecStart=/usr/bin/uv run flight-hunter-worker --role %i --loop --idle-sleep-seconds 10
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=180s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/flight-hunter /var/log/flight-hunter /opt/flight-hunter/.local
+
+[Install]
+WantedBy=multi-user.target

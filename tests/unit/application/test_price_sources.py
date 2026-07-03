@@ -33,6 +33,25 @@ def test_catalog_includes_official_carrier_clickouts_for_rub_purchase() -> None:
         source for source in catalog.sources if source.source_type == PriceSourceType.CARRIER_SITE
     ]
 
-    assert {source.id for source in carrier_sources} >= {"aeroflot", "pobeda", "s7"}
+    assert {source.id for source in carrier_sources} >= {
+        "aeroflot",
+        "pobeda",
+        "s7",
+        "ural_airlines",
+        "nordwind",
+        "red_wings",
+        "smartavia",
+        "azimuth",
+        "utair",
+        "rossiya",
+        "turkish_airlines",
+        "air_serbia",
+        "pegasus",
+        "uzbekistan_airways",
+        "emirates",
+        "qatar_airways",
+        "etihad",
+        "flydubai",
+    }
     assert all(source.supports_rub for source in carrier_sources)
     assert all(source.requires_manual_confirmation for source in carrier_sources)

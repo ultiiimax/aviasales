@@ -142,5 +142,47 @@ class PriceSourceCatalog:
                     setup_required_ru="Официальный сайт перевозчика, без API-обхода.",
                     notes_ru="Подходит для прямой проверки тарифа и правил у перевозчика.",
                 ),
+                *_additional_carrier_sources(),
             )
         )
+
+
+def _additional_carrier_sources() -> tuple[PriceSource, ...]:
+    return tuple(
+        _carrier_source(source_id=source_id, name=name)
+        for source_id, name in (
+            ("ural_airlines", "Ural Airlines"),
+            ("nordwind", "Nordwind"),
+            ("red_wings", "Red Wings"),
+            ("smartavia", "Smartavia"),
+            ("azimuth", "Azimuth"),
+            ("utair", "Utair"),
+            ("rossiya", "Rossiya Airlines"),
+            ("turkish_airlines", "Turkish Airlines"),
+            ("air_serbia", "Air Serbia"),
+            ("pegasus", "Pegasus"),
+            ("uzbekistan_airways", "Uzbekistan Airways"),
+            ("emirates", "Emirates"),
+            ("qatar_airways", "Qatar Airways"),
+            ("etihad", "Etihad"),
+            ("flydubai", "flydubai"),
+        )
+    )
+
+
+def _carrier_source(*, source_id: str, name: str) -> PriceSource:
+    return PriceSource(
+        id=source_id,
+        name=name,
+        source_type=PriceSourceType.CARRIER_SITE,
+        price_kind=PriceKind.USER_CONFIRMED_LIVE,
+        supports_rub=True,
+        in_app_booking=False,
+        purchase_flow="external_clickout",
+        requires_manual_confirmation=True,
+        setup_required_ru="Official carrier website, no API bypass.",
+        notes_ru=(
+            "Open the official carrier website and verify route, dates, fare rules, baggage and "
+            "final price manually. Flight Hunter does not treat this link as a found ticket."
+        ),
+    )

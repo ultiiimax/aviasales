@@ -24,6 +24,11 @@ class Freshness(StrEnum):
     UNKNOWN_EXTERNAL = "unknown_external"
 
 
+class PriceBasis(StrEnum):
+    TOTAL_FOR_PASSENGERS = "total_for_passengers"
+    PROVIDER_SINGLE_ADULT_TICKET = "provider_single_adult_ticket"
+
+
 class TripType(StrEnum):
     ONE_WAY = "one_way"
     ROUND_TRIP = "round_trip"
@@ -122,6 +127,7 @@ class FlightOffer:
     freshness: Freshness
     requires_live_confirmation: bool
     baggage_summary: str | None
+    price_basis: PriceBasis | str = PriceBasis.TOTAL_FOR_PASSENGERS
 
     def __post_init__(self) -> None:
         if not self.provider_id:
@@ -130,4 +136,8 @@ class FlightOffer:
             raise ValueError("provider_offer_id is required")
         if type(self.passengers) is not int or self.passengers < 1:
             raise ValueError("passengers must be a positive integer")
+        price_basis = PriceBasis(self.price_basis)
+        if price_basis == PriceBasis.PROVIDER_SINGLE_ADULT_TICKET and self.passengers != 1:
+            raise ValueError("single-adult ticket prices require passengers=1")
+        object.__setattr__(self, "price_basis", price_basis)
         require_aware_datetime(self.observed_at, "observed_at")

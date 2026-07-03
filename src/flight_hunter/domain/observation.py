@@ -39,7 +39,12 @@ class PermissionStatus(StrEnum):
 class ObservationStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
+    OPENING_BROWSER = "opening_browser"
+    WAITING_FOR_USER = "waiting_for_user"
+    CAPTURING_DOM = "capturing_dom"
+    PARSING = "parsing"
     SUCCEEDED = "succeeded"
+    NEEDS_HUMAN = "needs_human"
     NO_PRICE_FOUND = "no_price_found"
     SOURCE_CHALLENGE = "source_challenge"
     SELECTOR_DRIFT = "selector_drift"
@@ -56,7 +61,15 @@ class ObservationErrorCode(StrEnum):
     SELECTOR_DRIFT = "selector_drift"
     TIMED_OUT = "timed_out"
     SOURCE_UNAVAILABLE = "source_unavailable"
+    OPERATOR_ABORTED = "operator_aborted"
+    EXPIRED = "expired"
     FAILED = "failed"
+
+
+class OperatorCheckpointDecision(StrEnum):
+    WAITING = "waiting"
+    RESUME = "resume"
+    ABORT = "abort"
 
 
 @dataclass(frozen=True, slots=True)

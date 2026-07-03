@@ -3,11 +3,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from flight_hunter.application.provider_registry import ProviderRegistry
-from flight_hunter.application.search_service import DemoSearchService, SearchRequest
+from flight_hunter.application.search_service import (
+    DemoSearchService,
+    SearchRequest,
+    with_browser_observed_offers_and_deal_candidates,
+)
 from flight_hunter.config import AppSettings
 from flight_hunter.domain.money import Money
 from flight_hunter.domain.offers import FlightOffer, Freshness
 from flight_hunter.domain.policy import DataKind, ExecutionContext, ProviderPolicy
+from flight_hunter.domain.search_results import Confidence, DealCandidate
 
 NOW = datetime(2026, 6, 23, 12, 0, tzinfo=UTC)
 
@@ -67,6 +72,47 @@ def test_demo_search_does_not_merge_provider_isolated_results() -> None:
     assert result.mergeable_offers == ()
     assert result.provider_isolated_offers == ()
     assert result.denied_providers["aviasales_search"].code == "provider_disabled"
+
+
+def test_search_enrichment_keeps_deal_candidates_out_of_priced_offers() -> None:
+    service = DemoSearchService(
+        registry=ProviderRegistry.default(clock=lambda: NOW), clock=lambda: NOW
+    )
+    result = service.search(
+        SearchRequest(
+            origin="MOW",
+            destination="IST",
+            departure_date="2026-09-10",
+            return_date="2026-09-20",
+            passengers=1,
+            currency="RUB",
+            provider_ids=None,
+        )
+    )
+    candidate = DealCandidate(
+        source_id="deal_discovery",
+        url="https://example.com/deal",
+        title="Manual deal hint",
+        summary_ru="Manual verification required.",
+        extracted_price=Money(1_842_000, "RUB"),
+        extracted_origin="MOW",
+        extracted_destination="IST",
+        extracted_date_window="2026-09-10",
+        confidence=Confidence.MEDIUM,
+        discovered_at=NOW,
+        requires_manual_verification=True,
+    )
+
+    enriched = with_browser_observed_offers_and_deal_candidates(
+        result,
+        browser_observed_offers=(),
+        deal_candidates=(candidate,),
+    )
+
+    assert enriched.priced_offers == result.priced_offers
+    assert enriched.mergeable_offers == result.mergeable_offers
+    assert enriched.deal_candidates == (candidate,)
+    assert "deal_candidates_require_manual_verification" in enriched.warnings
 
 
 def test_search_service_calls_enabled_aviasales_data_provider_through_plan() -> None:

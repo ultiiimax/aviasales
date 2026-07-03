@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from flight_hunter.config import AppSettings
 from flight_hunter.providers.aviasales_data.client import (
     AviasalesDataItem,
+    AviasalesDataRateLimit,
     AviasalesDataRateLimited,
     AviasalesDataResponse,
     PricesForDatesQuery,
@@ -71,6 +72,9 @@ def test_smoke_check_returns_sanitized_success_summary() -> None:
         "item_count": 1,
         "received_at": "2026-06-23T12:00:00+00:00",
         "retry_after_seconds": None,
+        "rate_limit": 600,
+        "rate_limit_remaining": 599,
+        "rate_limit_reset": 42,
     }
     assert SECRET not in format_smoke_result(result)
     assert "/search/" not in format_smoke_result(result)
@@ -96,6 +100,9 @@ def test_smoke_check_reports_rate_limit_without_retry_loop() -> None:
         item_count=0,
         received_at=None,
         retry_after_seconds=60,
+        rate_limit=600,
+        rate_limit_remaining=0,
+        rate_limit_reset=60,
     )
     assert SECRET not in format_smoke_result(result)
 
@@ -110,6 +117,7 @@ class StubClient:
         assert self.token == SECRET
         return AviasalesDataResponse(
             received_at=NOW,
+            rate_limit=AviasalesDataRateLimit(limit=600, remaining=599, reset=42),
             items=(
                 AviasalesDataItem(
                     origin="WAW",
@@ -130,4 +138,7 @@ class StubClient:
 
 class RateLimitedClient:
     def prices_for_dates(self, query: PricesForDatesQuery) -> AviasalesDataResponse:
-        raise AviasalesDataRateLimited(retry_after_seconds=60)
+        raise AviasalesDataRateLimited(
+            retry_after_seconds=60,
+            rate_limit=AviasalesDataRateLimit(limit=600, remaining=0, reset=60),
+        )

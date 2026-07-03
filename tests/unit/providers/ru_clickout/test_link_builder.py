@@ -32,6 +32,21 @@ def test_ru_clickout_builds_conservative_external_links_for_default_sources() ->
         "aeroflot",
         "pobeda",
         "s7",
+        "ural_airlines",
+        "nordwind",
+        "red_wings",
+        "smartavia",
+        "azimuth",
+        "utair",
+        "rossiya",
+        "turkish_airlines",
+        "air_serbia",
+        "pegasus",
+        "uzbekistan_airways",
+        "emirates",
+        "qatar_airways",
+        "etihad",
+        "flydubai",
     }.issubset(ids)
     assert all(link.price_known is False for link in links)
     assert all(link.requires_external_confirmation is True for link in links)

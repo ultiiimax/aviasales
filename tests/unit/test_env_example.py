@@ -9,6 +9,9 @@ def test_env_example_exists_with_safe_placeholders() -> None:
     assert env_example.exists()
 
     content = env_example.read_text(encoding="utf-8")
+    assert "AUTH_BOOTSTRAP_TOKEN=" in content
+    assert "AUTH_SESSION_TTL_SECONDS=2592000" in content
+    assert "AUTH_ALLOW_LEGACY_HEADERS=true" in content
     assert "AVIASALES_DATA_ENABLED=false" in content
     assert "TRAVELPAYOUTS_API_TOKEN=" in content
     assert "TRAVELPAYOUTS_API_TOKEN=72a" not in content
@@ -25,11 +28,30 @@ def test_env_example_exists_with_safe_placeholders() -> None:
     assert "SCRAPING_OBSERVER_ENABLED=false" in content
     assert "SCRAPING_MIN_GAP_SECONDS=600" in content
     assert "PERSONAL_OBSERVER_ENABLED=false" in content
+    assert "PERSONAL_OBSERVER_ARTIFACT_ROOT=.local/browser-artifacts" in content
+    assert "PERSONAL_OBSERVER_NAVIGATION_TIMEOUT_MS=45000" in content
+    assert "PERSONAL_OBSERVER_READY_SELECTOR=" in content
+    assert "PERSONAL_OBSERVER_READY_TIMEOUT_MS=15000" in content
+    assert "PERSONAL_OBSERVER_WAIT_FOR_NETWORK_IDLE=false" in content
+    assert "PERSONAL_OBSERVER_MANUAL_CHECKPOINT_SECONDS=0" in content
+    assert "PERSONAL_OBSERVER_SAVE_RUNTIME_MANIFESTS=false" in content
+    assert "PERSONAL_OBSERVER_PROFILE_LOCK_TIMEOUT_SECONDS=0" in content
+    assert "PERSONAL_OBSERVER_PROFILE_LOCK_STALE_SECONDS=3600" in content
     assert "PERSONAL_OBSERVER_REQUIRE_USER_ACTION=true" in content
     assert "PERSONAL_OBSERVER_AUTO_RUN=false" in content
     assert "SCRAPLING_USE_FETCHERS=false" in content
     assert "CRAWL4AI_ENABLED=false" in content
+    assert "CRAWL4AI_MODE=library" in content
+    assert "CRAWL4AI_BASE_URL=http://crawl4ai:11235" in content
+    assert "CRAWL4AI_API_TOKEN=" in content
+    assert "CRAWL4AI_TIMEOUT_SECONDS=30" in content
+    assert "CRAWL4AI_IMAGE=unclecode/crawl4ai:0.8.9" in content
     assert "SEARXNG_ENABLED=false" in content
+    assert "SEARXNG_BASE_URL=http://searxng:8080" in content
+    assert "SEARXNG_IMAGE=searxng/searxng:2026.6.29-0e990f78a" in content
+    assert "SEARXNG_IMAGE=searxng/searxng:latest" not in content
+    assert "DEAL_DISCOVERY_JOB_DEADLINE_SECONDS=600" in content
+    assert "DEAL_DISCOVERY_ALLOWED_HOSTS=" in content
     assert "RU_AGGREGATORS_ENABLED=aviasales_clickout,yandex_travel,tutu,onetwotrip" in content
-    assert "CARRIER_LINKS_ENABLED=aeroflot,pobeda,s7" in content
+    assert "CARRIER_LINKS_ENABLED=aeroflot,pobeda,s7,ural_airlines" in content
     assert "SOURCE_INTERNAL_RPM=10" in content

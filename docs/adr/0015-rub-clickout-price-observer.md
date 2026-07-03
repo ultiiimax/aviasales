@@ -62,6 +62,18 @@ explicit offer-card markers into `BrowserObservedOffer` values. It is intentiona
 not navigate pages, bypass protections, solve CAPTCHA, reuse cookies or infer prices outside an
 offer card.
 
+The personal observer runtime slice adds optional Playwright/Scrapling/Crawl4AI dependency groups,
+the `flight-hunter-observe` CLI, a user-action gated Playwright persistent-profile runner and
+short-lived persistence for normalized `browser_observed` offers. Live observation still requires
+explicit config, an allowed source/host, a user action grant and no background scheduler calls.
+Crawl4AI is available as an optional dependency/config surface for later deal-page extraction, but
+it is not yet a source of fare prices or deal candidates.
+
+The durable job slice adds `/api/v1/personal-observations/*` and
+`flight-hunter-run-personal-observation`. API requests enqueue user-action jobs and return status;
+the worker CLI performs the browser/fixture observation separately and persists normalized offers.
+The scheduler still cannot create or run browser observations without an explicit user grant.
+
 ## Verification
 
 - `tests/unit/application/test_price_sources.py`
@@ -72,3 +84,7 @@ offer card.
 - `tests/unit/application/test_search_service.py`
 - `tests/unit/api/test_api_app.py`
 - `tests/unit/browser/test_html_offer_extractor.py`
+- `tests/unit/browser/test_scrapling_offer_extractor.py`
+- `tests/unit/providers/personal_observer/test_runner.py`
+- `tests/unit/providers/personal_observer/test_cli.py`
+- `tests/unit/persistence/test_browser_observed_offer_repository.py`

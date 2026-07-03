@@ -131,15 +131,13 @@ def _aviasales_data_policy(
         result_ttl_seconds=604800,
         max_concurrent_requests=2,
         supports_flexible_dates=True,
-        supports_nearby_airports=False,
+        supports_nearby_airports=True,
         supports_multi_city=False,
         supports_one_way=True,
         supports_round_trip=True,
         supports_baggage=False,
         supports_fare_rules=False,
-        notes=(
-            "Cached Travelpayouts/Aviasales Data API; disabled until adapter and credentials exist."
-        ),
+        notes=("Cached Travelpayouts/Aviasales Data API; disabled until credentials exist."),
     )
 
 

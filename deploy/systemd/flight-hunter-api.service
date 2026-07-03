@@ -1,0 +1,25 @@
+[Unit]
+Description=Flight Hunter API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=flight-hunter
+Group=flight-hunter
+WorkingDirectory=/opt/flight-hunter
+EnvironmentFile=/etc/flight-hunter/flight-hunter.env
+ExecStartPre=/usr/bin/uv run alembic upgrade head
+ExecStart=/usr/bin/uv run uvicorn flight_hunter.api.app:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=60s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/flight-hunter /var/log/flight-hunter /opt/flight-hunter/.local
+
+[Install]
+WantedBy=multi-user.target

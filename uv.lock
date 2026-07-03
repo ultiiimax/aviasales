@@ -526,6 +526,7 @@ name = "flight-hunter"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiosqlite" },
     { name = "alembic" },
     { name = "fastapi" },
     { name = "httpx2" },
@@ -538,7 +539,6 @@ crawler = [
     { name = "crawl4ai" },
 ]
 dev = [
-    { name = "aiosqlite" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
@@ -551,6 +551,7 @@ scraping = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.21.0,<1.0.0" },
     { name = "alembic", specifier = ">=1.17.0,<2.0.0" },
     { name = "fastapi", specifier = ">=0.125.0,<1.0.0" },
     { name = "httpx2", specifier = ">=2.4.0" },
@@ -561,7 +562,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 crawler = [{ name = "crawl4ai", specifier = ">=0.7,<1.0" }]
 dev = [
-    { name = "aiosqlite", specifier = ">=0.21.0,<1.0.0" },
     { name = "mypy", specifier = ">=1.18.0,<2.0.0" },
     { name = "pytest", specifier = ">=9.0.0,<10.0.0" },
     { name = "ruff", specifier = ">=0.14.0,<0.15.0" },

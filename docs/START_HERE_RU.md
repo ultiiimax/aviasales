@@ -46,6 +46,14 @@ cd "C:\Users\kiwun\Документы\CHEAP AIR FLY"
 uv sync --group dev
 ```
 
+Если хотите попробовать локальный Personal Browser Observer, установите опциональные browser/crawler
+зависимости и Chromium для Playwright:
+
+```powershell
+uv sync --group dev --group scraping --group crawler
+uv run playwright install chromium
+```
+
 Если хотите создать локальную demo-базу:
 
 ```powershell
@@ -56,6 +64,12 @@ Backup локальной demo-базы:
 
 ```powershell
 uv run flight-hunter-backup
+```
+
+Verify backup manifest:
+
+```powershell
+uv run flight-hunter-backup-verify .\backups\ИМЯ_BACKUP.db
 ```
 
 Restore из backup-файла:
@@ -220,6 +234,16 @@ uv run travelpayouts-smoke
 
 Команда не печатает token, booking links или raw payload. Она показывает только `ok`, код результата, количество найденных cached-записей и время ответа.
 
+Общий smoke для optional sources:
+
+```powershell
+uv run flight-hunter-source-smoke --source aviasales_data
+uv run flight-hunter-source-smoke --source searxng
+uv run flight-hunter-source-smoke --source crawl4ai --url https://example.com/
+```
+
+`searxng` и `crawl4ai` без включённых env flags вернут disabled-состояние, а не fake success.
+
 ### Когда захотите Telegram-бота
 
 Нужны:
@@ -359,14 +383,68 @@ GET /api/v1/source-contracts
 Scraping observer можно будет включать только точечно:
 
 ```env
-SCRAPING_OBSERVER_ENABLED=false
-SCRAPING_MIN_GAP_SECONDS=600
+PERSONAL_OBSERVER_ENABLED=false
+PERSONAL_OBSERVER_REQUIRE_USER_ACTION=true
+PERSONAL_OBSERVER_AUTO_RUN=false
+PERSONAL_OBSERVER_MIN_GAP_SECONDS=60
 ```
 
-Даже если режим включить, он не будет делать CAPTCHA solving, stealth,
+Deal discovery is also user-triggered and disabled unless SearXNG/Crawl4AI are configured. Its
+results are stored as manual-verification hints scoped by household/user/search and expire by TTL:
+
+```env
+CRAWL4AI_ENABLED=false
+SEARXNG_ENABLED=false
+SEARXNG_BASE_URL=http://127.0.0.1:8080
+DEAL_CANDIDATE_TTL_SECONDS=86400
+DEAL_DISCOVERY_JOB_DEADLINE_SECONDS=600
+```
+
+Локальный SearXNG можно поднять отдельным compose profile:
+
+```powershell
+docker compose --profile deal-discovery up --build
+```
+
+Сейчас его безопаснее пробовать на sanitized fixture без сети:
+
+```powershell
+uv run flight-hunter-observe --source tutu --origin MOW --destination IST --depart 2026-09-10 --return-date 2026-09-20 --fixture-html tests/fixtures/browser/tutu/search_result_source_specific.html
+```
+
+Если web/API уже поставил personal observation job в очередь, отдельный worker CLI выполняет его
+так:
+
+```powershell
+uv run flight-hunter-run-personal-observation --job-id JOB_UUID --fixture-html tests/fixtures/browser/tutu/search_result_source_specific.html
+```
+
+Для локального polling loop используйте общий worker. Он забирает только уже queued user-action
+jobs, включая durable deal-discovery jobs и personal browser jobs, соблюдает attempts/next retry
+и не создаёт browser/provider вызовы сам:
+
+```powershell
+uv run flight-hunter-worker --loop --idle-sleep-seconds 5 --fixture-html tests/fixtures/browser/tutu/search_result_source_specific.html
+```
+
+For production supervision, split worker lanes into separate processes while keeping the same
+DB-backed claims and policy gates:
+
+```powershell
+uv run flight-hunter-worker --role browser --loop --fixture-html tests/fixtures/browser/tutu/search_result_source_specific.html
+uv run flight-hunter-worker --role watch --loop
+uv run flight-hunter-worker --role deal --loop
+uv run flight-hunter-worker --role telegram --loop
+uv run flight-hunter-worker --role maintenance --loop
+```
+
+Admin health shows `current_job_kind`/`current_job_id`, so active and stale work are visible
+without parsing worker logs.
+
+Даже если live-режим включить, он не будет делать CAPTCHA solving, stealth,
 fingerprint spoofing, proxy rotation, использовать чужие cookies или закрытые
-страницы. Такие цены будут называться `observed_price`, а не гарантированной
-доступностью билета.
+страницы. Такие цены будут называться `browser_observed`, а не гарантированной
+доступностью билета, и живут коротко.
 
 ## Простая карта проекта
 

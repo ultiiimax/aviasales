@@ -28,6 +28,9 @@ class AviasalesDataSmokeResult:
     item_count: int
     received_at: datetime | None
     retry_after_seconds: int | None
+    rate_limit: int | None
+    rate_limit_remaining: int | None
+    rate_limit_reset: int | None
 
 
 def run_smoke_check(
@@ -48,6 +51,9 @@ def run_smoke_check(
             item_count=0,
             received_at=None,
             retry_after_seconds=None,
+            rate_limit=None,
+            rate_limit_remaining=None,
+            rate_limit_reset=None,
         )
 
     query = PricesForDatesQuery(
@@ -71,6 +77,9 @@ def run_smoke_check(
             item_count=0,
             received_at=None,
             retry_after_seconds=exc.retry_after_seconds,
+            rate_limit=exc.rate_limit.limit if exc.rate_limit else None,
+            rate_limit_remaining=exc.rate_limit.remaining if exc.rate_limit else None,
+            rate_limit_reset=exc.rate_limit.reset if exc.rate_limit else None,
         )
     except AviasalesDataError:
         return AviasalesDataSmokeResult(
@@ -79,6 +88,9 @@ def run_smoke_check(
             item_count=0,
             received_at=None,
             retry_after_seconds=None,
+            rate_limit=None,
+            rate_limit_remaining=None,
+            rate_limit_reset=None,
         )
 
     return AviasalesDataSmokeResult(
@@ -87,6 +99,9 @@ def run_smoke_check(
         item_count=len(response.items),
         received_at=response.received_at,
         retry_after_seconds=None,
+        rate_limit=response.rate_limit.limit if response.rate_limit else None,
+        rate_limit_remaining=response.rate_limit.remaining if response.rate_limit else None,
+        rate_limit_reset=response.rate_limit.reset if response.rate_limit else None,
     )
 
 
@@ -101,6 +116,9 @@ def format_smoke_result(result: AviasalesDataSmokeResult) -> str:
         "item_count": payload["item_count"],
         "received_at": payload["received_at"],
         "retry_after_seconds": payload["retry_after_seconds"],
+        "rate_limit": payload["rate_limit"],
+        "rate_limit_remaining": payload["rate_limit_remaining"],
+        "rate_limit_reset": payload["rate_limit_reset"],
     }
     return json.dumps(ordered_payload, ensure_ascii=False, indent=2)
 

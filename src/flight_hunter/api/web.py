@@ -10,6 +10,8 @@ def render_index_html() -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Flight Hunter</title>
+  <meta name="theme-color" content="#126d7a">
+  <link rel="manifest" href="/manifest.webmanifest">
   <meta name="description" content="Flight Hunter: семейный поиск авиабилетов с честной свежестью цен.">
   <link rel="icon" href='data:image/svg+xml,
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
@@ -32,6 +34,7 @@ def render_index_html() -> str:
       --warning: #9a5b16;
       --warning-soft: #f7ead5;
       --danger: #a33a2a;
+      --danger-soft: #f7deda;
       --ok: #247044;
       --ok-soft: #ddefe4;
       --shadow: 0 18px 44px rgba(25, 40, 54, 0.10);
@@ -137,6 +140,26 @@ def render_index_html() -> str:
       gap: 16px;
       align-items: start;
       margin-bottom: 16px;
+    }
+
+    .auth-panel {
+      margin-bottom: 16px;
+    }
+
+    .auth-form {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.7fr) auto auto;
+      gap: 10px;
+      align-items: end;
+      padding: 14px 16px;
+    }
+
+    .auth-state {
+      grid-column: 1 / -1;
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
     }
 
     .agent-cockpit {
@@ -440,6 +463,7 @@ def render_index_html() -> str:
 
     .badge.ok { color: var(--ok); background: var(--ok-soft); }
     .badge.warn { color: var(--warning); background: var(--warning-soft); }
+    .badge.high { color: var(--danger); background: var(--danger-soft); }
     .badge.off { color: #516169; background: var(--surface-soft); }
 
     .result-row {
@@ -465,6 +489,66 @@ def render_index_html() -> str:
       margin-bottom: 8px;
     }
 
+    .result-actions,
+    .confirmation-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      justify-content: flex-end;
+    }
+
+    .confirmation-actions {
+      margin-top: 8px;
+    }
+
+    .confirmation-actions .chip {
+      min-height: 32px;
+      padding: 0 9px;
+      font-size: 12px;
+    }
+
+    .confirmation-status {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      margin-top: 7px;
+      min-height: 18px;
+      text-align: right;
+    }
+
+    .side-stack,
+    .admin-health-list,
+    .watch-list,
+    .watch-history,
+    .watch-toolbar {
+      display: grid;
+    }
+
+    .side-stack {
+      gap: 16px;
+    }
+
+    .watch-toolbar {
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-soft);
+    }
+
+    .watch-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 9px;
+    }
+
+    .watch-actions .chip {
+      min-height: 32px;
+      padding: 0 9px;
+      font-size: 12px;
+    }
+
     .empty-state,
     .error-state {
       padding: 28px 16px;
@@ -486,10 +570,17 @@ def render_index_html() -> str:
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
+      .auth-form {
+        grid-template-columns: 1fr 1fr;
+      }
+
       label.wide { grid-column: span 1; }
 
       .price,
-      .caveats {
+      .caveats,
+      .result-actions,
+      .confirmation-actions,
+      .confirmation-status {
         text-align: left;
         justify-content: flex-start;
       }
@@ -515,6 +606,10 @@ def render_index_html() -> str:
         gap: 10px;
       }
 
+      .auth-form {
+        grid-template-columns: 1fr;
+      }
+
       .form-actions {
         align-items: stretch;
       }
@@ -522,6 +617,14 @@ def render_index_html() -> str:
       .primary,
       .secondary {
         width: 100%;
+      }
+
+      .watch-toolbar {
+        grid-template-columns: 1fr;
+      }
+
+      .confirmation-actions .chip {
+        width: auto;
       }
 
       .message {
@@ -551,6 +654,26 @@ def render_index_html() -> str:
       </div>
       <div class="status-line" id="status-line">локальный режим · данные помечаются по свежести</div>
     </header>
+
+    <section class="panel auth-panel" aria-labelledby="auth-heading">
+      <div class="panel-header">
+        <div>
+          <h2 class="panel-title" id="auth-heading">Session</h2>
+          <div class="panel-kicker">Invitation-only access for household data.</div>
+        </div>
+      </div>
+      <form class="auth-form" id="auth-form">
+        <label>Invitation code
+          <input name="invitation_code" autocomplete="one-time-code">
+        </label>
+        <label>Name
+          <input name="display_name" autocomplete="name">
+        </label>
+        <button class="primary" type="submit" id="auth-submit-button">Accept</button>
+        <button class="secondary" type="button" id="auth-signout-button">Sign out</button>
+        <div class="auth-state" id="auth-state" aria-live="polite"></div>
+      </form>
+    </section>
 
     <section class="workbench agent-cockpit" aria-label="Agent cockpit">
       <aside class="panel" aria-labelledby="assistant-heading">
@@ -637,26 +760,82 @@ def render_index_html() -> str:
           <label>Валюта
             <input name="currency" value="RUB" maxlength="3" autocomplete="off" required>
           </label>
+          <label>Radar min
+            <input name="min_price_minor" type="number" min="0" step="100" value="1000000" required>
+          </label>
+          <label>Radar max
+            <input name="max_price_minor" type="number" min="0" step="100" value="2000000" required>
+          </label>
           <div class="form-actions">
             <span class="fineprint" id="passenger-total">2 пассажира · туда-обратно</span>
-            <button class="primary" type="submit" id="submit-button">Найти билеты</button>
+            <div class="quick-actions" aria-label="Ручные проверки">
+              <button class="secondary" type="button" id="cached-radar-button">Cached radar</button>
+              <button class="secondary" type="button" id="personal-observe-button">Считать из браузера</button>
+              <button class="secondary" type="button" id="deal-discovery-button">Найти акции</button>
+              <button class="primary" type="submit" id="submit-button">Найти билеты</button>
+            </div>
           </div>
         </form>
       </section>
     </section>
 
     <section class="lower-grid">
-      <aside class="panel" aria-labelledby="providers-heading">
-        <div class="panel-header">
-          <div>
-            <h2 class="panel-title" id="providers-heading">Источники</h2>
-            <div class="panel-kicker">Что сейчас можно использовать.</div>
+      <div class="side-stack">
+        <aside class="panel" aria-labelledby="providers-heading">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title" id="providers-heading">Источники</h2>
+              <div class="panel-kicker">Что сейчас можно использовать.</div>
+            </div>
           </div>
-        </div>
-        <div class="provider-list" id="providers-list">
-          <div class="empty-state">Загружаю источники...</div>
-        </div>
-      </aside>
+          <div class="provider-list" id="providers-list">
+            <div class="empty-state">Загружаю источники...</div>
+          </div>
+        </aside>
+
+        <section class="panel" aria-labelledby="watches-heading">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title" id="watches-heading">Watches</h2>
+              <div class="panel-kicker">Слежение работает по расписанию и не запускает браузер без клика.</div>
+            </div>
+          </div>
+          <div class="watch-toolbar">
+            <button class="secondary" type="button" id="create-watch-button">Следить за маршрутом</button>
+            <button class="secondary" type="button" id="refresh-watches-button">Обновить watches</button>
+          </div>
+          <div class="watch-list" id="watch-list">
+            <div class="empty-state">Загружаю watches...</div>
+          </div>
+          <div class="watch-history" id="watch-history-list"></div>
+        </section>
+
+        <section class="panel" aria-labelledby="admin-health-heading">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title" id="admin-health-heading">Health</h2>
+              <div class="panel-kicker">Read-only provider/source status; no live checks on refresh.</div>
+            </div>
+            <button class="secondary" type="button" id="refresh-admin-health-button">Обновить</button>
+          </div>
+          <div class="admin-health-list" id="admin-health-list">
+            <div class="empty-state">Загружаю health...</div>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="audit-heading">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title" id="audit-heading">Audit</h2>
+              <div class="panel-kicker">Household-scoped lifecycle log; read-only.</div>
+            </div>
+            <button class="secondary" type="button" id="refresh-audit-button">РћР±РЅРѕРІРёС‚СЊ</button>
+          </div>
+          <div class="admin-health-list" id="audit-list">
+            <div class="empty-state">Р—Р°РіСЂСѓР¶Р°СЋ audit...</div>
+          </div>
+        </section>
+      </div>
 
       <section class="panel" aria-labelledby="results-heading">
         <div class="panel-header">
@@ -669,6 +848,8 @@ def render_index_html() -> str:
         <div class="result-list" id="results-list">
           <div class="empty-state">Заполни маршрут и нажми “Найти билеты”.</div>
         </div>
+        <div class="denial-list" id="cached-radar-list"></div>
+        <div class="denial-list" id="confirmation-list"></div>
         <div class="denial-list" id="live-list"></div>
         <div class="denial-list" id="denials-list"></div>
       </section>
@@ -678,11 +859,24 @@ def render_index_html() -> str:
   <script>
     const providersList = document.querySelector("#providers-list");
     const resultsList = document.querySelector("#results-list");
+    const cachedRadarList = document.querySelector("#cached-radar-list");
+    const confirmationList = document.querySelector("#confirmation-list");
     const liveList = document.querySelector("#live-list");
     const denialsList = document.querySelector("#denials-list");
     const resultsCount = document.querySelector("#results-count");
     const statusLine = document.querySelector("#status-line");
     const submitButton = document.querySelector("#submit-button");
+    const cachedRadarButton = document.querySelector("#cached-radar-button");
+    const personalObserveButton = document.querySelector("#personal-observe-button");
+    const dealDiscoveryButton = document.querySelector("#deal-discovery-button");
+    const createWatchButton = document.querySelector("#create-watch-button");
+    const refreshWatchesButton = document.querySelector("#refresh-watches-button");
+    const watchList = document.querySelector("#watch-list");
+    const watchHistoryList = document.querySelector("#watch-history-list");
+    const refreshAdminHealthButton = document.querySelector("#refresh-admin-health-button");
+    const adminHealthList = document.querySelector("#admin-health-list");
+    const refreshAuditButton = document.querySelector("#refresh-audit-button");
+    const auditList = document.querySelector("#audit-list");
     const passengerTotal = document.querySelector("#passenger-total");
     const chatLog = document.querySelector("#chat-log");
     const presetList = document.querySelector("#preset-list");
@@ -693,15 +887,38 @@ def render_index_html() -> str:
     const agentEdgeReady = document.querySelector("#agent-edge-ready");
     const airportChoiceList = document.querySelector("#airport-choice-list");
     const agentActionList = document.querySelector("#agent-action-list");
+    const authForm = document.querySelector("#auth-form");
+    const authState = document.querySelector("#auth-state");
+    const authSubmitButton = document.querySelector("#auth-submit-button");
+    const authSignoutButton = document.querySelector("#auth-signout-button");
     let browserSources = [];
     let agentPresets = [];
     let lastSearchPayload = null;
+    let lastSearchId = null;
+    let lastExternalLinks = [];
+    let watchRecords = [];
+    const sessionTokenKey = "flight_hunter_session_token";
+
+    const manualConfirmationActions = [
+      {status: "confirmed", label: "Совпала"},
+      {status: "price_changed", label: "Изменилась"},
+      {status: "sold_out", label: "Нет мест"},
+      {status: "bought", label: "Купил"},
+      {status: "wrong_route", label: "Маршрут не тот"}
+    ];
 
     const reasonLabels = {
       cached_price: "cached",
+      cached_price_range: "price range",
+      cached_month_matrix: "month matrix",
+      cached_nearest_places_matrix: "nearby cached",
+      cached_popular_directions: "popular directions",
+      cached_special_offers: "special offers",
       recent_price: "recent",
       live_price: "live",
       stale_price: "stale",
+      provider_single_adult_ticket: "single adult ticket",
+      unknown_freshness: "freshness unknown",
       requires_live_confirmation: "проверить перед покупкой",
       baggage_unknown: "багаж неизвестен",
       provider_disabled: "выключен",
@@ -749,6 +966,85 @@ def render_index_html() -> str:
       };
     }
 
+    function sessionToken() {
+      return window.localStorage.getItem(sessionTokenKey);
+    }
+
+    function authHeaders(extra = {}) {
+      const token = sessionToken();
+      if (token) {
+        return {
+          "Authorization": `Bearer ${token}`,
+          ...extra
+        };
+      }
+      return demoHeaders(extra);
+    }
+
+    function storeSession(session) {
+      window.localStorage.setItem(sessionTokenKey, session.session_token);
+      authState.textContent = `Session: ${session.role} · ${session.household_id.slice(0, 8)}`;
+      authSignoutButton.disabled = false;
+    }
+
+    function clearSession() {
+      window.localStorage.removeItem(sessionTokenKey);
+      authState.textContent = "Session: demo headers";
+      authSignoutButton.disabled = true;
+    }
+
+    async function refreshSessionState() {
+      const token = sessionToken();
+      if (!token) {
+        clearSession();
+        return;
+      }
+      try {
+        const response = await fetch("/api/v1/auth/me", {
+          headers: {"Authorization": `Bearer ${token}`}
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+        const session = await response.json();
+        authState.textContent = `Session: ${session.role} · ${session.household_id.slice(0, 8)}`;
+        authSignoutButton.disabled = false;
+      } catch (error) {
+        clearSession();
+        statusLine.textContent = "session expired";
+      }
+    }
+
+    async function acceptInvitation(event) {
+      event.preventDefault();
+      const form = new FormData(authForm);
+      const invitationCode = text(form.get("invitation_code"));
+      const displayName = text(form.get("display_name"));
+      if (!invitationCode || !displayName) {
+        authState.textContent = "Session: invitation code and name required";
+        return;
+      }
+      authSubmitButton.disabled = true;
+      try {
+        const response = await fetch("/api/v1/auth/accept-invitation", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            invitation_code: invitationCode,
+            display_name: displayName
+          })
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+        storeSession(await response.json());
+        authForm.reset();
+        statusLine.textContent = "session active";
+        await loadWatches();
+        await loadAuditEvents();
+      } catch (error) {
+        authState.textContent = `Session: ${error.message}`;
+      } finally {
+        authSubmitButton.disabled = false;
+      }
+    }
+
     function text(value) {
       return String(value ?? "").trim();
     }
@@ -764,6 +1060,40 @@ def render_index_html() -> str:
 
     function reasonLabel(reason) {
       return reasonLabels[reason] || reason;
+    }
+
+    function priceBasisLabel(offer) {
+      const basis = offer.price_basis || "total_for_passengers";
+      if (basis === "total_for_passengers") return "";
+      if (basis === "provider_single_adult_ticket") return " · single adult ticket";
+      return ` · ${basis}`;
+    }
+
+    function riskTone(level) {
+      if (level === "low") return "ok";
+      if (level === "high") return "high";
+      return "warn";
+    }
+
+    function riskLevelLabel(offer) {
+      const risk = offer.risk || {};
+      return `risk: ${risk.level || "unknown"}`;
+    }
+
+    function riskBadges(offer) {
+      const risk = offer.risk || {};
+      const level = risk.level || "unknown";
+      const flags = risk.flags || [];
+      const badges = [`<span class="badge ${riskTone(level)}">${riskLevelLabel(offer)}</span>`];
+      flags.forEach((flag) => {
+        badges.push(`<span class="badge warn">${reasonLabel(flag)}</span>`);
+      });
+      return badges.join("");
+    }
+
+    function riskExplanationText(offer) {
+      const risk = offer.risk || {};
+      return (risk.explanations || []).join(" ");
     }
 
     function badgeClass(provider) {
@@ -808,6 +1138,32 @@ def render_index_html() -> str:
       return `${count} вариантов`;
     }
 
+    function formatMinorAmount(minorUnits, currency) {
+      const value = Number(minorUnits);
+      if (!Number.isSafeInteger(value)) return `${minorUnits} ${currency}`;
+      const sign = value < 0 ? "-" : "";
+      const absolute = Math.abs(value);
+      const major = Math.trunc(absolute / 100);
+      const minor = String(absolute % 100).padStart(2, "0");
+      return `${sign}${major}.${minor} ${currency}`;
+    }
+
+    function formatIsoMinute(value) {
+      if (!value) return "нет срока";
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) return value;
+      return parsed.toLocaleString("ru-RU", {
+        dateStyle: "short",
+        timeStyle: "short",
+      });
+    }
+
+    function dealCandidateExpiryLabel(candidate) {
+      if (!candidate.expires_at) return "срок не указан";
+      const expired = Date.parse(candidate.expires_at) <= Date.now();
+      return `${expired ? "stale" : "candidate"} · до ${formatIsoMinute(candidate.expires_at)}`;
+    }
+
     function buildSearchPayload() {
       const form = new FormData(document.querySelector("#search-form"));
       const adults = Math.max(1, numberValue(form, "adults", 1));
@@ -826,6 +1182,31 @@ def render_index_html() -> str:
         trip_type: returnDate ? "round_trip" : "one_way",
         currency: text(form.get("currency")).toUpperCase()
       };
+    }
+
+    function buildCachedRadarPayload(radarKind) {
+      const form = new FormData(document.querySelector("#search-form"));
+      const payload = buildSearchPayload();
+      const radarPayload = {
+        radar_kind: radarKind,
+        origin: payload.origin,
+        destination: payload.destination,
+        departure_date: payload.departure_date,
+        return_date: payload.return_date,
+        passengers: payload.passengers,
+        adults: payload.adults,
+        children: payload.children,
+        infants: payload.infants,
+        currency: payload.currency
+      };
+      if (radarKind === "nearest_places_matrix") {
+        radarPayload.nearby_distance_km = 300;
+      }
+      if (radarKind === "price_range") {
+        radarPayload.min_price_minor = Math.max(0, numberValue(form, "min_price_minor", 1000000));
+        radarPayload.max_price_minor = Math.max(0, numberValue(form, "max_price_minor", 2000000));
+      }
+      return radarPayload;
     }
 
     function updatePassengerSummary() {
@@ -918,6 +1299,576 @@ def render_index_html() -> str:
       });
     }
 
+    function healthBadge(status, blockedReasons = []) {
+      if (
+        blockedReasons.length > 0
+        || ["critical", "failed", "blocked", "retry_scheduled", "stale", "backlog", "deadline_risk"].includes(status)
+      ) {
+        return {label: status || "blocked", tone: "warn"};
+      }
+      if (status === "warning") {
+        return {label: status, tone: "warn"};
+      }
+      if (status === "drained") {
+        return {label: status, tone: "warn"};
+      }
+      if (["ok", "healthy", "ready", "running", "idle"].includes(status)) {
+        return {label: status, tone: "ok"};
+      }
+      if (status === "disabled" || status === "no_events" || status === "stopped") {
+        return {label: status, tone: "off"};
+      }
+      return {label: status || "unknown", tone: "off"};
+    }
+
+    function renderAdminHealth(providerBody, sourceBody, workerBody) {
+      adminHealthList.replaceChildren();
+      appendSectionHeader(
+        adminHealthList,
+        "Provider health",
+        `Checked ${providerBody.checked_at || "unknown"}. Values are readiness flags, not live probes.`
+      );
+      (providerBody.providers || []).forEach((provider) => {
+        const status = provider.enabled ? "ready" : "disabled";
+        const badge = healthBadge(status, provider.blocked_reasons || []);
+        const row = document.createElement("div");
+        row.className = "provider-row";
+        row.innerHTML = `
+          <div class="row-main">
+            <div class="provider-name"></div>
+            <span class="badge ${badge.tone}"></span>
+          </div>
+          <div class="small"></div>
+        `;
+        row.querySelector(".provider-name").textContent = providerLabel(provider.provider_id);
+        row.querySelector(".badge").textContent = badge.label;
+        const credentials = provider.credentials_present ? "credentials present" : "credentials missing";
+        const reasons = (provider.blocked_reasons || []).join(", ") || "no blockers";
+        row.querySelector(".small").textContent =
+          `${provider.data_kind} · ${credentials} · access=${provider.access_approved} · ${reasons}`;
+        adminHealthList.append(row);
+      });
+
+      appendSectionHeader(
+        adminHealthList,
+        "Source health",
+        `Checked ${sourceBody.checked_at || "unknown"}. Latest events are append-only diagnostics.`
+      );
+      (sourceBody.sources || []).forEach((source) => {
+        const badge = healthBadge(source.current_status, source.blocked_reasons || []);
+        const row = document.createElement("div");
+        row.className = "provider-row";
+        row.innerHTML = `
+          <div class="row-main">
+            <div class="provider-name"></div>
+            <span class="badge ${badge.tone}"></span>
+          </div>
+          <div class="small"></div>
+        `;
+        row.querySelector(".provider-name").textContent = source.display_name || source.source_id;
+        row.querySelector(".badge").textContent = badge.label;
+        const latest = source.latest_event
+          ? `${source.latest_event.event_type}: ${source.latest_event.message}`
+          : "no recent event";
+        const blockers = (source.blocked_reasons || []).join(", ") || "no blockers";
+        row.querySelector(".small").textContent =
+          `${source.stage || "event-only"} · enabled=${source.enabled} · ${blockers} · ${latest}`;
+        adminHealthList.append(row);
+      });
+
+      appendSectionHeader(
+        adminHealthList,
+        "Worker health",
+        `Checked ${workerBody.checked_at || "unknown"}. Heartbeats are durable DB state, not log scraping.`
+      );
+      const control = workerBody.control || {drain_requested: false};
+      const controlStatus = control.drain_requested ? "drained" : "ready";
+      const controlBadge = healthBadge(controlStatus);
+      const controlRow = document.createElement("div");
+      controlRow.className = "provider-row";
+      controlRow.innerHTML = `
+        <div class="row-main">
+          <div class="provider-name">Worker claims</div>
+          <span class="badge ${controlBadge.tone}"></span>
+        </div>
+        <div class="small"></div>
+      `;
+      controlRow.querySelector(".badge").textContent = controlBadge.label;
+      controlRow.querySelector(".small").textContent = control.drain_requested
+        ? `new claims paused | reason=${control.reason || "operator"} | since=${control.requested_at || "unknown"}`
+        : `new claims enabled | updated=${control.updated_at || control.cleared_at || "default"}`;
+      const pauseClaimsButton = document.createElement("button");
+      pauseClaimsButton.className = "secondary";
+      pauseClaimsButton.type = "button";
+      pauseClaimsButton.textContent = "Pause claims";
+      pauseClaimsButton.disabled = Boolean(control.drain_requested);
+      pauseClaimsButton.addEventListener("click", () => setWorkerDrain(true));
+      const resumeClaimsButton = document.createElement("button");
+      resumeClaimsButton.className = "secondary";
+      resumeClaimsButton.type = "button";
+      resumeClaimsButton.textContent = "Resume claims";
+      resumeClaimsButton.disabled = !control.drain_requested;
+      resumeClaimsButton.addEventListener("click", () => setWorkerDrain(false));
+      controlRow.append(pauseClaimsButton, document.createTextNode(" "), resumeClaimsButton);
+      adminHealthList.append(controlRow);
+      const alerts = workerBody.alerts || [];
+      if (alerts.length > 0) {
+        appendSectionHeader(
+          adminHealthList,
+          "Worker alerts",
+          "Derived from heartbeat and queue snapshots for external supervisor alerting."
+        );
+      }
+      alerts.forEach((alert) => {
+        const badge = healthBadge(alert.severity);
+        const row = document.createElement("div");
+        row.className = "provider-row";
+        row.innerHTML = `
+          <div class="row-main">
+            <div class="provider-name"></div>
+            <span class="badge ${badge.tone}"></span>
+          </div>
+          <div class="small"></div>
+        `;
+        row.querySelector(".provider-name").textContent =
+          `${alert.subject_kind}:${alert.subject_id}`;
+        row.querySelector(".badge").textContent = badge.label;
+        row.querySelector(".small").textContent = `${alert.code} | ${alert.message}`;
+        adminHealthList.append(row);
+      });
+      const queues = workerBody.queues || [];
+      const staleQueues = queues.filter((queue) => (queue.stale_count || 0) > 0);
+      if (staleQueues.length > 0) {
+        appendSectionHeader(
+          adminHealthList,
+          "Stale lock monitor",
+          "Queued work stuck behind stale worker leases, grouped by lane."
+        );
+      }
+      staleQueues.forEach((queue) => {
+        const row = document.createElement("div");
+        row.className = "provider-row";
+        row.innerHTML = `
+          <div class="row-main">
+            <div class="provider-name"></div>
+            <span class="badge bad">critical</span>
+          </div>
+          <div class="small"></div>
+        `;
+        row.querySelector(".provider-name").textContent = `${queue.lane} stale locks`;
+        row.querySelector(".small").textContent =
+          `stale=${queue.stale_count ?? 0}`
+          + ` | oldest_locked_age=${queue.oldest_locked_age_seconds ?? "n/a"}s`;
+        adminHealthList.append(row);
+      });
+      if (queues.length > 0) {
+        appendSectionHeader(
+          adminHealthList,
+          "Worker queues",
+          "Backlog and stale/deadline indicators are read-only database aggregates."
+        );
+      }
+      queues.forEach((queue) => {
+        const badge = healthBadge(queue.warning_level);
+        const row = document.createElement("div");
+        row.className = "provider-row";
+        row.innerHTML = `
+          <div class="row-main">
+            <div class="provider-name"></div>
+            <span class="badge ${badge.tone}"></span>
+          </div>
+          <div class="small"></div>
+        `;
+        row.querySelector(".provider-name").textContent = `${queue.lane} queue`;
+        row.querySelector(".badge").textContent = badge.label;
+        const statuses = Object.entries(queue.status_counts || {})
+          .map(([status, count]) => `${status}=${count}`)
+          .join(", ") || "empty";
+        const queuedAge = queue.oldest_queued_age_seconds ?? "n/a";
+        const lockedAge = queue.oldest_locked_age_seconds ?? "n/a";
+        row.querySelector(".small").textContent =
+          `due=${queue.due_count ?? 0} | delayed=${queue.delayed_count ?? 0}`
+          + ` | stale=${queue.stale_count ?? 0} | expired=${queue.expired_count ?? 0}`
+          + ` | oldest_queued_age=${queuedAge}s | oldest_locked_age=${lockedAge}s`
+          + ` | statuses: ${statuses}`;
+        adminHealthList.append(row);
+      });
+      const workers = workerBody.workers || [];
+      if (workers.length === 0) {
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = "No worker heartbeat has been recorded yet.";
+        adminHealthList.append(row);
+      }
+      workers.forEach((worker) => {
+        const badge = healthBadge(worker.effective_status);
+        const row = document.createElement("div");
+        row.className = "provider-row";
+        row.innerHTML = `
+          <div class="row-main">
+            <div class="provider-name"></div>
+            <span class="badge ${badge.tone}"></span>
+          </div>
+          <div class="small"></div>
+        `;
+        row.querySelector(".provider-name").textContent = worker.worker_id;
+        row.querySelector(".badge").textContent = badge.label;
+        const summary = worker.last_summary || {};
+        const job = worker.current_job_kind
+          ? ` | job=${worker.current_job_kind}${worker.current_job_id ? "/" + worker.current_job_id : ""}`
+          : "";
+        row.querySelector(".small").textContent =
+          `${worker.role} | phase=${worker.current_phase}${job} | last_seen=${worker.last_seen_at}`
+          + ` | browser=${summary.browser_jobs_seen ?? 0}/${summary.browser_jobs_succeeded ?? 0}`
+          + ` | watch=${summary.watch_jobs_processed ?? 0}/${summary.watch_jobs_succeeded ?? 0}`
+          + ` | deal=${summary.deal_jobs_processed ?? 0}/${summary.deal_jobs_succeeded ?? 0}`
+          + ` | telegram=${summary.telegram_notifications_seen ?? 0}/${summary.telegram_notifications_sent ?? 0}`
+          + ` | maintenance=${summary.live_cleanup_observations_deleted ?? 0}/${summary.deal_candidates_deleted ?? 0}`;
+        adminHealthList.append(row);
+      });
+    }
+
+    async function setWorkerDrain(drainRequested) {
+      refreshAdminHealthButton.disabled = true;
+      try {
+        const response = await fetch("/api/v1/admin/workers/control", {
+          method: "PATCH",
+          headers: authHeaders({"Content-Type": "application/json"}),
+          body: JSON.stringify({
+            drain_requested: drainRequested,
+            reason: drainRequested ? "web health panel" : null
+          })
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+        await loadAdminHealth();
+        await loadAuditEvents();
+      } catch (error) {
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = `Worker control: ${error.message}`;
+        adminHealthList.prepend(row);
+      } finally {
+        refreshAdminHealthButton.disabled = false;
+      }
+    }
+
+    async function loadAdminHealth() {
+      refreshAdminHealthButton.disabled = true;
+      try {
+        const [providersResponse, sourcesResponse, workersResponse] = await Promise.all([
+          fetch("/api/v1/admin/providers/health"),
+          fetch("/api/v1/admin/sources/health"),
+          fetch("/api/v1/admin/workers/health")
+        ]);
+        if (!providersResponse.ok) throw new Error(await codedMessage(providersResponse));
+        if (!sourcesResponse.ok) throw new Error(await codedMessage(sourcesResponse));
+        if (!workersResponse.ok) throw new Error(await codedMessage(workersResponse));
+        renderAdminHealth(
+          await providersResponse.json(),
+          await sourcesResponse.json(),
+          await workersResponse.json()
+        );
+      } catch (error) {
+        adminHealthList.replaceChildren();
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = `Health: ${error.message}`;
+        adminHealthList.append(row);
+      } finally {
+        refreshAdminHealthButton.disabled = false;
+      }
+    }
+
+    function auditTone(event) {
+      if (event.action.endsWith(".deleted")) return "off";
+      if (event.action.endsWith(".archived") || event.action.endsWith(".paused")) return "warn";
+      return "ok";
+    }
+
+    function auditMeta(event) {
+      const actor = event.actor_user_id ? `actor ${event.actor_user_id.slice(0, 8)}` : "system";
+      const target = event.entity_id
+        ? `${event.entity_type} ${event.entity_id.slice(0, 8)}`
+        : event.entity_type;
+      return `${event.created_at} - ${actor} - ${target}`;
+    }
+
+    function renderAuditEvents(events) {
+      auditList.replaceChildren();
+      appendSectionHeader(
+        auditList,
+        "Audit",
+        "Household-scoped lifecycle events; newest first."
+      );
+      if (!events || events.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.textContent = "Audit СЃРѕР±С‹С‚РёР№ РїРѕРєР° РЅРµС‚.";
+        auditList.append(empty);
+        return;
+      }
+      events.forEach((event) => {
+        const row = document.createElement("div");
+        row.className = "provider-row";
+        row.innerHTML = `
+          <div class="row-main">
+            <div class="provider-name"></div>
+            <span class="badge ${auditTone(event)}"></span>
+          </div>
+          <div class="small"></div>
+        `;
+        row.querySelector(".provider-name").textContent = event.summary;
+        row.querySelector(".badge").textContent = event.action;
+        row.querySelector(".small").textContent = auditMeta(event);
+        auditList.append(row);
+      });
+    }
+
+    async function loadAuditEvents() {
+      refreshAuditButton.disabled = true;
+      try {
+        const response = await fetch("/api/v1/admin/audit-events", {headers: authHeaders()});
+        if (!response.ok) throw new Error(await codedMessage(response));
+        const body = await response.json();
+        renderAuditEvents(body.audit_events || []);
+      } catch (error) {
+        auditList.replaceChildren();
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = `Audit: ${error.message}`;
+        auditList.append(row);
+      } finally {
+        refreshAuditButton.disabled = false;
+      }
+    }
+
+    function watchStatus(watch) {
+      if (!watch.enabled) return {label: "выключен", tone: "off"};
+      if (watch.paused_until) return {label: "пауза", tone: "warn"};
+      if (watch.last_scan_status === "failed") return {label: "ошибка", tone: "warn"};
+      return {label: "активен", tone: "ok"};
+    }
+
+    function watchMeta(watch) {
+      const trip = watch.return_date ? `${watch.departure_date} — ${watch.return_date}` : watch.departure_date;
+      const scan = watch.last_scanned_at
+        ? `последний scan ${watch.last_scanned_at}`
+        : "scan ещё не запускался";
+      const paused = watch.paused_until ? ` · пауза до ${watch.paused_until}` : "";
+      return `${trip} · ${watch.passengers} пасс. · ${watch.currency} · v${watch.version} · ${scan}${paused}`;
+    }
+
+    function renderWatches(watches) {
+      watchRecords = watches || [];
+      watchList.replaceChildren();
+      if (watchRecords.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.textContent = "Активных watches пока нет.";
+        watchList.append(empty);
+        return;
+      }
+      watchRecords.forEach((watch) => {
+        const state = watchStatus(watch);
+        const row = document.createElement("div");
+        row.className = "provider-row";
+        row.innerHTML = `
+          <div class="row-main">
+            <div class="provider-name"></div>
+            <span class="badge ${state.tone}"></span>
+          </div>
+          <div class="small"></div>
+          <div class="watch-actions"></div>
+        `;
+        row.querySelector(".provider-name").textContent = `${watch.origin} → ${watch.destination}`;
+        row.querySelector(".badge").textContent = state.label;
+        row.querySelector(".small").textContent = watchMeta(watch);
+        const actions = row.querySelector(".watch-actions");
+        const pauseButton = document.createElement("button");
+        pauseButton.className = "chip";
+        pauseButton.type = "button";
+        pauseButton.textContent = watch.paused_until ? "Возобновить" : "Пауза";
+        pauseButton.addEventListener("click", () =>
+          watch.paused_until ? resumeWatch(watch) : pauseWatch(watch)
+        );
+        const historyButton = document.createElement("button");
+        historyButton.className = "chip";
+        historyButton.type = "button";
+        historyButton.textContent = "История";
+        historyButton.addEventListener("click", () => loadWatchHistory(watch));
+        const archiveButton = document.createElement("button");
+        archiveButton.className = "chip";
+        archiveButton.type = "button";
+        archiveButton.textContent = "Архив";
+        archiveButton.addEventListener("click", () => archiveWatch(watch));
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "chip";
+        deleteButton.type = "button";
+        deleteButton.textContent = "Удалить";
+        deleteButton.addEventListener("click", () => deleteWatch(watch));
+        actions.append(pauseButton, historyButton, archiveButton, deleteButton);
+        watchList.append(row);
+      });
+    }
+
+    function renderWatchHistory(watch, snapshots) {
+      watchHistoryList.replaceChildren();
+      appendSectionHeader(
+        watchHistoryList,
+        "История watch",
+        `${watch.origin} → ${watch.destination}. Snapshots не являются live-гарантией.`
+      );
+      if (!snapshots || snapshots.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.textContent = "История цен пока пустая.";
+        watchHistoryList.append(empty);
+        return;
+      }
+      snapshots.forEach((snapshot) => {
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        const confirmation = snapshot.requires_live_confirmation
+          ? "нужна внешняя проверка"
+          : "подтверждение источника";
+        row.textContent =
+          `${providerLabel(snapshot.provider_id)} · ${formatMinorAmount(snapshot.amount_minor, snapshot.currency)}`
+          + ` · ${snapshot.freshness} · ${snapshot.observed_at} · ${confirmation}`;
+        watchHistoryList.append(row);
+      });
+    }
+
+    async function loadWatches() {
+      try {
+        const response = await fetch("/api/v1/watches", {headers: authHeaders()});
+        if (!response.ok) throw new Error(await codedMessage(response));
+        const body = await response.json();
+        renderWatches(body.watches || []);
+      } catch (error) {
+        watchList.replaceChildren();
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = `Watches: ${error.message}`;
+        watchList.append(row);
+      }
+    }
+
+    async function createWatchFromSearch() {
+      const payload = buildSearchPayload();
+      createWatchButton.disabled = true;
+      statusLine.textContent = "creating watch...";
+      try {
+        const response = await fetch("/api/v1/watches", {
+          method: "POST",
+          headers: authHeaders({"Content-Type": "application/json"}),
+          body: JSON.stringify({
+            origin: payload.origin,
+            destination: payload.destination,
+            departure_date: payload.departure_date,
+            return_date: payload.return_date,
+            passengers: payload.passengers,
+            currency: payload.currency,
+            allowed_provider_ids: []
+          })
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+        const watch = await response.json();
+        statusLine.textContent = `watch created v${watch.version}`;
+        await loadWatches();
+        await loadAuditEvents();
+        await loadWatchHistory(watch);
+      } catch (error) {
+        statusLine.textContent = "watch create error";
+        watchHistoryList.replaceChildren();
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = `Watch: ${error.message}`;
+        watchHistoryList.append(row);
+      } finally {
+        createWatchButton.disabled = false;
+      }
+    }
+
+    async function pauseWatch(watch) {
+      await mutateWatch(watch, `/api/v1/watches/${watch.id}/pause`, "POST", {}, "watch paused");
+    }
+
+    async function resumeWatch(watch) {
+      await mutateWatch(watch, `/api/v1/watches/${watch.id}/resume`, "POST", null, "watch resumed");
+    }
+
+    async function archiveWatch(watch) {
+      await mutateWatch(
+        watch,
+        `/api/v1/watches/${watch.id}/archive`,
+        "POST",
+        {expected_version: watch.version},
+        "watch archived"
+      );
+      watchHistoryList.replaceChildren();
+    }
+
+    async function deleteWatch(watch) {
+      if (!window.confirm("Удалить watch из активного списка?")) return;
+      await mutateWatch(
+        watch,
+        `/api/v1/watches/${watch.id}`,
+        "DELETE",
+        {expected_version: watch.version},
+        "watch deleted"
+      );
+      watchHistoryList.replaceChildren();
+    }
+
+    async function mutateWatch(watch, url, method, body, okStatus) {
+      statusLine.textContent = "watch action...";
+      try {
+        const options = {
+          method,
+          headers: authHeaders({"Content-Type": "application/json"})
+        };
+        if (body !== null) {
+          options.body = JSON.stringify(body);
+        }
+        const response = await fetch(url, options);
+        if (!response.ok) throw new Error(await codedMessage(response));
+        statusLine.textContent = okStatus;
+        await loadWatches();
+        await loadAuditEvents();
+        if (method !== "DELETE") {
+          const latest = watchRecords.find((item) => item.id === watch.id);
+          if (latest) await loadWatchHistory(latest);
+        }
+      } catch (error) {
+        statusLine.textContent = "watch action error";
+        watchHistoryList.replaceChildren();
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = `Watch: ${error.message}`;
+        watchHistoryList.append(row);
+      }
+    }
+
+    async function loadWatchHistory(watch) {
+      statusLine.textContent = "watch history...";
+      try {
+        const response = await fetch(`/api/v1/watches/${watch.id}/history`, {
+          headers: authHeaders()
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+        const body = await response.json();
+        renderWatchHistory(watch, body.snapshots || []);
+        statusLine.textContent = "watch history ready";
+      } catch (error) {
+        watchHistoryList.replaceChildren();
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = `Watch history: ${error.message}`;
+        watchHistoryList.append(row);
+        statusLine.textContent = "watch history error";
+      }
+    }
+
     function appendSectionHeader(container, title, subtitle) {
       const node = document.createElement("div");
       node.className = "denial-row";
@@ -930,13 +1881,230 @@ def render_index_html() -> str:
       container.append(node);
     }
 
+    function compactTargetId(...parts) {
+      const raw = parts
+        .map((part) => text(part))
+        .filter(Boolean)
+        .join(":")
+        .replace(/\\s+/g, " ");
+      if (!raw) return "unknown";
+      return raw.length <= 160 ? raw : `${raw.slice(0, 157)}...`;
+    }
+
+    function pricedOfferTarget(offer) {
+      return {
+        kind: "priced_offer",
+        targetId: compactTargetId(offer.provider_id, offer.provider_offer_id),
+        sourceId: offer.provider_id,
+        price: offer.total_price || null
+      };
+    }
+
+    function externalLinkTarget(link) {
+      return {
+        kind: link.kind || "external_search_link",
+        targetId: compactTargetId(
+          link.source_id,
+          `${link.origin}-${link.destination}`,
+          link.departure_date,
+          link.return_date || "oneway",
+          link.passengers
+        ),
+        sourceId: link.source_id,
+        price: null
+      };
+    }
+
+    function browserObservationTarget(offer) {
+      return {
+        kind: "browser_observation",
+        targetId: compactTargetId(offer.observation_id),
+        sourceId: offer.source_id,
+        price: offer.total_price || null
+      };
+    }
+
+    function dealCandidateTarget(candidate) {
+      return {
+        kind: "deal_candidate",
+        targetId: compactTargetId(candidate.source_id, candidate.discovered_at, candidate.title),
+        sourceId: candidate.source_id,
+        price: candidate.extracted_price || null
+      };
+    }
+
+    function manualConfirmationStatusLabel(status) {
+      const labels = {
+        confirmed: "цена совпала",
+        price_changed: "цена изменилась",
+        sold_out: "нет мест",
+        bought: "куплено",
+        wrong_route: "маршрут не тот"
+      };
+      return labels[status] || status;
+    }
+
+    function appendManualConfirmationActions(container, target) {
+      const actions = document.createElement("div");
+      actions.className = "confirmation-actions";
+      const status = document.createElement("div");
+      status.className = "confirmation-status";
+      status.textContent = "Ручная проверка";
+      manualConfirmationActions.forEach((item) => {
+        const button = document.createElement("button");
+        button.className = "chip";
+        button.type = "button";
+        button.textContent = item.label;
+        button.addEventListener("click", () => recordManualConfirmation(target, item.status, status));
+        actions.append(button);
+      });
+      container.append(actions, status);
+    }
+
+    async function recordManualConfirmation(target, status, statusNode) {
+      const body = {
+        target_kind: target.kind,
+        target_id: target.targetId,
+        source_id: target.sourceId,
+        status,
+        note: "web manual confirmation"
+      };
+      if ((status === "confirmed" || status === "bought") && target.price) {
+        body.amount_minor = target.price.minor_units;
+        body.currency = target.price.currency;
+      }
+      statusNode.textContent = "сохраняю...";
+      try {
+        const response = await fetch("/api/v1/manual-price-confirmations", {
+          method: "POST",
+          headers: authHeaders({"Content-Type": "application/json"}),
+          body: JSON.stringify(body)
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+        const saved = await response.json();
+        statusNode.textContent = `Сохранено: ${manualConfirmationStatusLabel(saved.status)}`;
+        await loadManualConfirmations();
+        statusLine.textContent = "manual confirmation saved";
+      } catch (error) {
+        statusNode.textContent = `Не сохранено: ${error.message}`;
+        statusLine.textContent = "manual confirmation error";
+      }
+    }
+
+    function renderManualConfirmations(confirmations) {
+      confirmationList.replaceChildren();
+      if (!confirmations || confirmations.length === 0) return;
+      appendSectionHeader(
+        confirmationList,
+        "Ручные подтверждения",
+        "Личная история проверок. Она не переписывает provider facts."
+      );
+      confirmations.forEach((confirmation) => {
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        const price = confirmation.confirmed_price
+          ? ` · ${confirmation.confirmed_price.formatted}`
+          : "";
+        row.textContent =
+          `${manualConfirmationStatusLabel(confirmation.status)} · ${confirmation.source_id}`
+          + ` · ${confirmation.target_kind}${price} · ${confirmation.confirmed_at}`;
+        confirmationList.append(row);
+      });
+    }
+
+    async function loadManualConfirmations() {
+      try {
+        const params = new URLSearchParams({limit: "8"});
+        const response = await fetch(`/api/v1/manual-price-confirmations?${params.toString()}`, {
+          headers: authHeaders()
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+        const body = await response.json();
+        renderManualConfirmations(body.confirmations || []);
+      } catch (error) {
+        confirmationList.replaceChildren();
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = `Ручные подтверждения: ${error.message}`;
+        confirmationList.append(row);
+      }
+    }
+
+    function cachedRadarTitle(kind) {
+      return {
+        price_range: "Cached price range",
+        grouped_prices: "Cached grouped prices",
+        latest_prices: "Cached latest prices",
+        month_matrix: "Cached month matrix",
+        nearest_places_matrix: "Cached nearby places",
+        popular_directions: "Cached popular directions",
+        special_offers: "Cached special offers"
+      }[kind] || kind;
+    }
+
+    function renderCachedRadarResults(results) {
+      cachedRadarList.replaceChildren();
+      const totalOffers = results.reduce((sum, item) => sum + (item.offers || []).length, 0);
+      appendSectionHeader(
+        cachedRadarList,
+        "Cached radar",
+        totalOffers > 0
+          ? "Cached hints. Confirm externally before purchase."
+          : "No cached radar prices for this route or credentials are missing."
+      );
+      results.forEach((item) => {
+        const denials = item.pricing_denials || [];
+        if (denials.length > 0) {
+          const row = document.createElement("div");
+          row.className = "denial-row small";
+          row.textContent = `${cachedRadarTitle(item.radar_kind)}: ${denials.join(", ")}`;
+          cachedRadarList.append(row);
+        }
+        (item.offers || []).forEach((offer) => {
+          const row = document.createElement("div");
+          row.className = "result-row";
+          const caveats = (offer.ranking_reasons || []).map((reason) => {
+            const label = reasonLabel(reason);
+            const tone = reason.startsWith("cached_") ? "ok" : "warn";
+            return `<span class="badge ${tone}">${label}</span>`;
+          }).join("") + riskBadges(offer);
+          row.innerHTML = `
+            <div>
+              <div class="route"></div>
+              <div class="small"></div>
+            </div>
+            <div class="price"></div>
+            <div>
+              <div class="caveats">${caveats}</div>
+              <div class="risk-detail small"></div>
+              <div class="result-actions"></div>
+            </div>
+          `;
+          row.querySelector(".route").textContent =
+            `${offer.origin} → ${offer.destination}`;
+          row.querySelector(".small").textContent =
+            `${cachedRadarTitle(item.radar_kind)} · ${offer.departure_date}`
+            + `${offer.return_date ? " — " + offer.return_date : ""}`
+            + ` · ${offer.passengers} пасс.${priceBasisLabel(offer)} · ${offer.freshness}`;
+          row.querySelector(".price").textContent = offer.total_price.formatted;
+          row.querySelector(".risk-detail").textContent = riskExplanationText(offer);
+          appendManualConfirmationActions(row.querySelector(".result-actions"), pricedOfferTarget(offer));
+          cachedRadarList.append(row);
+        });
+      });
+    }
+
     function renderResults(body) {
       const offers = body.priced_offers || body.offers || [];
       const externalLinks = body.external_links || [];
       const observedOffers = body.browser_observed_offers || [];
       const dealCandidates = body.deal_candidates || [];
       const freshnessSummary = body.freshness_summary || {};
+      lastSearchId = body.search_id || null;
+      lastExternalLinks = externalLinks;
       resultsList.replaceChildren();
+      cachedRadarList.replaceChildren();
+      confirmationList.replaceChildren();
       liveList.replaceChildren();
       denialsList.replaceChildren();
       resultsCount.textContent = optionCountLabel(
@@ -965,7 +2133,7 @@ def render_index_html() -> str:
           const label = reasonLabel(reason);
           const tone = reason === "cached_price" || reason === "recent_price" ? "ok" : "warn";
           return `<span class="badge ${tone}">${label}</span>`;
-        }).join("");
+        }).join("") + riskBadges(offer);
         row.innerHTML = `
           <div>
             <div class="route"></div>
@@ -974,16 +2142,21 @@ def render_index_html() -> str:
           <div class="price"></div>
           <div>
             <div class="caveats">${caveats}</div>
-            <button class="secondary live-check-button" type="button">Проверить live</button>
+            <div class="risk-detail small"></div>
+            <div class="result-actions">
+              <button class="secondary live-check-button" type="button">Проверить live</button>
+            </div>
           </div>
         `;
         row.querySelector(".route").textContent = `${offer.origin} → ${offer.destination}`;
         row.querySelector(".small").textContent =
           `${offer.departure_date}${offer.return_date ? " — " + offer.return_date : ""}`
           + ` · ${offer.passengers} пасс. · ${providerLabel(offer.provider_id)}`
-          + ` · ${offer.freshness}`;
+          + `${priceBasisLabel(offer)} · ${offer.freshness}`;
         row.querySelector(".price").textContent = offer.total_price.formatted;
+        row.querySelector(".risk-detail").textContent = riskExplanationText(offer);
         row.querySelector(".live-check-button").addEventListener("click", () => runLiveCheck());
+        appendManualConfirmationActions(row.querySelector(".result-actions"), pricedOfferTarget(offer));
         resultsList.append(row);
       });
 
@@ -1009,7 +2182,9 @@ def render_index_html() -> str:
           <div class="price">Цена неизвестна</div>
           <div>
             <div class="caveats"><span class="badge warn">external check</span></div>
-            <a class="secondary" target="_blank" rel="noopener noreferrer">Открыть на сайте</a>
+            <div class="result-actions">
+              <a class="secondary" target="_blank" rel="noopener noreferrer">Открыть на сайте</a>
+            </div>
           </div>
         `;
         row.querySelector(".route").textContent =
@@ -1018,6 +2193,7 @@ def render_index_html() -> str:
           `${link.departure_date}${link.return_date ? " — " + link.return_date : ""}`
           + ` · ${link.passengers} пасс. · ${link.notes_ru || "Проверить на внешнем сайте."}`;
         row.querySelector("a").href = link.url;
+        appendManualConfirmationActions(row.querySelector(".result-actions"), externalLinkTarget(link));
         resultsList.append(row);
       });
 
@@ -1034,25 +2210,19 @@ def render_index_html() -> str:
       }
       observedOffers.forEach((offer) => {
         const row = document.createElement("div");
-        row.className = "denial-row small";
-        row.textContent =
+        row.className = "denial-row";
+        const details = document.createElement("div");
+        details.className = "small";
+        details.textContent =
           `${offer.source_name}: ${offer.total_price ? offer.total_price.formatted : "цена не найдена"}`
           + ` · confidence=${offer.confidence} · ${offer.parser_warnings.join(", ") || "без предупреждений"}`;
+        row.append(details);
+        appendManualConfirmationActions(row, browserObservationTarget(offer));
         liveList.append(row);
       });
 
       if (dealCandidates.length > 0) {
-        appendSectionHeader(
-          denialsList,
-          "Сделки/форумы",
-          "Кандидаты требуют ручной проверки и не считаются источником истины цены."
-        );
-        dealCandidates.forEach((candidate) => {
-          const row = document.createElement("div");
-          row.className = "denial-row small";
-          row.textContent = `${candidate.title}: ${candidate.summary_ru}`;
-          denialsList.append(row);
-        });
+        renderDealCandidates(dealCandidates);
       }
 
       Object.entries(body.denied_providers || {}).forEach(([providerId, denial]) => {
@@ -1061,6 +2231,7 @@ def render_index_html() -> str:
         row.textContent = `${providerLabel(providerId)}: ${reasonLabel(denial.code)}`;
         denialsList.append(row);
       });
+      loadManualConfirmations();
     }
 
     function renderLiveObservation(observation) {
@@ -1077,6 +2248,81 @@ def render_index_html() -> str:
         `Live observed · ${offer.total_price.formatted} · ${offer.origin} → ${offer.destination}`
         + ` · наблюдалось ${observation.observed_at}`;
       liveList.append(row);
+    }
+
+    function renderPersonalObservationJob(job) {
+      liveList.replaceChildren();
+      appendSectionHeader(
+        liveList,
+        "Personal Browser Observer",
+        "Job обрабатывается worker CLI; ручной checkpoint можно продолжить или отменить."
+      );
+      const row = document.createElement("div");
+      row.className = "denial-row small";
+      const command = `uv run flight-hunter-run-personal-observation --job-id ${job.job_id}`;
+      const waiting = job.status === "waiting_for_user";
+      const flags = [
+        job.waiting_since ? `ждёт с ${job.waiting_since}` : null,
+        job.operator_resume_requested_at ? "resume requested" : null,
+        job.operator_abort_requested_at ? "abort requested" : null,
+      ].filter(Boolean).join(" · ");
+      row.textContent = `Job ${job.job_id} · ${job.status}${flags ? ` · ${flags}` : ""}. Команда: ${command}`;
+      const controls = document.createElement("div");
+      controls.className = "quick-actions";
+      const refresh = document.createElement("button");
+      refresh.className = "secondary";
+      refresh.type = "button";
+      refresh.textContent = "Обновить";
+      refresh.addEventListener("click", () => refreshPersonalObservation(job.job_id));
+      const resume = document.createElement("button");
+      resume.className = "secondary";
+      resume.type = "button";
+      resume.textContent = "Продолжить";
+      resume.disabled = !waiting || Boolean(job.operator_resume_requested_at || job.operator_abort_requested_at);
+      resume.addEventListener("click", () => controlPersonalObservation(job.job_id, "resume"));
+      const abort = document.createElement("button");
+      abort.className = "secondary";
+      abort.type = "button";
+      abort.textContent = "Отменить";
+      abort.disabled = !waiting || Boolean(job.operator_resume_requested_at || job.operator_abort_requested_at);
+      abort.addEventListener("click", () => controlPersonalObservation(job.job_id, "abort"));
+      controls.append(refresh, resume, abort);
+      liveList.append(row);
+      liveList.append(controls);
+      if (job.operator_instruction) {
+        const hint = document.createElement("div");
+        hint.className = "denial-row small";
+        hint.textContent = job.operator_instruction;
+        liveList.append(hint);
+      }
+    }
+
+    function renderDealCandidates(candidates) {
+      appendSectionHeader(
+        denialsList,
+        "Сделки/форумы",
+        "Кандидаты требуют ручной проверки и не считаются источником истины цены."
+      );
+      candidates.forEach((candidate) => {
+        const row = document.createElement("div");
+        row.className = "denial-row";
+        const details = document.createElement("div");
+        details.className = "small";
+        details.textContent = `${candidate.title}: ${candidate.summary_ru}`;
+        const expiry = document.createElement("div");
+        expiry.className = "small";
+        expiry.textContent = dealCandidateExpiryLabel(candidate);
+        row.append(details);
+        row.append(expiry);
+        appendManualConfirmationActions(row, dealCandidateTarget(candidate));
+        denialsList.append(row);
+      });
+    }
+
+    function choosePersonalObservationSource() {
+      const supported = ["tutu", "yandex_travel", "onetwotrip"];
+      const link = lastExternalLinks.find((item) => supported.includes(item.source_id));
+      return link ? link.source_id : "tutu";
     }
 
     function enabledBrowserSource() {
@@ -1209,7 +2455,7 @@ def render_index_html() -> str:
       try {
         const response = await fetch("/api/v1/agent/chat/turn", {
           method: "POST",
-          headers: demoHeaders({"Content-Type": "application/json"}),
+          headers: authHeaders({"Content-Type": "application/json"}),
           body: JSON.stringify({
             message: prompt,
             passengers: payload.passengers,
@@ -1261,7 +2507,7 @@ def render_index_html() -> str:
       try {
         const response = await fetch("/api/v1/searches", {
           method: "POST",
-          headers: {"Content-Type": "application/json"},
+          headers: authHeaders({"Content-Type": "application/json"}),
           body: JSON.stringify(payload)
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1269,6 +2515,8 @@ def render_index_html() -> str:
         statusLine.textContent = "готово";
       } catch (error) {
         resultsList.replaceChildren();
+        cachedRadarList.replaceChildren();
+        confirmationList.replaceChildren();
         const node = document.createElement("div");
         node.className = "error-state";
         node.textContent = `Ошибка поиска: ${error.message}`;
@@ -1276,6 +2524,43 @@ def render_index_html() -> str:
         statusLine.textContent = "ошибка";
       } finally {
         submitButton.disabled = false;
+      }
+    }
+
+    async function runCachedRadar() {
+      const radarKinds = [
+        "price_range",
+        "grouped_prices",
+        "latest_prices",
+        "month_matrix",
+        "nearest_places_matrix",
+        "popular_directions",
+        "special_offers"
+      ];
+      cachedRadarButton.disabled = true;
+      statusLine.textContent = "cached radar...";
+      try {
+        const results = [];
+        for (const radarKind of radarKinds) {
+          const response = await fetch("/api/v1/searches/cached-radar", {
+            method: "POST",
+            headers: authHeaders({"Content-Type": "application/json"}),
+            body: JSON.stringify(buildCachedRadarPayload(radarKind))
+          });
+          if (!response.ok) throw new Error(await codedMessage(response));
+          results.push(await response.json());
+        }
+        renderCachedRadarResults(results);
+        statusLine.textContent = "cached radar ready";
+      } catch (error) {
+        cachedRadarList.replaceChildren();
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = `Cached radar: ${error.message}`;
+        cachedRadarList.append(row);
+        statusLine.textContent = "cached radar unavailable";
+      } finally {
+        cachedRadarButton.disabled = false;
       }
     }
 
@@ -1295,7 +2580,7 @@ def render_index_html() -> str:
       try {
         const grantResponse = await fetch("/api/v1/live-observation-grants", {
           method: "POST",
-          headers: demoHeaders({"Content-Type": "application/json"}),
+          headers: authHeaders({"Content-Type": "application/json"}),
           body: JSON.stringify({source_id: source.source_id, search_intent: lastSearchPayload})
         });
         if (!grantResponse.ok) throw new Error(`grant HTTP ${grantResponse.status}`);
@@ -1303,7 +2588,7 @@ def render_index_html() -> str:
         const tokenField = "grant" + "_" + "token";
         const createResponse = await fetch("/api/v1/live-observations", {
           method: "POST",
-          headers: demoHeaders({
+          headers: authHeaders({
             "Content-Type": "application/json",
             "Idempotency-Key": `web-${Date.now()}-${Math.random().toString(16).slice(2)}`
           }),
@@ -1317,7 +2602,7 @@ def render_index_html() -> str:
         const created = await createResponse.json();
         const observationResponse = await fetch(
           `/api/v1/live-observations/${created.observation_id}`,
-          {headers: demoHeaders()}
+          {headers: authHeaders()}
         );
         if (!observationResponse.ok) throw new Error(`result HTTP ${observationResponse.status}`);
         renderLiveObservation(await observationResponse.json());
@@ -1332,7 +2617,143 @@ def render_index_html() -> str:
       }
     }
 
+    async function runPersonalObservation() {
+      if (!lastSearchPayload || !lastSearchId) {
+        liveList.replaceChildren();
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = "Personal observer: сначала выполните поиск.";
+        liveList.append(row);
+        return;
+      }
+      const sourceId = choosePersonalObservationSource();
+      personalObserveButton.disabled = true;
+      statusLine.textContent = "browser job...";
+      try {
+        const grantResponse = await fetch("/api/v1/personal-observations/grants", {
+          method: "POST",
+          headers: authHeaders({"Content-Type": "application/json"}),
+          body: JSON.stringify({source_id: sourceId, search_intent: lastSearchPayload})
+        });
+        if (!grantResponse.ok) throw new Error(await codedMessage(grantResponse));
+        const grant = await grantResponse.json();
+        const tokenField = "grant" + "_" + "token";
+        const createResponse = await fetch("/api/v1/personal-observations", {
+          method: "POST",
+          headers: authHeaders({
+            "Content-Type": "application/json",
+            "Idempotency-Key": `personal-${Date.now()}-${Math.random().toString(16).slice(2)}`
+          }),
+          body: JSON.stringify({
+            source_id: sourceId,
+            search_id: lastSearchId,
+            search_intent: lastSearchPayload,
+            [tokenField]: grant[tokenField]
+          })
+        });
+        if (!createResponse.ok) throw new Error(await codedMessage(createResponse));
+        renderPersonalObservationJob(await createResponse.json());
+        statusLine.textContent = "browser job queued";
+      } catch (error) {
+        liveList.replaceChildren();
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = `Personal observer: ${error.message}`;
+        liveList.append(row);
+        statusLine.textContent = "browser job error";
+      } finally {
+        personalObserveButton.disabled = false;
+      }
+    }
+
+    async function refreshPersonalObservation(jobId) {
+      try {
+        const response = await fetch(`/api/v1/personal-observations/${jobId}`, {
+          headers: authHeaders()
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+        renderPersonalObservationJob(await response.json());
+      } catch (error) {
+        statusLine.textContent = `browser status error: ${error.message}`;
+      }
+    }
+
+    async function controlPersonalObservation(jobId, action) {
+      try {
+        const response = await fetch(`/api/v1/personal-observations/${jobId}/${action}`, {
+          method: "POST",
+          headers: authHeaders()
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+        renderPersonalObservationJob(await response.json());
+        statusLine.textContent = `browser checkpoint ${action} requested`;
+      } catch (error) {
+        statusLine.textContent = `browser checkpoint error: ${error.message}`;
+      }
+    }
+
+    async function runDealDiscovery() {
+      if (!lastSearchPayload || !lastSearchId) {
+        denialsList.replaceChildren();
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = "Deal discovery: сначала выполните поиск.";
+        denialsList.append(row);
+        return;
+      }
+      dealDiscoveryButton.disabled = true;
+      statusLine.textContent = "deal discovery...";
+      try {
+        const response = await fetch("/api/v1/deals/discover", {
+          method: "POST",
+          headers: authHeaders({"Content-Type": "application/json"}),
+          body: JSON.stringify({
+            search_id: lastSearchId,
+            search_intent: lastSearchPayload,
+            limit: 5
+          })
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+        const body = await response.json();
+        denialsList.replaceChildren();
+        renderDealCandidates(body.candidates || []);
+        statusLine.textContent = "deal candidates ready";
+      } catch (error) {
+        denialsList.replaceChildren();
+        const row = document.createElement("div");
+        row.className = "denial-row small";
+        row.textContent = `Deal discovery: ${error.message}`;
+        denialsList.append(row);
+        statusLine.textContent = "deal discovery unavailable";
+      } finally {
+        dealDiscoveryButton.disabled = false;
+      }
+    }
+
+    async function codedMessage(response) {
+      try {
+        const body = await response.json();
+        return body.code || body.message || `HTTP ${response.status}`;
+      } catch (error) {
+        return `HTTP ${response.status}`;
+      }
+    }
+
     document.querySelector("#search-form").addEventListener("submit", runSearch);
+    authForm.addEventListener("submit", acceptInvitation);
+    authSignoutButton.addEventListener("click", () => {
+      clearSession();
+      statusLine.textContent = "session cleared";
+      loadWatches();
+      loadAuditEvents();
+    });
+    cachedRadarButton.addEventListener("click", runCachedRadar);
+    personalObserveButton.addEventListener("click", runPersonalObservation);
+    dealDiscoveryButton.addEventListener("click", runDealDiscovery);
+    createWatchButton.addEventListener("click", createWatchFromSearch);
+    refreshWatchesButton.addEventListener("click", loadWatches);
+    refreshAdminHealthButton.addEventListener("click", loadAdminHealth);
+    refreshAuditButton.addEventListener("click", loadAuditEvents);
     document.querySelector("#search-form").addEventListener("input", updatePassengerSummary);
     document.querySelector("#assistant-form").addEventListener("submit", (event) => {
       event.preventDefault();
@@ -1352,8 +2773,97 @@ def render_index_html() -> str:
     renderAgentActions([]);
     loadProviders();
     loadBrowserSources();
+    loadManualConfirmations();
+    loadWatches();
+    loadAdminHealth();
+    loadAuditEvents();
     loadAgentPresets();
+    refreshSessionState();
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("/service-worker.js").catch(() => {});
+      });
+    }
   </script>
 </body>
 </html>
+"""
+
+
+def render_web_manifest() -> dict[str, object]:
+    return {
+        "name": "Flight Hunter",
+        "short_name": "Flight Hunter",
+        "description": "Self-hosted flight search and watch workbench.",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#edf1f4",
+        "theme_color": "#126d7a",
+        "icons": [
+            {
+                "src": "/pwa-icon.svg",
+                "sizes": "any",
+                "type": "image/svg+xml",
+                "purpose": "any maskable",
+            }
+        ],
+    }
+
+
+def render_pwa_icon_svg() -> str:
+    return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="92" fill="#14242c"/>
+  <path d="M104 272h248M256 128l120 144-120 112" fill="none" stroke="#fff"
+    stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M116 356h124" fill="none" stroke="#72d0d8" stroke-width="28"
+    stroke-linecap="round"/>
+</svg>
+"""
+
+
+def render_service_worker_js() -> str:
+    return """const CACHE_NAME = "flight-hunter-shell-v1";
+const SHELL_URLS = ["/", "/manifest.webmanifest", "/pwa-icon.svg"];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then((cache) => cache.addAll(SHELL_URLS))
+      .then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then((keys) => Promise.all(keys
+        .filter((key) => key !== CACHE_NAME)
+        .map((key) => caches.delete(key))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener("fetch", (event) => {
+  const url = new URL(event.request.url);
+  if (
+    event.request.method !== "GET" ||
+    url.origin !== self.location.origin ||
+    url.pathname.startsWith("/api/")
+  ) {
+    return;
+  }
+  if (!SHELL_URLS.includes(url.pathname)) {
+    return;
+  }
+  event.respondWith(
+    fetch(event.request)
+      .then((response) => {
+        const responseCopy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseCopy));
+        return response;
+      })
+      .catch(() => caches.match(event.request))
+  );
+});
 """

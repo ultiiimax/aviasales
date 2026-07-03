@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -205,5 +205,38 @@ def _freshness_summary(
             any(offer.requires_live_confirmation for offer in priced_offers)
             or any(offer.requires_external_confirmation for offer in browser_observed_offers)
             or any(link.requires_external_confirmation for link in external_links)
+        ),
+    )
+
+
+def with_browser_observed_offers(
+    result: SearchResult,
+    browser_observed_offers: tuple[BrowserObservedOffer, ...],
+) -> SearchResult:
+    return with_browser_observed_offers_and_deal_candidates(
+        result,
+        browser_observed_offers=browser_observed_offers,
+        deal_candidates=result.deal_candidates,
+    )
+
+
+def with_browser_observed_offers_and_deal_candidates(
+    result: SearchResult,
+    *,
+    browser_observed_offers: tuple[BrowserObservedOffer, ...],
+    deal_candidates: tuple[DealCandidate, ...],
+) -> SearchResult:
+    warnings = list(result.warnings)
+    if deal_candidates and "deal_candidates_require_manual_verification" not in warnings:
+        warnings.append("deal_candidates_require_manual_verification")
+    return replace(
+        result,
+        browser_observed_offers=browser_observed_offers,
+        deal_candidates=deal_candidates,
+        warnings=tuple(warnings),
+        freshness_summary=_freshness_summary(
+            priced_offers=result.priced_offers,
+            browser_observed_offers=browser_observed_offers,
+            external_links=result.external_links,
         ),
     )

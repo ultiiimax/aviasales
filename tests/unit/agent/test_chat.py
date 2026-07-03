@@ -140,8 +140,23 @@ class RecordingWatchCreator:
             destination=destination,
             departure_date=departure_date,
             return_date=return_date,
+            passengers=1,
+            currency="RUB",
             enabled=True,
+            paused_until=None,
+            next_eligible_at=NOW,
+            scan_interval_seconds=21_600,
+            allowed_provider_ids=(),
+            last_scanned_at=None,
+            last_scan_status=None,
+            last_scan_error_code=None,
             created_at=NOW,
+            updated_at=NOW,
+            version=1,
+            archived_at=None,
+            archived_by_user_id=None,
+            deleted_at=None,
+            deleted_by_user_id=None,
         )
 
 

@@ -4,6 +4,27 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+DEFAULT_CARRIER_LINKS = (
+    "aeroflot",
+    "pobeda",
+    "s7",
+    "ural_airlines",
+    "nordwind",
+    "red_wings",
+    "smartavia",
+    "azimuth",
+    "utair",
+    "rossiya",
+    "turkish_airlines",
+    "air_serbia",
+    "pegasus",
+    "uzbekistan_airways",
+    "emirates",
+    "qatar_airways",
+    "etihad",
+    "flydubai",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class AppSettings:
@@ -14,6 +35,13 @@ class AppSettings:
     aviasales_data_internal_rpm: int
     telegram_enabled: bool
     telegram_webhook_secret: str | None
+    auth_bootstrap_token: str | None = None
+    auth_session_ttl_seconds: int = 2_592_000
+    auth_allow_legacy_headers: bool = True
+    telegram_bot_token: str | None = None
+    telegram_quiet_hours_start: str | None = "23:00"
+    telegram_quiet_hours_end: str | None = "08:00"
+    telegram_watch_check_source_id: str = "tutu"
     live_refresh_min_gap_seconds: int = 600
     agent_mode_enabled: bool = True
     agent_provider: str = "deterministic_presets"
@@ -32,8 +60,17 @@ class AppSettings:
     personal_observer_enabled: bool = False
     personal_observer_headless: bool = False
     personal_observer_profile_root: str = ".local/browser-profiles"
+    personal_observer_artifact_root: str = ".local/browser-artifacts"
     personal_observer_save_dom_fixtures: bool = False
     personal_observer_save_screenshots: bool = False
+    personal_observer_save_runtime_manifests: bool = False
+    personal_observer_profile_lock_timeout_seconds: int = 0
+    personal_observer_profile_lock_stale_seconds: int = 3_600
+    personal_observer_navigation_timeout_ms: int = 45_000
+    personal_observer_ready_selector: str | None = None
+    personal_observer_ready_timeout_ms: int = 15_000
+    personal_observer_wait_for_network_idle: bool = False
+    personal_observer_manual_checkpoint_seconds: int = 0
     personal_observer_max_concurrent: int = 1
     personal_observer_min_gap_seconds: int = 60
     personal_observer_result_ttl_seconds: int = 300
@@ -53,19 +90,30 @@ class AppSettings:
     scrapling_use_spiders: bool = False
     crawl4ai_enabled: bool = False
     crawl4ai_mode: str = "library"
+    crawl4ai_base_url: str = "http://crawl4ai:11235"
+    crawl4ai_api_token: str | None = None
+    crawl4ai_timeout_seconds: int = 30
     crawl4ai_cache_dir: str = ".local/crawl4ai-cache"
     searxng_enabled: bool = False
     searxng_base_url: str = "http://127.0.0.1:8080"
     searxng_format: str = "json"
     searxng_timeout_seconds: int = 15
+    deal_candidate_ttl_seconds: int = 86_400
+    deal_discovery_job_deadline_seconds: int = 600
+    deal_discovery_allowed_hosts: tuple[str, ...] = ()
     ru_aggregators_enabled: tuple[str, ...] = (
         "aviasales_clickout",
         "yandex_travel",
         "tutu",
         "onetwotrip",
     )
-    carrier_links_enabled: tuple[str, ...] = ("aeroflot", "pobeda", "s7")
+    carrier_links_enabled: tuple[str, ...] = DEFAULT_CARRIER_LINKS
     source_internal_rpm: int = 10
+    watch_scan_enabled: bool = True
+    watch_scan_interval_seconds: int = 21_600
+    watch_scan_job_deadline_seconds: int = 300
+    watch_alert_drop_threshold_percent: int = 10
+    watch_alert_cooldown_seconds: int = 21_600
 
     @classmethod
     def from_env(cls) -> AppSettings:
@@ -74,6 +122,12 @@ class AppSettings:
                 "DATABASE_URL",
                 "sqlite+aiosqlite:///./flight_hunter_dev.db",
             ),
+            auth_bootstrap_token=_env_optional("AUTH_BOOTSTRAP_TOKEN"),
+            auth_session_ttl_seconds=_env_int(
+                "AUTH_SESSION_TTL_SECONDS",
+                default=2_592_000,
+            ),
+            auth_allow_legacy_headers=_env_bool("AUTH_ALLOW_LEGACY_HEADERS", default=True),
             live_refresh_min_gap_seconds=_env_int("LIVE_REFRESH_MIN_GAP_SECONDS", default=600),
             agent_mode_enabled=_env_bool("AGENT_MODE_ENABLED", default=True),
             agent_provider=os.getenv("AGENT_PROVIDER", "deterministic_presets"),
@@ -99,6 +153,13 @@ class AppSettings:
             aviasales_data_internal_rpm=_env_int("AVIASALES_DATA_INTERNAL_RPM", default=30),
             telegram_enabled=_env_bool("TELEGRAM_ENABLED", default=False),
             telegram_webhook_secret=_env_optional("TELEGRAM_WEBHOOK_SECRET"),
+            telegram_bot_token=_env_optional("TELEGRAM_BOT_TOKEN"),
+            telegram_quiet_hours_start=_env_optional("TELEGRAM_QUIET_HOURS_START") or "23:00",
+            telegram_quiet_hours_end=_env_optional("TELEGRAM_QUIET_HOURS_END") or "08:00",
+            telegram_watch_check_source_id=os.getenv(
+                "TELEGRAM_WATCH_CHECK_SOURCE_ID",
+                "tutu",
+            ),
             scraping_observer_enabled=_env_bool("SCRAPING_OBSERVER_ENABLED", default=False),
             scraping_min_gap_seconds=_env_int("SCRAPING_MIN_GAP_SECONDS", default=600),
             personal_observer_enabled=_env_bool("PERSONAL_OBSERVER_ENABLED", default=False),
@@ -107,6 +168,10 @@ class AppSettings:
                 "PERSONAL_OBSERVER_PROFILE_ROOT",
                 ".local/browser-profiles",
             ),
+            personal_observer_artifact_root=os.getenv(
+                "PERSONAL_OBSERVER_ARTIFACT_ROOT",
+                ".local/browser-artifacts",
+            ),
             personal_observer_save_dom_fixtures=_env_bool(
                 "PERSONAL_OBSERVER_SAVE_DOM_FIXTURES",
                 default=False,
@@ -114,6 +179,37 @@ class AppSettings:
             personal_observer_save_screenshots=_env_bool(
                 "PERSONAL_OBSERVER_SAVE_SCREENSHOTS",
                 default=False,
+            ),
+            personal_observer_save_runtime_manifests=_env_bool(
+                "PERSONAL_OBSERVER_SAVE_RUNTIME_MANIFESTS",
+                default=False,
+            ),
+            personal_observer_profile_lock_timeout_seconds=max(
+                0,
+                _env_int("PERSONAL_OBSERVER_PROFILE_LOCK_TIMEOUT_SECONDS", default=0),
+            ),
+            personal_observer_profile_lock_stale_seconds=max(
+                0,
+                _env_int("PERSONAL_OBSERVER_PROFILE_LOCK_STALE_SECONDS", default=3_600),
+            ),
+            personal_observer_navigation_timeout_ms=max(
+                1_000,
+                _env_int("PERSONAL_OBSERVER_NAVIGATION_TIMEOUT_MS", default=45_000),
+            ),
+            personal_observer_ready_selector=_env_optional(
+                "PERSONAL_OBSERVER_READY_SELECTOR",
+            ),
+            personal_observer_ready_timeout_ms=max(
+                1_000,
+                _env_int("PERSONAL_OBSERVER_READY_TIMEOUT_MS", default=15_000),
+            ),
+            personal_observer_wait_for_network_idle=_env_bool(
+                "PERSONAL_OBSERVER_WAIT_FOR_NETWORK_IDLE",
+                default=False,
+            ),
+            personal_observer_manual_checkpoint_seconds=max(
+                0,
+                _env_int("PERSONAL_OBSERVER_MANUAL_CHECKPOINT_SECONDS", default=0),
             ),
             personal_observer_max_concurrent=_env_int(
                 "PERSONAL_OBSERVER_MAX_CONCURRENT",
@@ -155,20 +251,49 @@ class AppSettings:
             scrapling_use_spiders=_env_bool("SCRAPLING_USE_SPIDERS", default=False),
             crawl4ai_enabled=_env_bool("CRAWL4AI_ENABLED", default=False),
             crawl4ai_mode=os.getenv("CRAWL4AI_MODE", "library"),
+            crawl4ai_base_url=os.getenv("CRAWL4AI_BASE_URL", "http://crawl4ai:11235"),
+            crawl4ai_api_token=_env_optional("CRAWL4AI_API_TOKEN"),
+            crawl4ai_timeout_seconds=_env_int("CRAWL4AI_TIMEOUT_SECONDS", default=30),
             crawl4ai_cache_dir=os.getenv("CRAWL4AI_CACHE_DIR", ".local/crawl4ai-cache"),
             searxng_enabled=_env_bool("SEARXNG_ENABLED", default=False),
             searxng_base_url=os.getenv("SEARXNG_BASE_URL", "http://127.0.0.1:8080"),
             searxng_format=os.getenv("SEARXNG_FORMAT", "json"),
             searxng_timeout_seconds=_env_int("SEARXNG_TIMEOUT_SECONDS", default=15),
+            deal_candidate_ttl_seconds=_env_int("DEAL_CANDIDATE_TTL_SECONDS", default=86_400),
+            deal_discovery_job_deadline_seconds=_env_int(
+                "DEAL_DISCOVERY_JOB_DEADLINE_SECONDS",
+                default=600,
+            ),
+            deal_discovery_allowed_hosts=_env_csv(
+                "DEAL_DISCOVERY_ALLOWED_HOSTS",
+                default=(),
+            ),
             ru_aggregators_enabled=_env_csv(
                 "RU_AGGREGATORS_ENABLED",
                 default=("aviasales_clickout", "yandex_travel", "tutu", "onetwotrip"),
             ),
             carrier_links_enabled=_env_csv(
                 "CARRIER_LINKS_ENABLED",
-                default=("aeroflot", "pobeda", "s7"),
+                default=DEFAULT_CARRIER_LINKS,
             ),
             source_internal_rpm=_env_int("SOURCE_INTERNAL_RPM", default=10),
+            watch_scan_enabled=_env_bool("WATCH_SCAN_ENABLED", default=True),
+            watch_scan_interval_seconds=_env_int(
+                "WATCH_SCAN_INTERVAL_SECONDS",
+                default=21_600,
+            ),
+            watch_scan_job_deadline_seconds=_env_int(
+                "WATCH_SCAN_JOB_DEADLINE_SECONDS",
+                default=300,
+            ),
+            watch_alert_drop_threshold_percent=_env_int(
+                "WATCH_ALERT_DROP_THRESHOLD_PERCENT",
+                default=10,
+            ),
+            watch_alert_cooldown_seconds=_env_int(
+                "WATCH_ALERT_COOLDOWN_SECONDS",
+                default=21_600,
+            ),
         )
 
     @property

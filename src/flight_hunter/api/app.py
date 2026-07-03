@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import hmac
+import json
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from time import perf_counter
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -21,7 +27,12 @@ from flight_hunter.agent.chat import (
 )
 from flight_hunter.agent.openai_responses import OpenAIResponsesAgentAdapter
 from flight_hunter.agent.presets import AgentPlan, AgentPlanBuilder, AgentPlanStep, AgentPreset
-from flight_hunter.api.web import render_index_html
+from flight_hunter.api.web import (
+    render_index_html,
+    render_pwa_icon_svg,
+    render_service_worker_js,
+    render_web_manifest,
+)
 from flight_hunter.application.airport_service import (
     AirportAutocompleteMatch,
     AirportService,
@@ -35,15 +46,62 @@ from flight_hunter.application.date_matrix import (
 )
 from flight_hunter.application.durable_live_observations import DurableLiveObservationService
 from flight_hunter.application.live_observations import BrowserSourceCatalog, GrantSource
+from flight_hunter.application.personal_observations import PersonalObservationService
 from flight_hunter.application.price_sources import PriceSource, PriceSourceCatalog
 from flight_hunter.application.provider_registry import ProviderRegistry, ProviderStatus
-from flight_hunter.application.search_service import DemoSearchService, SearchRequest, SearchResult
+from flight_hunter.application.search_service import (
+    DemoSearchService,
+    SearchRequest,
+    SearchResult,
+    with_browser_observed_offers_and_deal_candidates,
+)
 from flight_hunter.application.source_contracts import SourceContractCatalog, SourceReadiness
-from flight_hunter.application.watch_service import CreateWatchCommand, WatchService
+from flight_hunter.application.source_health import (
+    SourceHealthEventView,
+    SourceHealthItem,
+    SourceHealthService,
+)
+from flight_hunter.application.telegram_notifications import (
+    TelegramLinkService,
+    TelegramWatchCommandService,
+)
+from flight_hunter.application.watch_service import (
+    CreateWatchCommand,
+    UpdateWatchCommand,
+    WatchLifecycleCommand,
+    WatchService,
+)
+from flight_hunter.application.worker_health import (
+    WorkerControlService,
+    WorkerControlState,
+    WorkerHealthAlert,
+    WorkerHealthItem,
+    WorkerHealthService,
+    WorkerQueueHealthItem,
+    render_worker_health_prometheus,
+)
+from flight_hunter.browser.html_extractor import (
+    BrowserOfferParserPipeline,
+    DomSnapshot,
+    PriceCandidate,
+)
 from flight_hunter.config import AppSettings, load_env_file
+from flight_hunter.deals import DealDiscoveryService
+from flight_hunter.deals.aviasales_data_seeds import (
+    aviasales_cached_deal_seed_id,
+    build_aviasales_cached_deal_seeds,
+)
+from flight_hunter.deals.crawl4ai_client import Crawl4AiClientError, Crawl4AiMarkdownClient
+from flight_hunter.deals.searxng_client import SearxngClient, SearxngClientError
+from flight_hunter.deals.url_policy import DealUrlPolicy, DealUrlPolicyError
+from flight_hunter.domain.auth import AuthSession, HouseholdRole, new_secret_token, token_hash
+from flight_hunter.domain.manual_confirmation import (
+    ManualConfirmationStatus,
+    ManualPriceConfirmation,
+)
 from flight_hunter.domain.money import Money
-from flight_hunter.domain.observation import BrowserSource, LiveObservation
-from flight_hunter.domain.offers import FlightOffer, SearchIntent
+from flight_hunter.domain.observation import BrowserSource, LiveObservation, ObservationStatus
+from flight_hunter.domain.offers import FlightOffer, PriceBasis, SearchIntent
 from flight_hunter.domain.policy import ExecutionContext
 from flight_hunter.domain.ranking import offer_ranking_key
 from flight_hunter.domain.search_results import (
@@ -52,30 +110,137 @@ from flight_hunter.domain.search_results import (
     DealCandidate,
     ExternalSearchLink,
     FreshnessSummary,
+    ResultKind,
 )
 from flight_hunter.geo.demo_repository import DemoAirportRepository
+from flight_hunter.itinerary_engine.risk import OfferRiskAssessment, assess_offer_risk
 from flight_hunter.notifications.telegram import (
     TelegramWebhookDecisionCode,
     TelegramWebhookHandler,
 )
+from flight_hunter.ops.application_metrics import render_application_metrics
+from flight_hunter.ops.structured_logging import log_event
 from flight_hunter.persistence.repositories import (
     AgentAuditRepository,
     AirportReferenceRepository,
     AirportSearchMatch,
+    AuditEventRecord,
+    AuditEventRepository,
+    BrowserObservationJobRecord,
+    BrowserObservationJobRepository,
+    BrowserObservedOfferRepository,
+    DealCandidateRepository,
+    DealDiscoveryJobRecord,
+    DealDiscoveryJobRepository,
     HouseholdWatchRepository,
+    IdentityRepository,
     LiveObservationRepository,
+    ManualPriceConfirmationRepository,
     NewAgentAuditEvent,
+    NewAuditEvent,
+    NewDealCandidate,
+    NewDealDiscoveryJob,
+    NewSourceHealthEvent,
+    PriceSnapshotRecord,
+    PriceSnapshotRepository,
+    SourceHealthEventRepository,
+    TelegramLinkRepository,
+    TelegramNotificationOutboxRepository,
     TelegramUpdateRepository,
+    WatchMutationResult,
     WatchRecord,
+    WorkerControlRepository,
+    WorkerHeartbeatRepository,
+    WorkerQueueHealthRepository,
 )
 from flight_hunter.providers.aviasales_data.adapter import AviasalesDataAdapter
-from flight_hunter.providers.aviasales_data.client import AviasalesDataClient
+from flight_hunter.providers.aviasales_data.client import AviasalesDataClient, AviasalesDataError
+from flight_hunter.providers.personal_observer import (
+    PersonalObserverConfig,
+    PersonalObserverRunner,
+    PersonalObserverRunnerAdapter,
+    crawl4ai_browser_markdown_provider_from_settings,
+)
+from flight_hunter.providers.ru_clickout import RuClickoutLinkBuilder, default_ru_aggregator_specs
+from flight_hunter.providers.ru_clickout.source_specs import RuAggregatorSpec
+
+_RESULT_KIND_PATTERN = "^(" + "|".join(kind.value for kind in ResultKind) + ")$"
+_MANUAL_CONFIRMATION_STATUS_PATTERN = (
+    "^(" + "|".join(status.value for status in ManualConfirmationStatus) + ")$"
+)
+_PRIVACY_EXPORT_LIMITS = {
+    "watches": 500,
+    "audit_events": 500,
+    "manual_price_confirmations": 500,
+    "browser_observed_offers": 500,
+    "deal_candidates": 500,
+}
+_PRIVACY_EXPORT_OMITTED_FIELDS = (
+    "provider_secrets",
+    "raw_payloads",
+    "raw_ref",
+    "idempotency_keys",
+    "session_tokens",
+    "telegram_payload_json",
+    "worker_queue_payloads",
+)
+_ACCOUNT_DEACTIVATION_RETAINED_RECORDS = (
+    "audit_events",
+    "price_history",
+    "manual_confirmations",
+    "browser_observations",
+    "deal_candidates",
+)
 
 
 class HealthResponse(BaseModel):
     app: str
     status: str
     external_credentials_required: bool
+
+
+class BootstrapInvitationRequestBody(BaseModel):
+    household_name: str = Field(min_length=1, max_length=160)
+    recipient_label: str | None = Field(default=None, max_length=160)
+    ttl_hours: int = Field(default=168, ge=1, le=720)
+
+
+class BootstrapInvitationResponse(BaseModel):
+    invitation_id: str
+    household_id: str
+    invitation_code: str
+    expires_at: str
+
+
+class AcceptInvitationRequestBody(BaseModel):
+    invitation_code: str = Field(min_length=16, max_length=200)
+    display_name: str = Field(min_length=1, max_length=160)
+
+
+class AuthSessionResponse(BaseModel):
+    session_token: str
+    household_id: str
+    user_id: str
+    role: str
+    expires_at: str
+
+
+class AuthMeResponse(BaseModel):
+    household_id: str
+    user_id: str
+    role: str
+    expires_at: str
+
+
+class AccountDeactivationResponse(BaseModel):
+    status: str
+    household_id: str
+    user_id: str
+    sessions_revoked: int
+    membership_disabled: bool
+    telegram_account_revoked: bool
+    owned_watches_deleted: int
+    retained_records: list[str]
 
 
 class ProviderStatusResponse(BaseModel):
@@ -111,6 +276,112 @@ class AdminProviderHealthResponse(BaseModel):
     providers: list[AdminProviderHealthItemResponse]
 
 
+class AdminSourceHealthEventResponse(BaseModel):
+    id: str
+    event_type: str
+    status: str
+    message: str
+    observed_at: str
+    cooldown_until: str | None
+
+
+class AdminSourceHealthItemResponse(BaseModel):
+    source_id: str
+    display_name: str
+    contract_known: bool
+    stage: str | None
+    enabled: bool
+    data_kind: str | None
+    merge_scope: str | None
+    background_requests_allowed: bool | None
+    user_action_required: bool | None
+    blocked_reasons: list[str]
+    current_status: str
+    latest_event: AdminSourceHealthEventResponse | None
+
+
+class AdminSourceHealthResponse(BaseModel):
+    checked_at: str
+    sources_limit: int
+    sources_offset: int
+    event_limit: int
+    sources: list[AdminSourceHealthItemResponse]
+
+
+class AdminWorkerHealthItemResponse(BaseModel):
+    worker_id: str
+    role: str
+    status: str
+    effective_status: str
+    current_phase: str
+    current_job_kind: str | None
+    current_job_id: str | None
+    started_at: str
+    last_seen_at: str
+    stopping_at: str | None
+    stopped_at: str | None
+    last_summary: dict[str, object]
+
+
+class AdminWorkerControlResponse(BaseModel):
+    drain_requested: bool
+    reason: str | None
+    requested_at: str | None
+    cleared_at: str | None
+    updated_at: str | None
+
+
+class AdminWorkerQueueHealthResponse(BaseModel):
+    lane: str
+    status_counts: dict[str, int]
+    due_count: int
+    delayed_count: int
+    stale_count: int
+    expired_count: int
+    oldest_queued_age_seconds: int | None
+    oldest_locked_age_seconds: int | None
+    warning_level: str
+
+
+class AdminWorkerHealthAlertResponse(BaseModel):
+    severity: str
+    code: str
+    subject_kind: str
+    subject_id: str
+    message: str
+
+
+class AdminWorkerHealthResponse(BaseModel):
+    checked_at: str
+    workers_limit: int
+    workers_offset: int
+    control: AdminWorkerControlResponse
+    workers: list[AdminWorkerHealthItemResponse]
+    queues: list[AdminWorkerQueueHealthResponse]
+    alerts: list[AdminWorkerHealthAlertResponse]
+
+
+class AdminWorkerControlUpdateRequest(BaseModel):
+    drain_requested: bool
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class AdminAuditEventResponse(BaseModel):
+    id: str
+    actor_user_id: str | None
+    action: str
+    entity_type: str
+    entity_id: str
+    summary: str
+    created_at: str
+
+
+class AdminAuditEventsResponse(BaseModel):
+    limit: int
+    offset: int
+    audit_events: list[AdminAuditEventResponse]
+
+
 class PriceSourceResponse(BaseModel):
     id: str
     name: str
@@ -139,6 +410,7 @@ class SourceContractResponse(BaseModel):
     required_env: list[str]
     operations: list[str]
     invariants: list[str]
+    egress_policy: list[str]
     notes: str
     enabled: bool
     credentials_present: bool
@@ -307,6 +579,12 @@ class MoneyResponse(BaseModel):
     formatted: str
 
 
+class OfferRiskResponse(BaseModel):
+    level: str
+    flags: list[str]
+    explanations: list[str]
+
+
 class OfferResponse(BaseModel):
     provider_id: str
     provider_offer_id: str
@@ -316,11 +594,13 @@ class OfferResponse(BaseModel):
     return_date: str | None
     total_price: MoneyResponse
     passengers: int
+    price_basis: str
     observed_at: str
     freshness: str
     requires_live_confirmation: bool
     baggage_summary: str | None
     ranking_reasons: list[str]
+    risk: OfferRiskResponse
 
 
 class ExternalSearchLinkResponse(BaseModel):
@@ -376,6 +656,32 @@ class BrowserObservedOfferResponse(BaseModel):
     requires_external_confirmation: bool
 
 
+class BrowserParserTestRequestBody(BaseModel):
+    search_intent: SearchRequestBody
+    html: str = Field(min_length=1, max_length=500_000)
+    final_url: str | None = Field(default=None, max_length=2048)
+    title: str | None = Field(default=None, max_length=200)
+
+
+class BrowserParserPriceCandidateResponse(BaseModel):
+    raw_text: str
+    amount: MoneyResponse
+    accepted: bool
+    rejection_reason: str | None
+
+
+class BrowserParserTestResponse(BaseModel):
+    source_id: str
+    final_url: str
+    captured_at: str
+    html_hash: str
+    visible_text_hash: str
+    confidence: str
+    warnings: list[str]
+    offers: list[BrowserObservedOfferResponse]
+    raw_price_candidates: list[BrowserParserPriceCandidateResponse]
+
+
 class DealCandidateResponse(BaseModel):
     kind: str
     source_id: str
@@ -388,7 +694,126 @@ class DealCandidateResponse(BaseModel):
     extracted_date_window: str | None
     confidence: str
     discovered_at: str
+    expires_at: str | None
     requires_manual_verification: bool
+
+
+class ManualPriceConfirmationRequestBody(BaseModel):
+    target_kind: str = Field(pattern=_RESULT_KIND_PATTERN)
+    target_id: str = Field(min_length=1, max_length=160)
+    source_id: str = Field(min_length=1, max_length=80)
+    status: str = Field(pattern=_MANUAL_CONFIRMATION_STATUS_PATTERN)
+    amount_minor: int | None = Field(default=None, ge=0)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    note: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_price_pair(self) -> ManualPriceConfirmationRequestBody:
+        amount_present = self.amount_minor is not None
+        currency_present = self.currency is not None
+        if amount_present != currency_present:
+            raise ValueError("amount_minor and currency must be provided together")
+        return self
+
+
+class ManualPriceConfirmationResponse(BaseModel):
+    id: str
+    household_id: str
+    user_id: str
+    target_kind: str
+    target_id: str
+    source_id: str
+    status: str
+    confirmed_at: str
+    confirmed_price: MoneyResponse | None
+    note: str | None
+
+
+class ManualPriceConfirmationsResponse(BaseModel):
+    confirmations: list[ManualPriceConfirmationResponse]
+
+
+class PrivacyWatchResponse(BaseModel):
+    id: str
+    household_id: str
+    owner_user_id: str
+    origin: str
+    destination: str
+    departure_date: str
+    return_date: str | None
+    passengers: int
+    currency: str
+    allowed_provider_ids: list[str]
+    enabled: bool
+    paused_until: str | None
+    next_eligible_at: str | None
+    scan_interval_seconds: int
+    last_scanned_at: str | None
+    last_scan_status: str | None
+    last_scan_error_code: str | None
+    created_at: str
+    updated_at: str
+    version: int
+    archived_at: str | None
+    archived_by_user_id: str | None
+    deleted_at: str | None
+    deleted_by_user_id: str | None
+
+
+class PrivacyExportResponse(BaseModel):
+    format_version: int
+    exported_at: str
+    household_id: str
+    user_id: str
+    collection_limits: dict[str, int]
+    truncated: dict[str, bool]
+    omitted_fields: list[str]
+    watches: list[PrivacyWatchResponse]
+    audit_events: list[AdminAuditEventResponse]
+    manual_price_confirmations: list[ManualPriceConfirmationResponse]
+    browser_observed_offers: list[BrowserObservedOfferResponse]
+    deal_candidates: list[DealCandidateResponse]
+
+
+class DealDiscoveryRequestBody(BaseModel):
+    search_intent: SearchRequestBody
+    limit: int = Field(default=5, ge=1, le=10)
+    search_id: str | None = None
+
+
+class DealDiscoveryResponse(BaseModel):
+    candidates: list[DealCandidateResponse]
+    warnings: list[str]
+
+
+class DealDiscoveryJobRequestBody(BaseModel):
+    search_id: str = Field(min_length=1, max_length=160)
+    search_intent: SearchRequestBody
+    limit: int = Field(default=5, ge=1, le=10)
+
+
+class DealDiscoveryJobCreateResponse(BaseModel):
+    job_id: str
+    search_id: str
+    status: str
+    idempotent_replay: bool
+
+
+class DealDiscoveryJobResponse(BaseModel):
+    job_id: str
+    search_id: str
+    status: str
+    attempts: int
+    max_attempts: int
+    created_at: str
+    started_at: str | None
+    completed_at: str | None
+    next_retry_at: str | None
+    deadline_at: str
+    result_count: int
+    error_code: str | None
+    error_message: str | None
+    candidates: list[DealCandidateResponse]
 
 
 class FreshnessSummaryResponse(BaseModel):
@@ -448,6 +873,76 @@ class LiveObservationResponse(BaseModel):
     error_message: str | None
 
 
+class PersonalObservationGrantRequestBody(BaseModel):
+    source_id: str
+    search_intent: SearchRequestBody
+
+
+class PersonalObservationGrantResponse(BaseModel):
+    source_id: str
+    grant_token: str
+    expires_at: str
+
+
+class PersonalObservationCreateRequestBody(BaseModel):
+    source_id: str
+    search_id: str
+    search_intent: SearchRequestBody
+    grant_token: str
+
+
+class PersonalObservationCreateResponse(BaseModel):
+    job_id: str
+    status: str
+    idempotent_replay: bool
+
+
+class PersonalObservationResponse(BaseModel):
+    job_id: str
+    source_id: str
+    search_id: str
+    status: str
+    attempts: int
+    created_at: str
+    started_at: str | None
+    waiting_since: str | None
+    operator_resume_requested_at: str | None
+    operator_abort_requested_at: str | None
+    completed_at: str | None
+    next_retry_at: str | None
+    expires_at: str
+    operator_instruction: str | None
+    error_code: str | None
+    error_message: str | None
+    browser_observed_offers: list[BrowserObservedOfferResponse]
+
+
+class PersonalObservationConfirmRequestBody(BaseModel):
+    status: str = Field(
+        default=ManualConfirmationStatus.CONFIRMED.value,
+        pattern="^(confirmed|price_changed|sold_out|bought)$",
+    )
+    amount_minor: int | None = Field(default=None, ge=0)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    note: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_price_pair(self) -> PersonalObservationConfirmRequestBody:
+        amount_present = self.amount_minor is not None
+        currency_present = self.currency is not None
+        if amount_present != currency_present:
+            raise ValueError("amount_minor and currency must be provided together")
+        return self
+
+
+class PersonalObservationMarkStaleRequestBody(BaseModel):
+    status: str = Field(
+        default=ManualConfirmationStatus.PRICE_CHANGED.value,
+        pattern="^(price_changed|sold_out|wrong_route)$",
+    )
+    note: str | None = Field(default=None, max_length=500)
+
+
 class AirportAutocompleteItemResponse(BaseModel):
     iata_code: str
     name: str
@@ -485,23 +980,92 @@ class NearbyAirportsResponse(BaseModel):
 
 
 class DateMatrixRequestBody(BaseModel):
+    origin: str | None = Field(default=None, min_length=3, max_length=3)
+    destination: str | None = Field(default=None, min_length=3, max_length=3)
     departure_date: date
     return_date: date | None = None
     flexibility_days: int = Field(ge=0, le=7)
     min_stay_days: int | None = Field(default=None, ge=0)
     max_stay_days: int | None = Field(default=None, ge=0)
+    passengers: int = Field(default=1, ge=1)
+    adults: int | None = Field(default=None, ge=1)
+    children: int = Field(default=0, ge=0)
+    infants: int = Field(default=0, ge=0)
+    currency: str = Field(default="RUB", min_length=3, max_length=3)
+    provider_ids: list[str] | None = None
 
 
 class DateMatrixCellResponse(BaseModel):
     departure_date: str
     return_date: str | None
     stay_days: int | None
+    amount_minor: int | None = None
+    currency: str | None = None
+    provider_id: str | None = None
+    freshness: str | None = None
+    observed_at: str | None = None
+    requires_live_confirmation: bool | None = None
 
 
 class DateMatrixResponse(BaseModel):
     cells: list[DateMatrixCellResponse]
     provider_calls_required: int
     priced: bool
+    pricing_denials: list[str] = Field(default_factory=list)
+
+
+class CachedRadarRequestBody(BaseModel):
+    radar_kind: str = Field(
+        pattern=(
+            "^(month_matrix|nearest_places_matrix|price_range|grouped_prices|"
+            "latest_prices|popular_directions|special_offers)$"
+        )
+    )
+    origin: str = Field(min_length=3, max_length=3)
+    destination: str = Field(min_length=3, max_length=3)
+    departure_date: date
+    return_date: date | None = None
+    passengers: int = Field(default=1, ge=1)
+    adults: int | None = Field(default=None, ge=1)
+    children: int = Field(default=0, ge=0)
+    infants: int = Field(default=0, ge=0)
+    currency: str = Field(default="RUB", min_length=3, max_length=3)
+    provider_ids: list[str] | None = None
+    nearby_distance_km: int = Field(default=300, ge=1, le=1000)
+    min_price_minor: int | None = Field(default=None, ge=0)
+    max_price_minor: int | None = Field(default=None, ge=0)
+    search_id: str | None = Field(default=None, min_length=1, max_length=160)
+    save_deal_candidates: bool = False
+
+    @model_validator(mode="after")
+    def validate_passenger_mix_and_price_range(self) -> CachedRadarRequestBody:
+        adults = self.adults if self.adults is not None else self.passengers
+        if adults + self.children + self.infants != self.passengers:
+            raise ValueError("passengers must match adults + children + infants")
+        price_range_fields = (self.min_price_minor, self.max_price_minor)
+        if self.radar_kind == "price_range":
+            if self.min_price_minor is None or self.max_price_minor is None:
+                raise ValueError("price_range requires min_price_minor and max_price_minor")
+            if self.max_price_minor < self.min_price_minor:
+                raise ValueError("max_price_minor must be greater than or equal to min_price_minor")
+            if self.min_price_minor % 100 != 0 or self.max_price_minor % 100 != 0:
+                raise ValueError("price_range values must be whole major currency units")
+        elif any(value is not None for value in price_range_fields):
+            raise ValueError("price range fields are only allowed for price_range radar")
+        if self.save_deal_candidates and self.search_id is None:
+            raise ValueError("save_deal_candidates requires search_id")
+        return self
+
+
+class CachedRadarResponse(BaseModel):
+    radar_kind: str
+    offers: list[OfferResponse]
+    deal_candidates: list[DealCandidateResponse] = Field(default_factory=list)
+    deal_candidates_saved: int = 0
+    provider_calls_required: int
+    priced: bool
+    pricing_denials: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TelegramWebhookResponse(BaseModel):
@@ -509,11 +1073,41 @@ class TelegramWebhookResponse(BaseModel):
     status: str
 
 
+class TelegramLinkCodeResponse(BaseModel):
+    code: str
+    expires_at: str
+
+
 class WatchCreateRequestBody(BaseModel):
     origin: str = Field(min_length=3, max_length=3)
     destination: str = Field(min_length=3, max_length=3)
     departure_date: str
     return_date: str | None = None
+    passengers: int = Field(default=1, ge=1)
+    currency: str = Field(default="RUB", min_length=3, max_length=3)
+    allowed_provider_ids: list[str] = Field(default_factory=list)
+
+
+class WatchUpdateRequestBody(BaseModel):
+    expected_version: int = Field(ge=1)
+    origin: str | None = Field(default=None, min_length=3, max_length=3)
+    destination: str | None = Field(default=None, min_length=3, max_length=3)
+    departure_date: str | None = None
+    return_date: str | None = None
+    passengers: int | None = Field(default=None, ge=1)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    allowed_provider_ids: list[str] | None = None
+    enabled: bool | None = None
+    paused_until: datetime | None = None
+    scan_interval_seconds: int | None = Field(default=None, ge=300)
+
+
+class WatchPauseRequestBody(BaseModel):
+    paused_until: datetime | None = None
+
+
+class WatchVersionRequestBody(BaseModel):
+    expected_version: int = Field(ge=1)
 
 
 class WatchResponse(BaseModel):
@@ -524,12 +1118,46 @@ class WatchResponse(BaseModel):
     destination: str
     departure_date: str
     return_date: str | None
+    passengers: int
+    currency: str
+    allowed_provider_ids: list[str]
     enabled: bool
+    paused_until: str | None
+    next_eligible_at: str | None
+    scan_interval_seconds: int
+    last_scanned_at: str | None
+    last_scan_status: str | None
+    last_scan_error_code: str | None
     created_at: str
+    updated_at: str
+    version: int
+    archived_at: str | None
+    deleted_at: str | None
+
+
+class WatchLifecycleResponse(BaseModel):
+    watch_id: str
+    status: str
+    version: int
 
 
 class WatchesResponse(BaseModel):
     watches: list[WatchResponse]
+
+
+class WatchPriceSnapshotResponse(BaseModel):
+    provider_id: str
+    itinerary_fingerprint: str
+    observed_at: str
+    amount_minor: int
+    currency: str
+    freshness: str
+    requires_live_confirmation: bool
+
+
+class WatchHistoryResponse(BaseModel):
+    watch_id: str
+    snapshots: list[WatchPriceSnapshotResponse]
 
 
 def create_app(
@@ -537,12 +1165,16 @@ def create_app(
     watch_session_factory: async_sessionmaker[AsyncSession] | None = None,
     settings: AppSettings | None = None,
     agent_intent_adapter: AgentIntentAdapter | None = None,
+    deal_discovery_service: DealDiscoveryService | None = None,
+    provider_instances: dict[str, AviasalesDataAdapter] | None = None,
 ) -> FastAPI:
     load_env_file()
     settings = settings or AppSettings.from_env()
     app = FastAPI(title="Flight Hunter", version="0.1.0")
     registry = ProviderRegistry.default(clock=lambda: datetime.now(UTC), settings=settings)
-    provider_instances = _provider_instances(settings)
+    provider_instances = (
+        provider_instances if provider_instances is not None else _provider_instances(settings)
+    )
     search_service = DemoSearchService(
         registry=registry,
         clock=lambda: datetime.now(UTC),
@@ -569,12 +1201,333 @@ def create_app(
     def index() -> HTMLResponse:
         return HTMLResponse(render_index_html())
 
+    @app.get("/manifest.webmanifest", response_class=JSONResponse)
+    def web_manifest() -> JSONResponse:
+        return JSONResponse(
+            render_web_manifest(),
+            media_type="application/manifest+json",
+        )
+
+    @app.get("/pwa-icon.svg", response_class=PlainTextResponse)
+    def pwa_icon() -> PlainTextResponse:
+        return PlainTextResponse(
+            render_pwa_icon_svg(),
+            media_type="image/svg+xml",
+        )
+
+    @app.get("/service-worker.js", response_class=PlainTextResponse)
+    def service_worker() -> PlainTextResponse:
+        return PlainTextResponse(
+            render_service_worker_js(),
+            media_type="application/javascript",
+        )
+
     @app.get("/healthz", response_model=HealthResponse)
     def healthz() -> HealthResponse:
         return HealthResponse(
             app="Flight Hunter",
             status="ok",
             external_credentials_required=False,
+        )
+
+    @app.get("/api/v1/metrics", response_class=PlainTextResponse)
+    def application_metrics() -> PlainTextResponse:
+        return PlainTextResponse(
+            render_application_metrics(),
+            media_type="text/plain; version=0.0.4",
+        )
+
+    @app.post(
+        "/api/v1/auth/bootstrap-invitation",
+        response_model=BootstrapInvitationResponse,
+        status_code=201,
+    )
+    async def bootstrap_invitation(
+        body: BootstrapInvitationRequestBody,
+        bootstrap_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Bootstrap-Token",
+        ),
+    ) -> BootstrapInvitationResponse | JSONResponse:
+        if settings.auth_bootstrap_token is None:
+            return _coded_error_response(
+                status_code=403,
+                code="auth_bootstrap_disabled",
+                message="bootstrap invitation creation is disabled",
+            )
+        if bootstrap_header is None or not hmac.compare_digest(
+            bootstrap_header,
+            settings.auth_bootstrap_token,
+        ):
+            return _coded_error_response(
+                status_code=403,
+                code="auth_bootstrap_denied",
+                message="bootstrap token is invalid",
+            )
+        now = datetime.now(UTC)
+        household_id = uuid4()
+        invitation_id = uuid4()
+        invitation_code = new_secret_token()
+        expires_at = now + timedelta(hours=body.ttl_hours)
+        async with session_factory() as session:
+            repository = IdentityRepository(session)
+            await repository.add_household(
+                household_id=household_id,
+                name=body.household_name.strip(),
+                created_at=now,
+            )
+            await repository.add_invitation(
+                invitation_id=invitation_id,
+                household_id=household_id,
+                role=HouseholdRole.OWNER,
+                code_hash=token_hash(invitation_code),
+                recipient_label=body.recipient_label.strip()
+                if body.recipient_label is not None
+                else None,
+                created_at=now,
+                expires_at=expires_at,
+            )
+            await session.commit()
+        return BootstrapInvitationResponse(
+            invitation_id=str(invitation_id),
+            household_id=str(household_id),
+            invitation_code=invitation_code,
+            expires_at=expires_at.isoformat(),
+        )
+
+    @app.post(
+        "/api/v1/auth/accept-invitation",
+        response_model=AuthSessionResponse,
+        status_code=201,
+    )
+    async def accept_invitation(
+        body: AcceptInvitationRequestBody,
+    ) -> AuthSessionResponse | JSONResponse:
+        now = datetime.now(UTC)
+        user_id = uuid4()
+        session_id = uuid4()
+        session_token = new_secret_token()
+        session_expires_at = now + timedelta(
+            seconds=max(settings.auth_session_ttl_seconds, 60),
+        )
+        async with session_factory() as session:
+            repository = IdentityRepository(session)
+            invitation = await repository.invitation_by_code_hash(token_hash(body.invitation_code))
+            if (
+                invitation is None
+                or invitation.expires_at <= now
+                or invitation.accepted_at is not None
+                or invitation.revoked_at is not None
+            ):
+                return _coded_error_response(
+                    status_code=403,
+                    code="invitation_invalid",
+                    message="invitation is invalid or expired",
+                )
+            await repository.add_user(
+                user_id=user_id,
+                display_name=body.display_name.strip(),
+                created_at=now,
+            )
+            await repository.add_membership(
+                household_id=invitation.household_id,
+                user_id=user_id,
+                role=invitation.role,
+                created_at=now,
+            )
+            accepted = await repository.mark_invitation_accepted(
+                invitation_id=invitation.id,
+                accepted_by_user_id=user_id,
+                accepted_at=now,
+            )
+            if not accepted:
+                return _coded_error_response(
+                    status_code=403,
+                    code="invitation_invalid",
+                    message="invitation is invalid or expired",
+                )
+            await repository.add_session(
+                session_id=session_id,
+                household_id=invitation.household_id,
+                user_id=user_id,
+                token_hash=token_hash(session_token),
+                created_at=now,
+                expires_at=session_expires_at,
+            )
+            await session.commit()
+        return AuthSessionResponse(
+            session_token=session_token,
+            household_id=str(invitation.household_id),
+            user_id=str(user_id),
+            role=invitation.role.value,
+            expires_at=session_expires_at.isoformat(),
+        )
+
+    @app.get("/api/v1/auth/me", response_model=AuthMeResponse)
+    async def auth_me(
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+    ) -> AuthMeResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_session = await _auth_session_from_authorization(
+                session,
+                authorization_header,
+            )
+        if auth_session is None:
+            return _auth_context_missing_response()
+        return _auth_me_response(auth_session)
+
+    @app.delete("/api/v1/account", response_model=AccountDeactivationResponse)
+    async def delete_account(
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+    ) -> AccountDeactivationResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_session = await _auth_session_from_authorization(session, authorization_header)
+            if auth_session is None:
+                return _auth_context_missing_response()
+            now = datetime.now(UTC)
+            household_id = auth_session.household_id
+            user_id = auth_session.user_id
+            identity = IdentityRepository(session)
+            watches = HouseholdWatchRepository(session)
+            audit = AuditEventRepository(session)
+            owned_watches = await watches.list_active_watches_for_owner(
+                household_id=household_id,
+                owner_user_id=user_id,
+            )
+            owned_watches_deleted = 0
+            for watch in owned_watches:
+                result = await watches.delete_watch(
+                    household_id=household_id,
+                    watch_id=watch.id,
+                    expected_version=watch.version,
+                    deleted_at=now,
+                    deleted_by_user_id=user_id,
+                )
+                if result.status != "deleted":
+                    continue
+                owned_watches_deleted += 1
+                await audit.add_event(
+                    NewAuditEvent(
+                        id=uuid4(),
+                        household_id=household_id,
+                        actor_user_id=user_id,
+                        action="watch.deleted",
+                        entity_type="watch",
+                        entity_id=watch.id,
+                        summary="watch deleted by account deactivation",
+                        created_at=now,
+                    )
+                )
+            sessions_revoked = await identity.revoke_sessions(
+                household_id=household_id,
+                user_id=user_id,
+                revoked_at=now,
+            )
+            membership_disabled = await identity.disable_membership(
+                household_id=household_id,
+                user_id=user_id,
+                disabled_at=now,
+            )
+            telegram_account_revoked = await TelegramLinkRepository(
+                session
+            ).revoke_account_for_user(
+                household_id=household_id,
+                user_id=user_id,
+                revoked_at=now,
+            )
+            await audit.add_event(
+                NewAuditEvent(
+                    id=uuid4(),
+                    household_id=household_id,
+                    actor_user_id=user_id,
+                    action="account.deactivated",
+                    entity_type="user",
+                    entity_id=user_id,
+                    summary="account deactivated",
+                    created_at=now,
+                )
+            )
+            await session.commit()
+        return AccountDeactivationResponse(
+            status="deactivated",
+            household_id=str(household_id),
+            user_id=str(user_id),
+            sessions_revoked=sessions_revoked,
+            membership_disabled=membership_disabled,
+            telegram_account_revoked=telegram_account_revoked,
+            owned_watches_deleted=owned_watches_deleted,
+            retained_records=list(_ACCOUNT_DEACTIVATION_RETAINED_RECORDS),
+        )
+
+    @app.post("/api/v1/privacy/export", response_model=PrivacyExportResponse)
+    async def privacy_export(
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> PrivacyExportResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            watches = await HouseholdWatchRepository(session).list_watches_for_export(
+                household_id,
+                limit=_privacy_export_fetch_limit("watches"),
+            )
+            audit_events = await AuditEventRepository(session).list_recent(
+                household_id,
+                limit=_privacy_export_fetch_limit("audit_events"),
+            )
+            manual_confirmations = await ManualPriceConfirmationRepository(session).list_for_export(
+                household_id=household_id,
+                user_id=user_id,
+                limit=_privacy_export_fetch_limit("manual_price_confirmations"),
+            )
+            observed_offers = await BrowserObservedOfferRepository(session).list_for_export(
+                household_id=household_id,
+                user_id=user_id,
+                limit=_privacy_export_fetch_limit("browser_observed_offers"),
+            )
+            deal_candidates = await DealCandidateRepository(session).list_for_export(
+                household_id=household_id,
+                user_id=user_id,
+                limit=_privacy_export_fetch_limit("deal_candidates"),
+            )
+            exported_at = datetime.now(UTC)
+            await AuditEventRepository(session).add_event(
+                NewAuditEvent(
+                    id=uuid4(),
+                    household_id=household_id,
+                    actor_user_id=user_id,
+                    action="privacy.exported",
+                    entity_type="household",
+                    entity_id=household_id,
+                    summary="privacy export generated",
+                    created_at=exported_at,
+                )
+            )
+            await session.commit()
+        return _privacy_export_response(
+            exported_at=exported_at,
+            household_id=household_id,
+            user_id=user_id,
+            watches=watches,
+            audit_events=audit_events,
+            manual_confirmations=manual_confirmations,
+            observed_offers=observed_offers,
+            deal_candidates=deal_candidates,
         )
 
     @app.get("/api/v1/providers", response_model=ProvidersResponse)
@@ -588,6 +1541,135 @@ def create_app(
         return AdminProviderHealthResponse(
             checked_at=datetime.now(UTC).isoformat(),
             providers=[_admin_provider_health_response(status) for status in registry.statuses()],
+        )
+
+    @app.get("/api/v1/admin/sources/health", response_model=AdminSourceHealthResponse)
+    async def admin_source_health(
+        sources_limit: int = Query(default=100, ge=1, le=500),
+        sources_offset: int = Query(default=0, ge=0, le=10_000),
+        event_limit: int = Query(default=100, ge=1, le=500),
+    ) -> AdminSourceHealthResponse:
+        async with session_factory() as session:
+            snapshot = await SourceHealthService(
+                contracts=source_contract_catalog,
+                events=SourceHealthEventRepository(session),
+            ).snapshot(event_limit=event_limit)
+        sources_window = snapshot.sources[sources_offset : sources_offset + sources_limit]
+        return AdminSourceHealthResponse(
+            checked_at=snapshot.checked_at.isoformat(),
+            sources_limit=sources_limit,
+            sources_offset=sources_offset,
+            event_limit=event_limit,
+            sources=[_admin_source_health_item_response(source) for source in sources_window],
+        )
+
+    @app.get("/api/v1/admin/workers/health", response_model=AdminWorkerHealthResponse)
+    async def admin_worker_health(
+        workers_limit: int = Query(default=20, ge=1, le=100),
+        workers_offset: int = Query(default=0, ge=0, le=10_000),
+    ) -> AdminWorkerHealthResponse:
+        async with session_factory() as session:
+            snapshot = await WorkerHealthService(
+                heartbeats=WorkerHeartbeatRepository(session),
+                queues=WorkerQueueHealthRepository(session),
+                control=WorkerControlRepository(session),
+            ).snapshot(limit=workers_limit, offset=workers_offset)
+        return AdminWorkerHealthResponse(
+            checked_at=snapshot.checked_at.isoformat(),
+            workers_limit=workers_limit,
+            workers_offset=workers_offset,
+            control=_admin_worker_control_response(snapshot.control),
+            workers=[_admin_worker_health_item_response(worker) for worker in snapshot.workers],
+            queues=[_admin_worker_queue_health_response(queue) for queue in snapshot.queues],
+            alerts=[_admin_worker_health_alert_response(alert) for alert in snapshot.alerts],
+        )
+
+    @app.get("/api/v1/admin/workers/metrics", response_class=PlainTextResponse)
+    async def admin_worker_metrics(
+        workers_limit: int = Query(default=20, ge=1, le=100),
+        workers_offset: int = Query(default=0, ge=0, le=10_000),
+    ) -> PlainTextResponse:
+        async with session_factory() as session:
+            snapshot = await WorkerHealthService(
+                heartbeats=WorkerHeartbeatRepository(session),
+                queues=WorkerQueueHealthRepository(session),
+                control=WorkerControlRepository(session),
+            ).snapshot(limit=workers_limit, offset=workers_offset)
+        return PlainTextResponse(
+            render_worker_health_prometheus(snapshot),
+            media_type="text/plain; version=0.0.4",
+        )
+
+    @app.patch("/api/v1/admin/workers/control", response_model=AdminWorkerControlResponse)
+    async def update_admin_worker_control(
+        body: AdminWorkerControlUpdateRequest,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> AdminWorkerControlResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            state = await WorkerControlService(
+                control=WorkerControlRepository(session),
+                audit=AuditEventRepository(session),
+            ).set_drain(
+                drain_requested=body.drain_requested,
+                reason=body.reason,
+                actor_household_id=household_id,
+                actor_user_id=user_id,
+            )
+            await session.commit()
+        return _admin_worker_control_response(state)
+
+    @app.get("/api/v1/admin/audit-events", response_model=AdminAuditEventsResponse)
+    async def admin_audit_events(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=10_000),
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> AdminAuditEventsResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, _user_id = auth_context
+            recent_events = await AuditEventRepository(session).list_recent(
+                household_id,
+                limit=limit,
+                offset=offset,
+            )
+        return AdminAuditEventsResponse(
+            limit=limit,
+            offset=offset,
+            audit_events=[_admin_audit_event_response(event) for event in recent_events],
         )
 
     @app.get("/api/v1/price-sources", response_model=PriceSourcesResponse)
@@ -605,6 +1687,341 @@ def create_app(
             sources=[_source_contract_response(source) for source in sources],
         )
 
+    @app.post("/api/v1/deals/discover", response_model=DealDiscoveryResponse)
+    async def discover_deals(
+        body: DealDiscoveryRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> DealDiscoveryResponse | JSONResponse:
+        service = deal_discovery_service or _deal_discovery_service(settings)
+        if service is None:
+            return _coded_error_response(
+                status_code=503,
+                code="deal_discovery_disabled",
+                message="deal discovery requires enabled SearXNG and Crawl4AI settings",
+            )
+        try:
+            candidates = await service.discover(
+                _search_intent_from_body(body.search_intent),
+                limit=body.limit,
+            )
+        except DealUrlPolicyError as exc:
+            await _try_record_source_health_event(
+                session_factory,
+                source_id="deal_discovery",
+                event_type="deal_discovery",
+                status="failed",
+                message=f"deal discovery URL rejected; code={exc}",
+            )
+            return _coded_error_response(
+                status_code=502,
+                code="deal_discovery_url_rejected",
+                message="deal discovery rejected an unsafe source URL",
+            )
+        except (Crawl4AiClientError, SearxngClientError) as exc:
+            await _try_record_source_health_event(
+                session_factory,
+                source_id="deal_discovery",
+                event_type="deal_discovery",
+                status="failed",
+                message=f"deal discovery failed; code={exc}",
+            )
+            return _coded_error_response(
+                status_code=502,
+                code="deal_discovery_source_failed",
+                message="deal discovery source failed",
+            )
+        expires_at = datetime.now(UTC) + timedelta(
+            seconds=max(1, settings.deal_candidate_ttl_seconds),
+        )
+        candidates = tuple(replace(candidate, expires_at=expires_at) for candidate in candidates)
+        await _try_record_source_health_event(
+            session_factory,
+            source_id="deal_discovery",
+            event_type="deal_discovery",
+            status="ok",
+            message=f"deal discovery succeeded; candidates={len(candidates)}",
+        )
+        if body.search_id and _auth_headers_present(
+            settings=settings,
+            authorization_header=authorization_header,
+            household_header=household_header,
+            user_header=user_header,
+        ):
+            async with session_factory() as session:
+                auth_context = await _optional_auth_context_from_headers(
+                    session,
+                    settings=settings,
+                    authorization_header=authorization_header,
+                    household_header=household_header,
+                    user_header=user_header,
+                )
+                if auth_context is not None:
+                    household_id, user_id = auth_context
+                    repository = DealCandidateRepository(session)
+                    for candidate in candidates:
+                        await repository.add_candidate(
+                            NewDealCandidate(
+                                id=uuid4(),
+                                household_id=household_id,
+                                user_id=user_id,
+                                search_id=body.search_id,
+                                candidate=candidate,
+                                expires_at=expires_at,
+                            )
+                        )
+                    await session.commit()
+        return DealDiscoveryResponse(
+            candidates=[_deal_candidate_response(candidate) for candidate in candidates],
+            warnings=["deal_candidates_require_manual_verification"],
+        )
+
+    @app.post(
+        "/api/v1/deals/discovery-jobs",
+        response_model=DealDiscoveryJobCreateResponse,
+        status_code=202,
+    )
+    async def create_deal_discovery_job(
+        body: DealDiscoveryJobRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> DealDiscoveryJobCreateResponse | JSONResponse:
+        if idempotency_key is None or not idempotency_key.strip():
+            return _coded_error_response(
+                status_code=400,
+                code="idempotency_key_required",
+                message="Idempotency-Key header is required",
+            )
+        intent = _search_intent_from_body(body.search_intent)
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            if deal_discovery_service is None and (
+                not settings.searxng_enabled or not settings.crawl4ai_enabled
+            ):
+                return _coded_error_response(
+                    status_code=503,
+                    code="deal_discovery_disabled",
+                    message="deal discovery requires enabled SearXNG and Crawl4AI settings",
+                )
+            household_id, user_id = auth_context
+            repository = DealDiscoveryJobRepository(session)
+            scoped_idempotency_key = _scoped_idempotency_key(
+                "deal_discovery",
+                household_id=household_id,
+                user_id=user_id,
+                idempotency_key=idempotency_key,
+            )
+            existing = await repository.get_idempotent_job(
+                household_id=household_id,
+                user_id=user_id,
+                idempotency_key=scoped_idempotency_key,
+            )
+            if existing is not None:
+                return DealDiscoveryJobCreateResponse(
+                    job_id=str(existing.id),
+                    search_id=existing.search_id,
+                    status=existing.status,
+                    idempotent_replay=True,
+                )
+            now = datetime.now(UTC)
+            job = NewDealDiscoveryJob(
+                id=uuid4(),
+                household_id=household_id,
+                user_id=user_id,
+                search_id=body.search_id,
+                idempotency_key=scoped_idempotency_key,
+                status="queued",
+                attempts=0,
+                max_attempts=3,
+                deadline_at=now
+                + timedelta(seconds=max(1, settings.deal_discovery_job_deadline_seconds)),
+                created_at=now,
+                search_intent_json=_deal_search_intent_json(intent),
+                limit=body.limit,
+            )
+            created = await repository.enqueue_job(job)
+            if not created:
+                existing = await repository.get_idempotent_job(
+                    household_id=household_id,
+                    user_id=user_id,
+                    idempotency_key=scoped_idempotency_key,
+                )
+                if existing is not None:
+                    return DealDiscoveryJobCreateResponse(
+                        job_id=str(existing.id),
+                        search_id=existing.search_id,
+                        status=existing.status,
+                        idempotent_replay=True,
+                    )
+                return _coded_error_response(
+                    status_code=409,
+                    code="deal_discovery_job_conflict",
+                    message="deal discovery job idempotency conflict",
+                )
+            await session.commit()
+        return DealDiscoveryJobCreateResponse(
+            job_id=str(job.id),
+            search_id=job.search_id,
+            status=job.status,
+            idempotent_replay=False,
+        )
+
+    @app.get(
+        "/api/v1/deals/discovery-jobs/{job_id}",
+        response_model=DealDiscoveryJobResponse,
+    )
+    async def get_deal_discovery_job(
+        job_id: UUID,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> DealDiscoveryJobResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            job = await DealDiscoveryJobRepository(session).get_job(job_id)
+            if job is None or job.household_id != household_id or job.user_id != user_id:
+                return _coded_error_response(
+                    status_code=404,
+                    code="deal_discovery_job_not_found",
+                    message="deal discovery job not found",
+                )
+            candidates = await DealCandidateRepository(session).list_recent(
+                household_id=household_id,
+                user_id=user_id,
+                search_id=job.search_id,
+                now=datetime.now(UTC),
+            )
+        return _deal_discovery_job_response(job, candidates)
+
+    @app.post(
+        "/api/v1/manual-price-confirmations",
+        response_model=ManualPriceConfirmationResponse,
+        status_code=201,
+    )
+    async def create_manual_price_confirmation(
+        body: ManualPriceConfirmationRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> ManualPriceConfirmationResponse | JSONResponse:
+        price = (
+            Money(body.amount_minor, body.currency)
+            if body.amount_minor is not None and body.currency is not None
+            else None
+        )
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            confirmation = ManualPriceConfirmation(
+                id=uuid4(),
+                household_id=household_id,
+                user_id=user_id,
+                target_kind=body.target_kind,
+                target_id=body.target_id,
+                source_id=body.source_id,
+                status=body.status,
+                confirmed_price=price,
+                note=body.note,
+                confirmed_at=datetime.now(UTC),
+            )
+            await ManualPriceConfirmationRepository(session).add_confirmation(confirmation)
+            await session.commit()
+        return _manual_price_confirmation_response(confirmation)
+
+    @app.get(
+        "/api/v1/manual-price-confirmations",
+        response_model=ManualPriceConfirmationsResponse,
+    )
+    async def manual_price_confirmations(
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+        target_kind: str | None = Query(default=None, pattern=_RESULT_KIND_PATTERN),
+        target_id: str | None = Query(default=None, min_length=1, max_length=160),
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> ManualPriceConfirmationsResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            confirmations = await ManualPriceConfirmationRepository(session).list_recent(
+                household_id=household_id,
+                user_id=user_id,
+                limit=limit,
+                target_kind=target_kind,
+                target_id=target_id,
+            )
+        return ManualPriceConfirmationsResponse(
+            confirmations=[
+                _manual_price_confirmation_response(confirmation) for confirmation in confirmations
+            ],
+        )
+
     @app.get("/api/v1/browser-sources", response_model=BrowserSourcesResponse)
     def browser_sources() -> BrowserSourcesResponse:
         now = datetime.now(UTC)
@@ -612,6 +2029,88 @@ def create_app(
             sources=[
                 _browser_source_response(source, now=now)
                 for source in browser_source_catalog.sources()
+            ]
+            + [
+                _personal_browser_source_response(spec, settings=settings)
+                for spec in default_ru_aggregator_specs()
+                if spec.browser_observation_allowed
+            ],
+        )
+
+    @app.post(
+        "/api/v1/browser-sources/{source_id}/test-parser",
+        response_model=BrowserParserTestResponse,
+    )
+    async def test_browser_source_parser(
+        source_id: str,
+        body: BrowserParserTestRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> BrowserParserTestResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+        if auth_context is None:
+            return _auth_context_missing_response()
+
+        spec = _personal_browser_source_spec(source_id)
+        if spec is None:
+            return _coded_error_response(
+                status_code=404,
+                code="browser_source_not_found",
+                message="browser source not found",
+            )
+        if not spec.browser_observation_allowed:
+            return _coded_error_response(
+                status_code=403,
+                code="source_not_observable",
+                message="source does not allow browser observation",
+            )
+
+        intent = _search_intent_from_body(body.search_intent)
+        final_url = body.final_url or RuClickoutLinkBuilder((spec,)).build(spec, intent).url
+        url_denial = _browser_parser_test_url_denial(final_url, settings=settings)
+        if url_denial is not None:
+            status_code, code, message = url_denial
+            return _coded_error_response(status_code=status_code, code=code, message=message)
+
+        captured_at = datetime.now(UTC)
+        snapshot = DomSnapshot.from_html(
+            source_id=spec.source_id,
+            final_url=final_url,
+            html=body.html,
+            captured_at=captured_at,
+            title=body.title,
+        )
+        extraction = BrowserOfferParserPipeline(
+            source_names={spec.source_id: spec.display_name},
+            scrapling_enabled=settings.scrapling_enabled,
+            crawl4ai_diagnostics_enabled=settings.crawl4ai_enabled,
+        ).extract(snapshot, intent)
+        return BrowserParserTestResponse(
+            source_id=spec.source_id,
+            final_url=final_url,
+            captured_at=captured_at.isoformat(),
+            html_hash=snapshot.html_hash,
+            visible_text_hash=snapshot.visible_text_hash,
+            confidence=extraction.confidence.value,
+            warnings=list(extraction.warnings),
+            offers=[_browser_observed_offer_response(offer) for offer in extraction.offers],
+            raw_price_candidates=[
+                _browser_parser_price_candidate_response(candidate)
+                for candidate in extraction.raw_price_candidates
             ],
         )
 
@@ -635,6 +2134,7 @@ def create_app(
     @app.post("/api/v1/agent/chat/turn", response_model=AgentChatTurnResponse)
     async def agent_chat_turn(
         body: AgentChatTurnRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
         household_header: str | None = Header(
             default=None,
             alias="X-Flight-Hunter-Household-Id",
@@ -644,9 +2144,15 @@ def create_app(
             alias="X-Flight-Hunter-User-Id",
         ),
     ) -> AgentChatTurnResponse:
-        household_id = _household_context(household_header)
-        user_id = _user_context(user_header)
         async with session_factory() as session:
+            auth_context = await _optional_auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            household_id, user_id = auth_context if auth_context is not None else (None, None)
             service = AgentChatService(
                 airport_service=airport_service,
                 date_matrix_planner=date_matrix_planner,
@@ -690,7 +2196,20 @@ def create_app(
         return _agent_chat_turn_response(response)
 
     @app.post("/api/v1/searches", response_model=SearchResponse, status_code=201)
-    def searches(body: SearchRequestBody) -> SearchResponse:
+    async def searches(
+        body: SearchRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> SearchResponse:
+        started_at = perf_counter()
+        household_id_for_log: UUID | None = None
         result = search_service.search(
             SearchRequest(
                 origin=body.origin,
@@ -706,6 +2225,50 @@ def create_app(
                 trip_type=body.trip_type,
             )
         )
+        if _auth_headers_present(
+            settings=settings,
+            authorization_header=authorization_header,
+            household_header=household_header,
+            user_header=user_header,
+        ):
+            async with session_factory() as session:
+                auth_context = await _optional_auth_context_from_headers(
+                    session,
+                    settings=settings,
+                    authorization_header=authorization_header,
+                    household_header=household_header,
+                    user_header=user_header,
+                )
+                if auth_context is not None:
+                    household_id, user_id = auth_context
+                    household_id_for_log = household_id
+                    observed_offers = await BrowserObservedOfferRepository(session).list_recent(
+                        household_id=household_id,
+                        user_id=user_id,
+                        search_id=result.search_id,
+                        now=datetime.now(UTC),
+                    )
+                    deal_candidates = await DealCandidateRepository(session).list_recent(
+                        household_id=household_id,
+                        user_id=user_id,
+                        search_id=result.search_id,
+                        now=datetime.now(UTC),
+                    )
+                    result = with_browser_observed_offers_and_deal_candidates(
+                        result,
+                        browser_observed_offers=observed_offers,
+                        deal_candidates=deal_candidates,
+                    )
+        log_event(
+            "search_started",
+            search_id=result.search_id,
+            household_id=household_id_for_log,
+            priced_offer_count=len(result.priced_offers),
+            provider_isolated_offer_count=len(result.provider_isolated_offers),
+            browser_observed_offer_count=len(result.browser_observed_offers),
+            deal_candidate_count=len(result.deal_candidates),
+            duration_ms=_duration_ms(started_at),
+        )
         return _search_response(result)
 
     @app.post(
@@ -715,15 +2278,21 @@ def create_app(
     )
     async def issue_live_observation_grant(
         body: LiveObservationGrantRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
         user_header: str | None = Header(
             default=None,
             alias="X-Flight-Hunter-User-Id",
         ),
     ) -> LiveObservationGrantResponse | JSONResponse:
-        user_id = _user_context(user_header)
-        if user_id is None:
-            return _auth_context_missing_response()
         async with session_factory() as session:
+            user_id = await _user_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                user_header=user_header,
+            )
+            if user_id is None:
+                return _auth_context_missing_response()
             service = DurableLiveObservationService(
                 catalog=browser_source_catalog,
                 repository=LiveObservationRepository(session),
@@ -756,15 +2325,13 @@ def create_app(
     )
     async def create_live_observation(
         body: LiveObservationCreateRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
         user_header: str | None = Header(
             default=None,
             alias="X-Flight-Hunter-User-Id",
         ),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> LiveObservationCreateResponse | JSONResponse:
-        user_id = _user_context(user_header)
-        if user_id is None:
-            return _auth_context_missing_response()
         if idempotency_key is None or not idempotency_key.strip():
             return _coded_error_response(
                 status_code=400,
@@ -772,6 +2339,14 @@ def create_app(
                 message="Idempotency-Key header is required",
             )
         async with session_factory() as session:
+            user_id = await _user_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                user_header=user_header,
+            )
+            if user_id is None:
+                return _auth_context_missing_response()
             service = DurableLiveObservationService(
                 catalog=browser_source_catalog,
                 repository=LiveObservationRepository(session),
@@ -803,15 +2378,21 @@ def create_app(
     )
     async def get_live_observation(
         observation_id: UUID,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
         user_header: str | None = Header(
             default=None,
             alias="X-Flight-Hunter-User-Id",
         ),
     ) -> LiveObservationResponse | JSONResponse:
-        user_id = _user_context(user_header)
-        if user_id is None:
-            return _auth_context_missing_response()
         async with session_factory() as session:
+            user_id = await _user_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                user_header=user_header,
+            )
+            if user_id is None:
+                return _auth_context_missing_response()
             service = DurableLiveObservationService(
                 catalog=browser_source_catalog,
                 repository=LiveObservationRepository(session),
@@ -828,6 +2409,396 @@ def create_app(
                 message="live observation not found",
             )
         return _live_observation_response(observation)
+
+    @app.post(
+        "/api/v1/personal-observations/grants",
+        response_model=PersonalObservationGrantResponse,
+        status_code=201,
+    )
+    async def issue_personal_observation_grant(
+        body: PersonalObservationGrantRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> PersonalObservationGrantResponse | JSONResponse:
+        async with session_factory() as session:
+            user_id = await _user_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                user_header=user_header,
+            )
+            if user_id is None:
+                return _auth_context_missing_response()
+            service = _personal_observation_service(
+                session=session,
+                settings=settings,
+                clock=lambda: datetime.now(UTC),
+            )
+            decision = await service.issue_grant(
+                user_id=user_id,
+                source_id=body.source_id,
+                search_intent=_search_intent_from_body(body.search_intent),
+                source=GrantSource.WEB_CLICK,
+            )
+            await session.commit()
+        if not decision.allowed or decision.grant_token is None or decision.expires_at is None:
+            return _coded_error_response(
+                status_code=403,
+                code=decision.code.value,
+                message=decision.message,
+            )
+        return PersonalObservationGrantResponse(
+            source_id=body.source_id,
+            grant_token=decision.grant_token,
+            expires_at=decision.expires_at.isoformat(),
+        )
+
+    @app.post(
+        "/api/v1/personal-observations",
+        response_model=PersonalObservationCreateResponse,
+        status_code=202,
+    )
+    async def create_personal_observation(
+        body: PersonalObservationCreateRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> PersonalObservationCreateResponse | JSONResponse:
+        if idempotency_key is None or not idempotency_key.strip():
+            return _coded_error_response(
+                status_code=400,
+                code="idempotency_key_required",
+                message="Idempotency-Key header is required",
+            )
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = _personal_observation_service(
+                session=session,
+                settings=settings,
+                clock=lambda: datetime.now(UTC),
+            )
+            decision = await service.create_job(
+                household_id=household_id,
+                user_id=user_id,
+                source_id=body.source_id,
+                search_id=body.search_id,
+                search_intent=_search_intent_from_body(body.search_intent),
+                grant_token=body.grant_token,
+                idempotency_key=idempotency_key,
+            )
+            await session.commit()
+        if not decision.accepted or decision.job_id is None:
+            return _coded_error_response(
+                status_code=403,
+                code=decision.code.value,
+                message=decision.message,
+            )
+        return PersonalObservationCreateResponse(
+            job_id=str(decision.job_id),
+            status=decision.initial_status.value if decision.initial_status is not None else "",
+            idempotent_replay=decision.idempotent_replay,
+        )
+
+    @app.get(
+        "/api/v1/personal-observations/{job_id}",
+        response_model=PersonalObservationResponse,
+    )
+    async def get_personal_observation(
+        job_id: UUID,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> PersonalObservationResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = _personal_observation_service(
+                session=session,
+                settings=settings,
+                clock=lambda: datetime.now(UTC),
+            )
+            job = await service.get_job(
+                household_id=household_id,
+                user_id=user_id,
+                job_id=job_id,
+            )
+            if job is None:
+                return _coded_error_response(
+                    status_code=404,
+                    code="personal_observation_not_found",
+                    message="personal observation not found",
+                )
+            observed = await BrowserObservedOfferRepository(session).list_recent(
+                household_id=household_id,
+                user_id=user_id,
+                search_id=job.search_id,
+                now=datetime.now(UTC),
+            )
+        return _personal_observation_response(job, observed)
+
+    @app.post(
+        "/api/v1/personal-observations/{job_id}/resume",
+        response_model=PersonalObservationResponse,
+    )
+    async def resume_personal_observation(
+        job_id: UUID,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> PersonalObservationResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = _personal_observation_service(
+                session=session,
+                settings=settings,
+                clock=lambda: datetime.now(UTC),
+            )
+            decision = await service.request_operator_resume(
+                household_id=household_id,
+                user_id=user_id,
+                job_id=job_id,
+            )
+            if not decision.accepted or decision.job is None:
+                return _coded_error_response(
+                    status_code=404 if decision.job is None else 409,
+                    code=decision.code.value,
+                    message=decision.message,
+                )
+            observed = await BrowserObservedOfferRepository(session).list_recent(
+                household_id=household_id,
+                user_id=user_id,
+                search_id=decision.job.search_id,
+                now=datetime.now(UTC),
+            )
+            await session.commit()
+        return _personal_observation_response(decision.job, observed)
+
+    @app.post(
+        "/api/v1/personal-observations/{job_id}/abort",
+        response_model=PersonalObservationResponse,
+    )
+    async def abort_personal_observation(
+        job_id: UUID,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> PersonalObservationResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = _personal_observation_service(
+                session=session,
+                settings=settings,
+                clock=lambda: datetime.now(UTC),
+            )
+            decision = await service.request_operator_abort(
+                household_id=household_id,
+                user_id=user_id,
+                job_id=job_id,
+            )
+            if not decision.accepted or decision.job is None:
+                return _coded_error_response(
+                    status_code=404 if decision.job is None else 409,
+                    code=decision.code.value,
+                    message=decision.message,
+                )
+            observed = await BrowserObservedOfferRepository(session).list_recent(
+                household_id=household_id,
+                user_id=user_id,
+                search_id=decision.job.search_id,
+                now=datetime.now(UTC),
+            )
+            await session.commit()
+        return _personal_observation_response(decision.job, observed)
+
+    @app.post(
+        "/api/v1/personal-observations/{job_id}/confirm",
+        response_model=ManualPriceConfirmationResponse,
+        status_code=201,
+    )
+    async def confirm_personal_observation(
+        job_id: UUID,
+        body: PersonalObservationConfirmRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> ManualPriceConfirmationResponse | JSONResponse:
+        price = (
+            Money(body.amount_minor, body.currency)
+            if body.amount_minor is not None and body.currency is not None
+            else None
+        )
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = _personal_observation_service(
+                session=session,
+                settings=settings,
+                clock=lambda: datetime.now(UTC),
+            )
+            job = await service.get_job(
+                household_id=household_id,
+                user_id=user_id,
+                job_id=job_id,
+            )
+            if job is None:
+                return _coded_error_response(
+                    status_code=404,
+                    code="personal_observation_not_found",
+                    message="personal observation not found",
+                )
+            confirmation = ManualPriceConfirmation(
+                id=uuid4(),
+                household_id=household_id,
+                user_id=user_id,
+                target_kind=ResultKind.BROWSER_OBSERVATION,
+                target_id=str(job.id),
+                source_id=job.source_id,
+                status=body.status,
+                confirmed_price=price,
+                note=body.note,
+                confirmed_at=datetime.now(UTC),
+            )
+            await ManualPriceConfirmationRepository(session).add_confirmation(confirmation)
+            await session.commit()
+        return _manual_price_confirmation_response(confirmation)
+
+    @app.post(
+        "/api/v1/personal-observations/{job_id}/mark-stale",
+        response_model=ManualPriceConfirmationResponse,
+        status_code=201,
+    )
+    async def mark_personal_observation_stale(
+        job_id: UUID,
+        body: PersonalObservationMarkStaleRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> ManualPriceConfirmationResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = _personal_observation_service(
+                session=session,
+                settings=settings,
+                clock=lambda: datetime.now(UTC),
+            )
+            job = await service.get_job(
+                household_id=household_id,
+                user_id=user_id,
+                job_id=job_id,
+            )
+            if job is None:
+                return _coded_error_response(
+                    status_code=404,
+                    code="personal_observation_not_found",
+                    message="personal observation not found",
+                )
+            confirmation = ManualPriceConfirmation(
+                id=uuid4(),
+                household_id=household_id,
+                user_id=user_id,
+                target_kind=ResultKind.BROWSER_OBSERVATION,
+                target_id=str(job.id),
+                source_id=job.source_id,
+                status=body.status,
+                confirmed_price=None,
+                note=body.note,
+                confirmed_at=datetime.now(UTC),
+            )
+            await ManualPriceConfirmationRepository(session).add_confirmation(confirmation)
+            await session.commit()
+        return _manual_price_confirmation_response(confirmation)
 
     @app.get("/api/v1/airports/autocomplete", response_model=AirportAutocompleteResponse)
     def airport_autocomplete(q: str) -> AirportAutocompleteResponse:
@@ -889,11 +2860,90 @@ def create_app(
                 max_stay_days=body.max_stay_days,
             )
         )
-        return _date_matrix_response(matrix)
+        offers, denials, provider_calls = _date_matrix_cached_offers(
+            body,
+            provider_instances=provider_instances,
+        )
+        return _date_matrix_response(
+            matrix,
+            offers=offers,
+            pricing_denials=denials,
+            provider_calls_required=provider_calls,
+        )
+
+    @app.post("/api/v1/searches/cached-radar", response_model=CachedRadarResponse)
+    async def cached_radar(
+        body: CachedRadarRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> CachedRadarResponse | JSONResponse:
+        offers, denials, provider_calls = _cached_radar_offers(
+            body,
+            provider_instances=provider_instances,
+        )
+        deal_candidates: tuple[DealCandidate, ...] = ()
+        deal_candidates_saved = 0
+        if body.save_deal_candidates and offers:
+            async with session_factory() as session:
+                auth_context = await _auth_context_from_headers(
+                    session,
+                    settings=settings,
+                    authorization_header=authorization_header,
+                    household_header=household_header,
+                    user_header=user_header,
+                )
+                if auth_context is None:
+                    return _auth_context_missing_response()
+                household_id, user_id = auth_context
+                expires_at = datetime.now(UTC) + timedelta(
+                    seconds=max(1, settings.deal_candidate_ttl_seconds),
+                )
+                seeds = build_aviasales_cached_deal_seeds(
+                    tuple(sorted(offers, key=offer_ranking_key)),
+                    radar_kind=body.radar_kind,
+                    expires_at=expires_at,
+                )
+                repository = DealCandidateRepository(session)
+                for seed in seeds:
+                    if await repository.add_candidate_once(
+                        NewDealCandidate(
+                            id=aviasales_cached_deal_seed_id(
+                                household_id=household_id,
+                                user_id=user_id,
+                                search_id=body.search_id or "",
+                                seed=seed,
+                            ),
+                            household_id=household_id,
+                            user_id=user_id,
+                            search_id=body.search_id or "",
+                            candidate=seed.candidate,
+                            expires_at=expires_at,
+                            raw_ref=seed.raw_ref,
+                        )
+                    ):
+                        deal_candidates_saved += 1
+                await session.commit()
+                deal_candidates = tuple(seed.candidate for seed in seeds)
+        return _cached_radar_response(
+            body,
+            offers=offers,
+            deal_candidates=deal_candidates,
+            deal_candidates_saved=deal_candidates_saved,
+            pricing_denials=denials,
+            provider_calls_required=provider_calls,
+        )
 
     @app.post("/api/v1/watches", response_model=WatchResponse, status_code=201)
     async def create_watch(
         body: WatchCreateRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
         household_header: str | None = Header(
             default=None,
             alias="X-Flight-Hunter-Household-Id",
@@ -903,12 +2953,21 @@ def create_app(
             alias="X-Flight-Hunter-User-Id",
         ),
     ) -> WatchResponse | JSONResponse:
-        auth_context = _auth_context(household_header, user_header)
-        if auth_context is None:
-            return _auth_context_missing_response()
-        household_id, user_id = auth_context
         async with session_factory() as session:
-            service = WatchService(HouseholdWatchRepository(session))
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = WatchService(
+                HouseholdWatchRepository(session),
+                audit_repository=AuditEventRepository(session),
+            )
             watch = await service.create_watch(
                 CreateWatchCommand(
                     household_id=household_id,
@@ -917,6 +2976,10 @@ def create_app(
                     destination=body.destination,
                     departure_date=body.departure_date,
                     return_date=body.return_date,
+                    passengers=body.passengers,
+                    currency=body.currency,
+                    scan_interval_seconds=settings.watch_scan_interval_seconds,
+                    allowed_provider_ids=tuple(body.allowed_provider_ids),
                 )
             )
             await session.commit()
@@ -924,6 +2987,7 @@ def create_app(
 
     @app.get("/api/v1/watches", response_model=WatchesResponse)
     async def watches(
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
         household_header: str | None = Header(
             default=None,
             alias="X-Flight-Hunter-Household-Id",
@@ -933,14 +2997,329 @@ def create_app(
             alias="X-Flight-Hunter-User-Id",
         ),
     ) -> WatchesResponse | JSONResponse:
-        auth_context = _auth_context(household_header, user_header)
-        if auth_context is None:
-            return _auth_context_missing_response()
-        household_id, _user_id = auth_context
         async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, _user_id = auth_context
             service = WatchService(HouseholdWatchRepository(session))
             records = await service.list_watches(household_id)
         return WatchesResponse(watches=[_watch_response(record) for record in records])
+
+    @app.get("/api/v1/watches/{watch_id}", response_model=WatchResponse)
+    async def watch_detail(
+        watch_id: UUID,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> WatchResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, _user_id = auth_context
+            watch = await WatchService(HouseholdWatchRepository(session)).get_watch(
+                household_id,
+                watch_id,
+            )
+        if watch is None:
+            return _watch_not_found_response()
+        return _watch_response(watch)
+
+    @app.patch("/api/v1/watches/{watch_id}", response_model=WatchResponse)
+    async def update_watch(
+        watch_id: UUID,
+        body: WatchUpdateRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> WatchResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = WatchService(
+                HouseholdWatchRepository(session),
+                audit_repository=AuditEventRepository(session),
+            )
+            result = await service.update_watch(
+                UpdateWatchCommand(
+                    household_id=household_id,
+                    watch_id=watch_id,
+                    actor_user_id=user_id,
+                    expected_version=body.expected_version,
+                    updates=_watch_update_request_fields(body),
+                )
+            )
+            await session.commit()
+        if result.status == "not_found":
+            return _watch_not_found_response()
+        if result.status == "version_conflict":
+            return _watch_version_conflict_response(result.current_version)
+        if result.watch is None:
+            return _watch_not_found_response()
+        return _watch_response(result.watch)
+
+    @app.post("/api/v1/watches/{watch_id}/pause", response_model=WatchResponse)
+    async def pause_watch(
+        watch_id: UUID,
+        body: WatchPauseRequestBody | None = None,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> WatchResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = WatchService(
+                HouseholdWatchRepository(session),
+                audit_repository=AuditEventRepository(session),
+            )
+            watch = await service.pause_watch(
+                household_id=household_id,
+                watch_id=watch_id,
+                actor_user_id=user_id,
+                paused_until=body.paused_until if body is not None else None,
+            )
+            await session.commit()
+        if watch is None:
+            return _watch_not_found_response()
+        return _watch_response(watch)
+
+    @app.post("/api/v1/watches/{watch_id}/resume", response_model=WatchResponse)
+    async def resume_watch(
+        watch_id: UUID,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> WatchResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = WatchService(
+                HouseholdWatchRepository(session),
+                audit_repository=AuditEventRepository(session),
+            )
+            watch = await service.resume_watch(
+                household_id=household_id,
+                watch_id=watch_id,
+                actor_user_id=user_id,
+            )
+            await session.commit()
+        if watch is None:
+            return _watch_not_found_response()
+        return _watch_response(watch)
+
+    @app.post("/api/v1/watches/{watch_id}/archive", response_model=WatchLifecycleResponse)
+    async def archive_watch(
+        watch_id: UUID,
+        body: WatchVersionRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> WatchLifecycleResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = WatchService(
+                HouseholdWatchRepository(session),
+                audit_repository=AuditEventRepository(session),
+            )
+            result = await service.archive_watch(
+                WatchLifecycleCommand(
+                    household_id=household_id,
+                    watch_id=watch_id,
+                    actor_user_id=user_id,
+                    expected_version=body.expected_version,
+                )
+            )
+            await session.commit()
+        return _watch_lifecycle_response(watch_id=watch_id, result=result, success="archived")
+
+    @app.delete("/api/v1/watches/{watch_id}", response_model=WatchLifecycleResponse)
+    async def delete_watch(
+        watch_id: UUID,
+        body: WatchVersionRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> WatchLifecycleResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = WatchService(
+                HouseholdWatchRepository(session),
+                audit_repository=AuditEventRepository(session),
+            )
+            result = await service.delete_watch(
+                WatchLifecycleCommand(
+                    household_id=household_id,
+                    watch_id=watch_id,
+                    actor_user_id=user_id,
+                    expected_version=body.expected_version,
+                )
+            )
+            await session.commit()
+        return _watch_lifecycle_response(watch_id=watch_id, result=result, success="deleted")
+
+    @app.get("/api/v1/watches/{watch_id}/history", response_model=WatchHistoryResponse)
+    async def watch_history(
+        watch_id: UUID,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> WatchHistoryResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, _user_id = auth_context
+            watch_repository = HouseholdWatchRepository(session)
+            watch = await WatchService(watch_repository).get_watch(household_id, watch_id)
+            if watch is None:
+                return _watch_not_found_response()
+            snapshots = await PriceSnapshotRepository(session).list_history(household_id, watch_id)
+        return WatchHistoryResponse(
+            watch_id=str(watch_id),
+            snapshots=[_watch_snapshot_response(snapshot) for snapshot in snapshots],
+        )
+
+    @app.post("/api/v1/telegram/link-code", response_model=TelegramLinkCodeResponse)
+    async def create_telegram_link_code(
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> TelegramLinkCodeResponse | JSONResponse:
+        async with session_factory() as session:
+            auth_context = await _auth_context_from_headers(
+                session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+            if auth_context is None:
+                return _auth_context_missing_response()
+            household_id, user_id = auth_context
+            service = TelegramLinkService(
+                repository=TelegramLinkRepository(session),
+                clock=lambda: datetime.now(UTC),
+            )
+            link_code = await service.create_link_code(
+                household_id=household_id,
+                user_id=user_id,
+                ttl=timedelta(minutes=10),
+            )
+            await session.commit()
+        return TelegramLinkCodeResponse(
+            code=link_code.code,
+            expires_at=link_code.expires_at.isoformat(),
+        )
 
     @app.post(
         "/api/v1/telegram/webhook",
@@ -963,12 +3342,65 @@ def create_app(
             if update_id is None:
                 code = TelegramWebhookDecisionCode.INVALID_UPDATE
             else:
+                received_at = datetime.now(UTC)
                 async with session_factory() as session:
                     repository = TelegramUpdateRepository(session)
                     recorded = await repository.record_update(
                         update_id=update_id,
-                        received_at=datetime.now(UTC),
+                        received_at=received_at,
                     )
+                    if recorded and (link_command := _telegram_link_command(body)) is not None:
+                        telegram_user_id, chat_id, link_code = link_command
+                        link_service = TelegramLinkService(
+                            repository=TelegramLinkRepository(session),
+                            clock=lambda: received_at,
+                        )
+                        await link_service.consume_link_code(
+                            code=link_code,
+                            telegram_user_id=telegram_user_id,
+                            chat_id=chat_id,
+                        )
+                    elif (
+                        recorded
+                        and update_id is not None
+                        and (watches_command := _telegram_watches_command(body)) is not None
+                    ):
+                        telegram_user_id = watches_command
+                        command_service = TelegramWatchCommandService(
+                            links=TelegramLinkRepository(session),
+                            watches=HouseholdWatchRepository(session),
+                            outbox=TelegramNotificationOutboxRepository(session),
+                            clock=lambda: received_at,
+                        )
+                        await command_service.handle_watches_command(
+                            telegram_user_id=telegram_user_id,
+                            update_id=update_id,
+                        )
+                    elif (
+                        recorded
+                        and update_id is not None
+                        and (watch_callback := _telegram_watch_callback(body)) is not None
+                    ):
+                        telegram_user_id, callback_query_id, callback_data = watch_callback
+                        command_service = TelegramWatchCommandService(
+                            links=TelegramLinkRepository(session),
+                            watches=HouseholdWatchRepository(session),
+                            outbox=TelegramNotificationOutboxRepository(session),
+                            audit_repository=AuditEventRepository(session),
+                            personal_observation_service=_personal_observation_service(
+                                session=session,
+                                settings=settings,
+                                clock=lambda: received_at,
+                            ),
+                            observation_source_id=settings.telegram_watch_check_source_id,
+                            clock=lambda: received_at,
+                        )
+                        await command_service.handle_watch_callback(
+                            telegram_user_id=telegram_user_id,
+                            callback_query_id=callback_query_id,
+                            callback_data=callback_data,
+                            update_id=update_id,
+                        )
                     await session.commit()
                 if not recorded:
                     code = TelegramWebhookDecisionCode.DUPLICATE
@@ -1011,6 +3443,105 @@ def _agent_intent_adapter(settings: AppSettings) -> AgentIntentAdapter | None:
         timeout_seconds=settings.agent_openai_timeout_seconds,
         base_url=settings.openai_base_url,
     )
+
+
+async def _auth_context_from_headers(
+    session: AsyncSession,
+    *,
+    settings: AppSettings,
+    authorization_header: str | None,
+    household_header: str | None,
+    user_header: str | None,
+) -> tuple[UUID, UUID] | None:
+    auth_session = await _auth_session_from_authorization(session, authorization_header)
+    if auth_session is not None:
+        return auth_session.household_id, auth_session.user_id
+    if not settings.auth_allow_legacy_headers:
+        return None
+    return _auth_context(household_header, user_header)
+
+
+async def _optional_auth_context_from_headers(
+    session: AsyncSession,
+    *,
+    settings: AppSettings,
+    authorization_header: str | None,
+    household_header: str | None,
+    user_header: str | None,
+) -> tuple[UUID, UUID] | None:
+    auth_session = await _auth_session_from_authorization(session, authorization_header)
+    if auth_session is not None:
+        return auth_session.household_id, auth_session.user_id
+    if not settings.auth_allow_legacy_headers:
+        return None
+    return _auth_context(household_header, user_header)
+
+
+async def _user_context_from_headers(
+    session: AsyncSession,
+    *,
+    settings: AppSettings,
+    authorization_header: str | None,
+    user_header: str | None,
+) -> UUID | None:
+    auth_session = await _auth_session_from_authorization(session, authorization_header)
+    if auth_session is not None:
+        return auth_session.user_id
+    if not settings.auth_allow_legacy_headers:
+        return None
+    return _user_context(user_header)
+
+
+def _auth_headers_present(
+    *,
+    settings: AppSettings,
+    authorization_header: str | None,
+    household_header: str | None,
+    user_header: str | None,
+) -> bool:
+    if authorization_header is not None:
+        return True
+    return (
+        settings.auth_allow_legacy_headers
+        and household_header is not None
+        and user_header is not None
+    )
+
+
+def _duration_ms(started_at: float) -> int:
+    return max(0, int((perf_counter() - started_at) * 1000))
+
+
+def _scoped_idempotency_key(
+    prefix: str,
+    *,
+    household_id: UUID,
+    user_id: UUID,
+    idempotency_key: str,
+) -> str:
+    return f"{prefix}:{household_id}:{user_id}:{idempotency_key.strip()}"
+
+
+async def _auth_session_from_authorization(
+    session: AsyncSession,
+    authorization_header: str | None,
+) -> AuthSession | None:
+    token = _bearer_token(authorization_header)
+    if token is None:
+        return None
+    return await IdentityRepository(session).session_by_token_hash(
+        token_hash=token_hash(token),
+        now=datetime.now(UTC),
+    )
+
+
+def _bearer_token(authorization_header: str | None) -> str | None:
+    if authorization_header is None:
+        return None
+    scheme, separator, token = authorization_header.strip().partition(" ")
+    if not separator or scheme.lower() != "bearer" or not token.strip():
+        return None
+    return token.strip()
 
 
 def _auth_context(
@@ -1058,6 +3589,31 @@ def _household_context(household_header: str | None) -> UUID | None:
         return UUID(household_header)
     except ValueError:
         return None
+
+
+async def _try_record_source_health_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    source_id: str,
+    event_type: str,
+    status: str,
+    message: str,
+) -> None:
+    try:
+        async with session_factory() as session:
+            await SourceHealthEventRepository(session).add_event(
+                NewSourceHealthEvent(
+                    id=uuid4(),
+                    source_id=source_id,
+                    event_type=event_type,
+                    status=status,
+                    message=message,
+                    observed_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+    except SQLAlchemyError:
+        return
 
 
 class _AgentWatchCreator:
@@ -1117,6 +3673,197 @@ def _admin_provider_health_response(status: ProviderStatus) -> AdminProviderHeal
     )
 
 
+def _admin_source_health_item_response(source: SourceHealthItem) -> AdminSourceHealthItemResponse:
+    return AdminSourceHealthItemResponse(
+        source_id=source.source_id,
+        display_name=source.display_name,
+        contract_known=source.contract_known,
+        stage=source.stage,
+        enabled=source.enabled,
+        data_kind=source.data_kind,
+        merge_scope=source.merge_scope,
+        background_requests_allowed=source.background_requests_allowed,
+        user_action_required=source.user_action_required,
+        blocked_reasons=list(source.blocked_reasons),
+        current_status=source.current_status,
+        latest_event=(
+            _admin_source_health_event_response(source.latest_event)
+            if source.latest_event is not None
+            else None
+        ),
+    )
+
+
+def _admin_source_health_event_response(
+    event: SourceHealthEventView,
+) -> AdminSourceHealthEventResponse:
+    return AdminSourceHealthEventResponse(
+        id=str(event.id),
+        event_type=event.event_type,
+        status=event.status,
+        message=event.message,
+        observed_at=event.observed_at.isoformat(),
+        cooldown_until=event.cooldown_until.isoformat()
+        if event.cooldown_until is not None
+        else None,
+    )
+
+
+def _admin_worker_health_item_response(worker: WorkerHealthItem) -> AdminWorkerHealthItemResponse:
+    return AdminWorkerHealthItemResponse(
+        worker_id=worker.worker_id,
+        role=worker.role,
+        status=worker.status,
+        effective_status=worker.effective_status,
+        current_phase=worker.current_phase,
+        current_job_kind=worker.current_job_kind,
+        current_job_id=worker.current_job_id,
+        started_at=worker.started_at.isoformat(),
+        last_seen_at=worker.last_seen_at.isoformat(),
+        stopping_at=worker.stopping_at.isoformat() if worker.stopping_at is not None else None,
+        stopped_at=worker.stopped_at.isoformat() if worker.stopped_at is not None else None,
+        last_summary=dict(worker.last_summary),
+    )
+
+
+def _admin_worker_queue_health_response(
+    queue: WorkerQueueHealthItem,
+) -> AdminWorkerQueueHealthResponse:
+    return AdminWorkerQueueHealthResponse(
+        lane=queue.lane,
+        status_counts=dict(queue.status_counts),
+        due_count=queue.due_count,
+        delayed_count=queue.delayed_count,
+        stale_count=queue.stale_count,
+        expired_count=queue.expired_count,
+        oldest_queued_age_seconds=queue.oldest_queued_age_seconds,
+        oldest_locked_age_seconds=queue.oldest_locked_age_seconds,
+        warning_level=queue.warning_level,
+    )
+
+
+def _admin_worker_health_alert_response(
+    alert: WorkerHealthAlert,
+) -> AdminWorkerHealthAlertResponse:
+    return AdminWorkerHealthAlertResponse(
+        severity=alert.severity,
+        code=alert.code,
+        subject_kind=alert.subject_kind,
+        subject_id=alert.subject_id,
+        message=alert.message,
+    )
+
+
+def _admin_worker_control_response(state: WorkerControlState) -> AdminWorkerControlResponse:
+    return AdminWorkerControlResponse(
+        drain_requested=state.drain_requested,
+        reason=state.reason,
+        requested_at=state.requested_at.isoformat() if state.requested_at is not None else None,
+        cleared_at=state.cleared_at.isoformat() if state.cleared_at is not None else None,
+        updated_at=state.updated_at.isoformat() if state.updated_at is not None else None,
+    )
+
+
+def _admin_audit_event_response(event: AuditEventRecord) -> AdminAuditEventResponse:
+    return AdminAuditEventResponse(
+        id=str(event.id),
+        actor_user_id=str(event.actor_user_id) if event.actor_user_id is not None else None,
+        action=event.action,
+        entity_type=event.entity_type,
+        entity_id=str(event.entity_id),
+        summary=event.summary,
+        created_at=event.created_at.isoformat(),
+    )
+
+
+def _privacy_export_fetch_limit(collection: str) -> int:
+    return _PRIVACY_EXPORT_LIMITS[collection] + 1
+
+
+def _privacy_export_response(
+    *,
+    exported_at: datetime,
+    household_id: UUID,
+    user_id: UUID,
+    watches: tuple[WatchRecord, ...],
+    audit_events: tuple[AuditEventRecord, ...],
+    manual_confirmations: tuple[ManualPriceConfirmation, ...],
+    observed_offers: tuple[BrowserObservedOffer, ...],
+    deal_candidates: tuple[DealCandidate, ...],
+) -> PrivacyExportResponse:
+    limits = dict(_PRIVACY_EXPORT_LIMITS)
+    return PrivacyExportResponse(
+        format_version=1,
+        exported_at=exported_at.isoformat(),
+        household_id=str(household_id),
+        user_id=str(user_id),
+        collection_limits=limits,
+        truncated={
+            "watches": len(watches) > limits["watches"],
+            "audit_events": len(audit_events) > limits["audit_events"],
+            "manual_price_confirmations": (
+                len(manual_confirmations) > limits["manual_price_confirmations"]
+            ),
+            "browser_observed_offers": (len(observed_offers) > limits["browser_observed_offers"]),
+            "deal_candidates": len(deal_candidates) > limits["deal_candidates"],
+        },
+        omitted_fields=list(_PRIVACY_EXPORT_OMITTED_FIELDS),
+        watches=[_privacy_watch_response(watch) for watch in watches[: limits["watches"]]],
+        audit_events=[
+            _admin_audit_event_response(event) for event in audit_events[: limits["audit_events"]]
+        ],
+        manual_price_confirmations=[
+            _manual_price_confirmation_response(confirmation)
+            for confirmation in manual_confirmations[: limits["manual_price_confirmations"]]
+        ],
+        browser_observed_offers=[
+            _browser_observed_offer_response(offer)
+            for offer in observed_offers[: limits["browser_observed_offers"]]
+        ],
+        deal_candidates=[
+            _deal_candidate_response(candidate)
+            for candidate in deal_candidates[: limits["deal_candidates"]]
+        ],
+    )
+
+
+def _privacy_watch_response(watch: WatchRecord) -> PrivacyWatchResponse:
+    return PrivacyWatchResponse(
+        id=str(watch.id),
+        household_id=str(watch.household_id),
+        owner_user_id=str(watch.owner_user_id),
+        origin=watch.origin,
+        destination=watch.destination,
+        departure_date=watch.departure_date,
+        return_date=watch.return_date,
+        passengers=watch.passengers,
+        currency=watch.currency,
+        allowed_provider_ids=list(watch.allowed_provider_ids),
+        enabled=watch.enabled,
+        paused_until=watch.paused_until.isoformat() if watch.paused_until is not None else None,
+        next_eligible_at=(
+            watch.next_eligible_at.isoformat() if watch.next_eligible_at is not None else None
+        ),
+        scan_interval_seconds=watch.scan_interval_seconds,
+        last_scanned_at=(
+            watch.last_scanned_at.isoformat() if watch.last_scanned_at is not None else None
+        ),
+        last_scan_status=watch.last_scan_status,
+        last_scan_error_code=watch.last_scan_error_code,
+        created_at=watch.created_at.isoformat(),
+        updated_at=watch.updated_at.isoformat(),
+        version=watch.version,
+        archived_at=watch.archived_at.isoformat() if watch.archived_at is not None else None,
+        archived_by_user_id=(
+            str(watch.archived_by_user_id) if watch.archived_by_user_id is not None else None
+        ),
+        deleted_at=watch.deleted_at.isoformat() if watch.deleted_at is not None else None,
+        deleted_by_user_id=(
+            str(watch.deleted_by_user_id) if watch.deleted_by_user_id is not None else None
+        ),
+    )
+
+
 def _price_source_response(source: PriceSource) -> PriceSourceResponse:
     return PriceSourceResponse(
         id=source.id,
@@ -1154,6 +3901,7 @@ def _source_contract_response(source: SourceReadiness) -> SourceContractResponse
         required_env=list(source.required_env),
         operations=list(source.operations),
         invariants=list(source.invariants),
+        egress_policy=list(source.egress_policy),
         notes=source.notes,
         enabled=source.enabled,
         credentials_present=source.credentials_present,
@@ -1163,6 +3911,40 @@ def _source_contract_response(source: SourceReadiness) -> SourceContractResponse
         background_requests_allowed=source.background_requests_allowed,
         user_action_required=source.user_action_required,
         blocked_reasons=list(source.blocked_reasons),
+    )
+
+
+def _personal_browser_source_spec(source_id: str) -> RuAggregatorSpec | None:
+    return next(
+        (spec for spec in default_ru_aggregator_specs() if spec.source_id == source_id),
+        None,
+    )
+
+
+def _browser_parser_test_url_denial(
+    url: str,
+    *,
+    settings: AppSettings,
+) -> tuple[int, str, str] | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return (422, "invalid_final_url", "final_url must be http(s) with a host")
+    if parsed.username is not None or parsed.password is not None:
+        return (422, "invalid_final_url", "final_url must not contain credentials")
+    host = parsed.hostname.lower()
+    if host not in settings.personal_observer_allowed_hosts:
+        return (403, "host_not_allowed", "final_url host is not allowed for parser testing")
+    return None
+
+
+def _browser_parser_price_candidate_response(
+    candidate: PriceCandidate,
+) -> BrowserParserPriceCandidateResponse:
+    return BrowserParserPriceCandidateResponse(
+        raw_text=candidate.raw_text,
+        amount=_money_response(candidate.amount),
+        accepted=candidate.accepted,
+        rejection_reason=candidate.rejection_reason,
     )
 
 
@@ -1176,6 +3958,40 @@ def _browser_source_response(source: BrowserSource, *, now: datetime) -> Browser
         background_allowed=source.background_allowed,
         supported_routes=list(source.supported_routes),
         current_health=source.current_health,
+    )
+
+
+def _personal_browser_source_response(
+    spec: RuAggregatorSpec,
+    *,
+    settings: AppSettings,
+) -> BrowserSourceResponse:
+    host_allowed = any(
+        host in settings.personal_observer_allowed_hosts for host in spec.allowed_hosts
+    )
+    source_enabled = (
+        settings.personal_observer_enabled
+        and spec.source_id in settings.ru_aggregators_enabled
+        and host_allowed
+    )
+    if not host_allowed:
+        current_health = "host_not_allowed"
+        permission_status = "missing"
+    elif source_enabled:
+        current_health = "healthy"
+        permission_status = "active"
+    else:
+        current_health = "disabled"
+        permission_status = "active"
+    return BrowserSourceResponse(
+        source_id=spec.source_id,
+        display_name=spec.display_name,
+        enabled=source_enabled,
+        permission_status=permission_status,
+        user_action_required=True,
+        background_allowed=False,
+        supported_routes=["manual_user_action"],
+        current_health=current_health,
     )
 
 
@@ -1322,6 +4138,22 @@ def _search_intent_from_body(body: SearchRequestBody) -> SearchIntent:
     )
 
 
+def _deal_search_intent_json(intent: SearchIntent) -> str:
+    payload = {
+        "origin": intent.origin,
+        "destination": intent.destination,
+        "departure_date": intent.departure_date,
+        "return_date": intent.return_date,
+        "passengers": intent.passengers,
+        "adults": intent.adults,
+        "children": intent.children,
+        "infants": intent.infants,
+        "trip_type": str(intent.trip_type),
+        "currency": intent.currency,
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
 def _live_observation_response(observation: LiveObservation) -> LiveObservationResponse:
     observed_at = observation.completed_at or observation.started_at
     return LiveObservationResponse(
@@ -1336,7 +4168,126 @@ def _live_observation_response(observation: LiveObservation) -> LiveObservationR
     )
 
 
+def _personal_observation_service(
+    *,
+    session: AsyncSession,
+    settings: AppSettings,
+    clock: Callable[[], datetime],
+) -> PersonalObservationService:
+    runner = PersonalObserverRunnerAdapter(
+        PersonalObserverRunner(
+            config=PersonalObserverConfig.from_settings(settings),
+            clock=clock,
+            crawl4ai_markdown_provider=crawl4ai_browser_markdown_provider_from_settings(settings),
+        )
+    )
+    return PersonalObservationService(
+        jobs=BrowserObservationJobRepository(session),
+        grants=LiveObservationRepository(session),
+        observed_offers=BrowserObservedOfferRepository(session),
+        runner=runner,
+        observer_enabled=settings.personal_observer_enabled,
+        clock=clock,
+        result_ttl=timedelta(seconds=settings.personal_observer_result_ttl_seconds),
+    )
+
+
+def _deal_discovery_service(settings: AppSettings) -> DealDiscoveryService | None:
+    if not settings.searxng_enabled or not settings.crawl4ai_enabled:
+        return None
+    return DealDiscoveryService(
+        search_client=SearxngClient(
+            base_url=settings.searxng_base_url,
+            timeout_seconds=settings.searxng_timeout_seconds,
+        ),
+        markdown_client=Crawl4AiMarkdownClient(
+            enabled=settings.crawl4ai_enabled,
+            mode=settings.crawl4ai_mode,
+            base_url=settings.crawl4ai_base_url,
+            api_token=settings.crawl4ai_api_token,
+            timeout_seconds=settings.crawl4ai_timeout_seconds,
+        ),
+        url_policy=DealUrlPolicy(allowed_hosts=settings.deal_discovery_allowed_hosts),
+    )
+
+
+def _personal_observation_response(
+    job: BrowserObservationJobRecord,
+    offers: tuple[BrowserObservedOffer, ...],
+) -> PersonalObservationResponse:
+    return PersonalObservationResponse(
+        job_id=str(job.id),
+        source_id=job.source_id,
+        search_id=job.search_id,
+        status=job.status.value,
+        attempts=job.attempts,
+        created_at=job.created_at.isoformat(),
+        started_at=job.started_at.isoformat() if job.started_at is not None else None,
+        waiting_since=job.waiting_since.isoformat() if job.waiting_since is not None else None,
+        operator_resume_requested_at=(
+            job.operator_resume_requested_at.isoformat()
+            if job.operator_resume_requested_at is not None
+            else None
+        ),
+        operator_abort_requested_at=(
+            job.operator_abort_requested_at.isoformat()
+            if job.operator_abort_requested_at is not None
+            else None
+        ),
+        completed_at=job.completed_at.isoformat() if job.completed_at is not None else None,
+        next_retry_at=job.next_retry_at.isoformat() if job.next_retry_at is not None else None,
+        expires_at=job.expires_at.isoformat(),
+        operator_instruction=_personal_observation_instruction(job),
+        error_code=job.error_code.value if job.error_code is not None else None,
+        error_message=job.error_message,
+        browser_observed_offers=[_browser_observed_offer_response(offer) for offer in offers],
+    )
+
+
+def _deal_discovery_job_response(
+    job: DealDiscoveryJobRecord,
+    candidates: tuple[DealCandidate, ...],
+) -> DealDiscoveryJobResponse:
+    return DealDiscoveryJobResponse(
+        job_id=str(job.id),
+        search_id=job.search_id,
+        status=job.status,
+        attempts=job.attempts,
+        max_attempts=job.max_attempts,
+        created_at=job.created_at.isoformat(),
+        started_at=job.started_at.isoformat() if job.started_at is not None else None,
+        completed_at=job.completed_at.isoformat() if job.completed_at is not None else None,
+        next_retry_at=job.next_retry_at.isoformat() if job.next_retry_at is not None else None,
+        deadline_at=job.deadline_at.isoformat(),
+        result_count=job.result_count,
+        error_code=job.error_code,
+        error_message=job.error_message,
+        candidates=[_deal_candidate_response(candidate) for candidate in candidates],
+    )
+
+
+def _personal_observation_instruction(job: BrowserObservationJobRecord) -> str | None:
+    if job.operator_abort_requested_at is not None:
+        return "Abort requested; the worker will stop this browser observation checkpoint."
+    if job.operator_resume_requested_at is not None:
+        return "Resume requested; the worker will capture the visible provider result page."
+    return {
+        ObservationStatus.WAITING_FOR_USER: (
+            "Complete any provider-side checks in the opened browser; Flight Hunter will capture "
+            "the visible result page after resume or local checkpoint timeout."
+        ),
+        ObservationStatus.NEEDS_HUMAN: "Open the provider page and verify the price manually.",
+        ObservationStatus.SOURCE_CHALLENGE: (
+            "The source showed a challenge page; verify manually before trusting this result."
+        ),
+        ObservationStatus.SELECTOR_DRIFT: (
+            "The parser could not match expected selectors; run the sanitized fixture parser."
+        ),
+    }.get(job.status)
+
+
 def _offer_response(offer: FlightOffer, *, ranking_reasons: tuple[str, ...]) -> OfferResponse:
+    risk = assess_offer_risk(offer)
     return OfferResponse(
         provider_id=offer.provider_id,
         provider_offer_id=offer.provider_offer_id,
@@ -1346,11 +4297,21 @@ def _offer_response(offer: FlightOffer, *, ranking_reasons: tuple[str, ...]) -> 
         return_date=offer.return_date,
         total_price=_money_response(offer.total_price),
         passengers=offer.passengers,
+        price_basis=PriceBasis(offer.price_basis).value,
         observed_at=offer.observed_at.isoformat(),
         freshness=offer.freshness.value,
         requires_live_confirmation=offer.requires_live_confirmation,
         baggage_summary=offer.baggage_summary,
         ranking_reasons=list(ranking_reasons),
+        risk=_offer_risk_response(risk),
+    )
+
+
+def _offer_risk_response(risk: OfferRiskAssessment) -> OfferRiskResponse:
+    return OfferRiskResponse(
+        level=risk.level.value,
+        flags=[flag.value for flag in risk.flags],
+        explanations=list(risk.explanations),
     )
 
 
@@ -1430,7 +4391,38 @@ def _deal_candidate_response(candidate: DealCandidate) -> DealCandidateResponse:
         extracted_date_window=candidate.extracted_date_window,
         confidence=_confidence_value(candidate.confidence),
         discovered_at=candidate.discovered_at.isoformat(),
+        expires_at=candidate.expires_at.isoformat() if candidate.expires_at is not None else None,
         requires_manual_verification=candidate.requires_manual_verification,
+    )
+
+
+def _auth_me_response(auth_session: AuthSession) -> AuthMeResponse:
+    return AuthMeResponse(
+        household_id=str(auth_session.household_id),
+        user_id=str(auth_session.user_id),
+        role=HouseholdRole(auth_session.role).value,
+        expires_at=auth_session.expires_at.isoformat(),
+    )
+
+
+def _manual_price_confirmation_response(
+    confirmation: ManualPriceConfirmation,
+) -> ManualPriceConfirmationResponse:
+    return ManualPriceConfirmationResponse(
+        id=str(confirmation.id),
+        household_id=str(confirmation.household_id),
+        user_id=str(confirmation.user_id),
+        target_kind=ResultKind(confirmation.target_kind).value,
+        target_id=confirmation.target_id,
+        source_id=confirmation.source_id,
+        status=ManualConfirmationStatus(confirmation.status).value,
+        confirmed_at=confirmation.confirmed_at.isoformat(),
+        confirmed_price=(
+            _money_response(confirmation.confirmed_price)
+            if confirmation.confirmed_price is not None
+            else None
+        ),
+        note=confirmation.note,
     )
 
 
@@ -1494,19 +4486,255 @@ def _nearby_airport_response(nearby: NearbyAirport) -> NearbyAirportResponse:
     )
 
 
-def _date_matrix_response(matrix: DateMatrix) -> DateMatrixResponse:
-    return DateMatrixResponse(
-        cells=[_date_matrix_cell_response(cell) for cell in matrix.cells],
-        provider_calls_required=matrix.provider_calls_required,
-        priced=matrix.priced,
+def _cached_radar_offers(
+    body: CachedRadarRequestBody,
+    *,
+    provider_instances: dict[str, AviasalesDataAdapter],
+) -> tuple[tuple[FlightOffer, ...], list[str], int]:
+    if body.provider_ids is not None and "aviasales_data" not in body.provider_ids:
+        return (), ["aviasales_data_not_requested"], 0
+    if body.passengers != 1 or body.children > 0 or body.infants > 0:
+        return (), ["passenger_mix_not_supported"], 0
+    provider = provider_instances.get("aviasales_data")
+    if provider is None:
+        return (), ["aviasales_data_credentials_missing"], 0
+
+    intent = _cached_radar_search_intent(body)
+    request_fingerprint = _cached_radar_fingerprint(body)
+    try:
+        if body.radar_kind == "month_matrix":
+            offers = provider.month_matrix(
+                intent,
+                request_fingerprint=request_fingerprint,
+                context=ExecutionContext.API_REQUEST,
+            )
+        elif body.radar_kind == "nearest_places_matrix":
+            offers = provider.nearest_places_matrix(
+                intent,
+                request_fingerprint=request_fingerprint,
+                context=ExecutionContext.API_REQUEST,
+                distance_km=body.nearby_distance_km,
+            )
+        elif body.radar_kind == "price_range":
+            value_min, value_max = _cached_radar_price_range_major_units(body)
+            offers = provider.search_by_price_range(
+                intent,
+                request_fingerprint=request_fingerprint,
+                context=ExecutionContext.API_REQUEST,
+                value_min=value_min,
+                value_max=value_max,
+                locale="ru",
+            )
+        elif body.radar_kind == "grouped_prices":
+            offers = provider.grouped_prices(
+                intent,
+                request_fingerprint=request_fingerprint,
+                context=ExecutionContext.API_REQUEST,
+            )
+        elif body.radar_kind == "latest_prices":
+            offers = provider.latest_prices(
+                intent,
+                request_fingerprint=request_fingerprint,
+                context=ExecutionContext.API_REQUEST,
+            )
+        elif body.radar_kind == "popular_directions":
+            offers = provider.popular_directions(
+                intent,
+                request_fingerprint=request_fingerprint,
+                context=ExecutionContext.API_REQUEST,
+                locale="ru",
+            )
+        else:
+            offers = provider.special_offers(
+                intent,
+                request_fingerprint=request_fingerprint,
+                context=ExecutionContext.API_REQUEST,
+                locale="ru",
+            )
+    except AviasalesDataError:
+        return (), ["aviasales_data_unavailable"], 1
+
+    if not offers:
+        return (), ["aviasales_data_empty"], 1
+    return offers, [], 1
+
+
+def _cached_radar_response(
+    body: CachedRadarRequestBody,
+    *,
+    offers: tuple[FlightOffer, ...],
+    deal_candidates: tuple[DealCandidate, ...] = (),
+    deal_candidates_saved: int = 0,
+    pricing_denials: list[str],
+    provider_calls_required: int,
+) -> CachedRadarResponse:
+    ranked = sorted(offers, key=offer_ranking_key)
+    warnings = ["cached_prices_require_external_confirmation"] if ranked else []
+    return CachedRadarResponse(
+        radar_kind=body.radar_kind,
+        offers=[
+            _offer_response(
+                offer,
+                ranking_reasons=_cached_radar_ranking_reasons(body.radar_kind),
+            )
+            for offer in ranked
+        ],
+        deal_candidates=[_deal_candidate_response(candidate) for candidate in deal_candidates],
+        deal_candidates_saved=deal_candidates_saved,
+        provider_calls_required=provider_calls_required,
+        priced=bool(ranked),
+        pricing_denials=pricing_denials,
+        warnings=warnings,
     )
 
 
-def _date_matrix_cell_response(cell: DateMatrixCell) -> DateMatrixCellResponse:
+def _cached_radar_search_intent(body: CachedRadarRequestBody) -> SearchIntent:
+    return SearchIntent(
+        origin=body.origin,
+        destination=body.destination,
+        departure_date=body.departure_date.isoformat(),
+        return_date=body.return_date.isoformat() if body.return_date is not None else None,
+        passengers=body.passengers,
+        adults=body.adults,
+        children=body.children,
+        infants=body.infants,
+        currency=body.currency,
+    )
+
+
+def _cached_radar_fingerprint(body: CachedRadarRequestBody) -> str:
+    return (
+        "cached-radar:"
+        f"{body.radar_kind}:{body.origin}:{body.destination}:"
+        f"{body.departure_date}:{body.return_date}:"
+        f"{body.passengers}:{body.currency}:{body.nearby_distance_km}:"
+        f"{body.min_price_minor}:{body.max_price_minor}"
+    )
+
+
+def _cached_radar_price_range_major_units(body: CachedRadarRequestBody) -> tuple[int, int]:
+    if body.min_price_minor is None or body.max_price_minor is None:
+        raise ValueError("price_range requires min_price_minor and max_price_minor")
+    return body.min_price_minor // 100, body.max_price_minor // 100
+
+
+def _cached_radar_ranking_reasons(radar_kind: str) -> tuple[str, ...]:
+    reason = {
+        "month_matrix": "cached_month_matrix",
+        "nearest_places_matrix": "cached_nearest_places_matrix",
+        "price_range": "cached_price_range",
+        "grouped_prices": "cached_grouped_prices",
+        "latest_prices": "cached_latest_prices",
+        "popular_directions": "cached_popular_directions",
+        "special_offers": "cached_special_offers",
+    }.get(radar_kind, "cached_radar")
+    return (reason, "requires_live_confirmation", "baggage_unknown")
+
+
+def _date_matrix_cached_offers(
+    body: DateMatrixRequestBody,
+    *,
+    provider_instances: dict[str, AviasalesDataAdapter],
+) -> tuple[tuple[FlightOffer, ...], list[str], int]:
+    if body.origin is None or body.destination is None:
+        return (), ["route_required_for_pricing"], 0
+    if body.provider_ids is not None and "aviasales_data" not in body.provider_ids:
+        return (), ["aviasales_data_not_requested"], 0
+    if body.passengers != 1 or body.children > 0 or body.infants > 0:
+        return (), ["passenger_mix_not_supported"], 0
+    provider = provider_instances.get("aviasales_data")
+    if provider is None:
+        return (), ["aviasales_data_credentials_missing"], 0
+    try:
+        offers = provider.week_matrix(
+            SearchIntent(
+                origin=body.origin,
+                destination=body.destination,
+                departure_date=body.departure_date.isoformat(),
+                return_date=body.return_date.isoformat() if body.return_date is not None else None,
+                passengers=body.passengers,
+                adults=body.adults,
+                children=body.children,
+                infants=body.infants,
+                currency=body.currency,
+            ),
+            request_fingerprint=(
+                "date-matrix:"
+                f"{body.origin}:{body.destination}:"
+                f"{body.departure_date}:{body.return_date}:"
+                f"{body.passengers}:{body.currency}"
+            ),
+            context=ExecutionContext.API_REQUEST,
+        )
+    except AviasalesDataError:
+        return (), ["aviasales_data_unavailable"], 1
+    if not offers:
+        return (), ["aviasales_data_empty"], 1
+    return offers, [], 1
+
+
+def _date_matrix_response(
+    matrix: DateMatrix,
+    *,
+    offers: tuple[FlightOffer, ...] = (),
+    pricing_denials: list[str] | None = None,
+    provider_calls_required: int | None = None,
+) -> DateMatrixResponse:
+    priced_offers = _date_matrix_offer_index(offers)
+    return DateMatrixResponse(
+        cells=[
+            _date_matrix_cell_response(
+                cell,
+                offer=priced_offers.get(_date_matrix_cell_key(cell)),
+            )
+            for cell in matrix.cells
+        ],
+        provider_calls_required=(
+            provider_calls_required
+            if provider_calls_required is not None
+            else matrix.provider_calls_required
+        ),
+        priced=bool(priced_offers) or matrix.priced,
+        pricing_denials=pricing_denials or [],
+    )
+
+
+def _date_matrix_offer_index(
+    offers: tuple[FlightOffer, ...],
+) -> dict[tuple[str, str | None], FlightOffer]:
+    indexed: dict[tuple[str, str | None], FlightOffer] = {}
+    for offer in offers:
+        key = (offer.departure_date, offer.return_date)
+        existing = indexed.get(key)
+        if existing is None or offer.total_price.minor_units < existing.total_price.minor_units:
+            indexed[key] = offer
+    return indexed
+
+
+def _date_matrix_cell_key(cell: DateMatrixCell) -> tuple[str, str | None]:
+    return (
+        cell.departure_date.isoformat(),
+        cell.return_date.isoformat() if cell.return_date is not None else None,
+    )
+
+
+def _date_matrix_cell_response(
+    cell: DateMatrixCell,
+    *,
+    offer: FlightOffer | None = None,
+) -> DateMatrixCellResponse:
     return DateMatrixCellResponse(
         departure_date=cell.departure_date.isoformat(),
         return_date=cell.return_date.isoformat() if cell.return_date is not None else None,
         stay_days=cell.stay_days,
+        amount_minor=offer.total_price.minor_units if offer is not None else None,
+        currency=offer.total_price.currency if offer is not None else None,
+        provider_id=offer.provider_id if offer is not None else None,
+        freshness=offer.freshness.value if offer is not None else None,
+        observed_at=offer.observed_at.isoformat() if offer is not None else None,
+        requires_live_confirmation=(
+            offer.requires_live_confirmation if offer is not None else None
+        ),
     )
 
 
@@ -1519,14 +4747,153 @@ def _watch_response(watch: WatchRecord) -> WatchResponse:
         destination=watch.destination,
         departure_date=watch.departure_date,
         return_date=watch.return_date,
+        passengers=watch.passengers,
+        currency=watch.currency,
+        allowed_provider_ids=list(watch.allowed_provider_ids),
         enabled=watch.enabled,
+        paused_until=watch.paused_until.isoformat() if watch.paused_until is not None else None,
+        next_eligible_at=(
+            watch.next_eligible_at.isoformat() if watch.next_eligible_at is not None else None
+        ),
+        scan_interval_seconds=watch.scan_interval_seconds,
+        last_scanned_at=(
+            watch.last_scanned_at.isoformat() if watch.last_scanned_at is not None else None
+        ),
+        last_scan_status=watch.last_scan_status,
+        last_scan_error_code=watch.last_scan_error_code,
         created_at=watch.created_at.isoformat(),
+        updated_at=watch.updated_at.isoformat(),
+        version=watch.version,
+        archived_at=watch.archived_at.isoformat() if watch.archived_at is not None else None,
+        deleted_at=watch.deleted_at.isoformat() if watch.deleted_at is not None else None,
+    )
+
+
+def _watch_snapshot_response(snapshot: PriceSnapshotRecord) -> WatchPriceSnapshotResponse:
+    return WatchPriceSnapshotResponse(
+        provider_id=snapshot.provider_id,
+        itinerary_fingerprint=snapshot.itinerary_fingerprint,
+        observed_at=snapshot.observed_at.isoformat(),
+        amount_minor=snapshot.price.minor_units,
+        currency=snapshot.price.currency,
+        freshness=snapshot.freshness.value,
+        requires_live_confirmation=snapshot.requires_live_confirmation,
+    )
+
+
+def _watch_update_request_fields(body: WatchUpdateRequestBody) -> dict[str, object]:
+    fields: dict[str, object] = {}
+    for field in body.model_fields_set:
+        if field == "expected_version":
+            continue
+        fields[field] = getattr(body, field)
+    return fields
+
+
+def _watch_lifecycle_response(
+    *,
+    watch_id: UUID,
+    result: WatchMutationResult,
+    success: str,
+) -> WatchLifecycleResponse | JSONResponse:
+    if result.status == "not_found":
+        return _watch_not_found_response()
+    if result.status == "version_conflict":
+        return _watch_version_conflict_response(result.current_version)
+    if result.status != success:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": "watch_lifecycle_conflict",
+                "message": "watch lifecycle operation was not applied",
+                "status": result.status,
+            },
+        )
+    return WatchLifecycleResponse(
+        watch_id=str(watch_id),
+        status=success,
+        version=result.current_version or 1,
+    )
+
+
+def _watch_not_found_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content={"code": "watch_not_found", "message": "watch was not found"},
+    )
+
+
+def _watch_version_conflict_response(current_version: int | None) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "code": "watch_version_conflict",
+            "message": "watch version is stale",
+            "current_version": current_version,
+        },
     )
 
 
 def _telegram_update_id(body: dict[str, object]) -> int | None:
     update_id = body.get("update_id")
     return update_id if type(update_id) is int else None
+
+
+def _telegram_link_command(body: dict[str, object]) -> tuple[int, int, str] | None:
+    message = body.get("message")
+    if not isinstance(message, dict):
+        return None
+    text = message.get("text")
+    if not isinstance(text, str):
+        return None
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) != 2 or parts[0] != "/link":
+        return None
+    sender = message.get("from")
+    chat = message.get("chat")
+    if not isinstance(sender, dict) or not isinstance(chat, dict):
+        return None
+    telegram_user_id = sender.get("id")
+    chat_id = chat.get("id")
+    if type(telegram_user_id) is not int or type(chat_id) is not int:
+        return None
+    return telegram_user_id, chat_id, parts[1].strip()
+
+
+def _telegram_watches_command(body: dict[str, object]) -> int | None:
+    message = body.get("message")
+    if not isinstance(message, dict):
+        return None
+    text = message.get("text")
+    if not isinstance(text, str):
+        return None
+    command = text.strip().split(maxsplit=1)[0]
+    if command != "/watches":
+        return None
+    sender = message.get("from")
+    if not isinstance(sender, dict):
+        return None
+    telegram_user_id = sender.get("id")
+    return telegram_user_id if type(telegram_user_id) is int else None
+
+
+def _telegram_watch_callback(body: dict[str, object]) -> tuple[int, str, str] | None:
+    callback_query = body.get("callback_query")
+    if not isinstance(callback_query, dict):
+        return None
+    sender = callback_query.get("from")
+    callback_query_id = callback_query.get("id")
+    data = callback_query.get("data")
+    if (
+        not isinstance(sender, dict)
+        or not isinstance(callback_query_id, str)
+        or not isinstance(data, str)
+    ):
+        return None
+    telegram_user_id = sender.get("id")
+    if type(telegram_user_id) is not int:
+        return None
+    return telegram_user_id, callback_query_id, data
 
 
 def _telegram_response_status(code: TelegramWebhookDecisionCode) -> tuple[int, str]:

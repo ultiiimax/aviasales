@@ -20,7 +20,9 @@ def test_source_contracts_endpoint_exposes_readiness_without_secret_values(monke
     assert sources["fake"]["stage"] == "implemented"
     assert sources["aviasales_data"]["stage"] == "implemented"
     assert sources["aviasales_data"]["credentials_present"] is True
+    assert "https://api.travelpayouts.com" in sources["aviasales_data"]["egress_policy"]
     assert sources["aviasales_search"]["stage"] == "policy_skeleton"
     assert sources["aviasales_search"]["merge_scope"] == "provider_isolated"
     assert sources["aviasales_search"]["background_requests_allowed"] is False
+    assert "not_configured_until_access_approved" in sources["aviasales_search"]["egress_policy"]
     assert "secret-value" not in str(body)

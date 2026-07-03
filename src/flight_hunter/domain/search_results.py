@@ -172,6 +172,7 @@ class DealCandidate:
     confidence: Confidence | str
     discovered_at: datetime
     requires_manual_verification: bool = True
+    expires_at: datetime | None = None
 
     def __post_init__(self) -> None:
         _require_nonempty(self.source_id, "source_id")
@@ -179,6 +180,10 @@ class DealCandidate:
         _require_nonempty(self.title, "title")
         _require_nonempty(self.summary_ru, "summary_ru")
         require_aware_datetime(self.discovered_at, "discovered_at")
+        if self.expires_at is not None:
+            require_aware_datetime(self.expires_at, "expires_at")
+            if self.expires_at <= self.discovered_at:
+                raise ValueError("expires_at must be after discovered_at")
         object.__setattr__(self, "confidence", Confidence(self.confidence))
 
     @property
