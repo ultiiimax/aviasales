@@ -287,7 +287,7 @@ async def test_repository_updates_watch_with_optimistic_version() -> None:
             updates={
                 "enabled": False,
                 "scan_interval_seconds": 7200,
-                "allowed_provider_ids": ("fake", "aviasales_data"),
+                "allowed_provider_ids": ("fake", "aviasales_search"),
             },
         )
         stale = await repository.update_watch(
@@ -310,7 +310,7 @@ async def test_repository_updates_watch_with_optimistic_version() -> None:
     assert updated.watch.version == 2
     assert updated.watch.enabled is False
     assert updated.watch.scan_interval_seconds == 7200
-    assert updated.watch.allowed_provider_ids == ("fake", "aviasales_data")
+    assert updated.watch.allowed_provider_ids == ("fake", "aviasales_search")
     assert updated.watch.updated_at == NOW + timedelta(minutes=5)
     assert stale.status == "version_conflict"
     assert stale.current_version == 2

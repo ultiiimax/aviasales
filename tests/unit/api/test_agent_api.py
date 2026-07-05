@@ -235,10 +235,10 @@ class NoopIntentAdapter:
 def _settings(**overrides: object) -> AppSettings:
     values = {
         "database_url": "sqlite+aiosqlite:///:memory:",
-        "aviasales_data_enabled": False,
-        "travelpayouts_api_token": None,
-        "aviasales_data_default_market": "pl",
-        "aviasales_data_internal_rpm": 30,
+        "aviasales_search_enabled": False,
+        "aviasales_search_signature": None,
+        "aviasales_search_marker": None,
+        "aviasales_search_internal_rpm": 20,
         "telegram_enabled": False,
         "telegram_webhook_secret": None,
     }

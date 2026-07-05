@@ -7,7 +7,11 @@ services:
       uv run uvicorn flight_hunter.api.app:app --host 0.0.0.0 --port 8000"
     environment:
       DATABASE_URL: sqlite+aiosqlite:////data/flight_hunter.db
-      AVIASALES_DATA_ENABLED: "false"
+      APP_SECRET_KEY: "${APP_SECRET_KEY:-compose-dev-secret-change-me}"
+      AVIASALES_SEARCH_ENABLED: "${AVIASALES_SEARCH_ENABLED:-false}"
+      AVIASALES_SEARCH_SIGNATURE: "${AVIASALES_SEARCH_SIGNATURE:-}"
+      AVIASALES_SEARCH_MARKER: "${AVIASALES_SEARCH_MARKER:-}"
+      AVIASALES_SEARCH_INTERNAL_RPM: "${AVIASALES_SEARCH_INTERNAL_RPM:-20}"
       TELEGRAM_ENABLED: "false"
       PERSONAL_OBSERVER_ENABLED: "false"
       SEARXNG_ENABLED: "${SEARXNG_ENABLED:-false}"
@@ -32,7 +36,11 @@ services:
       uv run flight-hunter-worker --loop --idle-sleep-seconds 10"
     environment:
       DATABASE_URL: sqlite+aiosqlite:////data/flight_hunter.db
-      AVIASALES_DATA_ENABLED: "false"
+      APP_SECRET_KEY: "${APP_SECRET_KEY:-compose-dev-secret-change-me}"
+      AVIASALES_SEARCH_ENABLED: "${AVIASALES_SEARCH_ENABLED:-false}"
+      AVIASALES_SEARCH_SIGNATURE: "${AVIASALES_SEARCH_SIGNATURE:-}"
+      AVIASALES_SEARCH_MARKER: "${AVIASALES_SEARCH_MARKER:-}"
+      AVIASALES_SEARCH_INTERNAL_RPM: "${AVIASALES_SEARCH_INTERNAL_RPM:-20}"
       TELEGRAM_ENABLED: "false"
       PERSONAL_OBSERVER_ENABLED: "false"
       SEARXNG_ENABLED: "${SEARXNG_ENABLED:-false}"

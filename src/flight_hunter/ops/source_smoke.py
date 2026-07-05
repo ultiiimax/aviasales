@@ -12,7 +12,10 @@ from flight_hunter.config import AppSettings, load_env_file
 from flight_hunter.deals.crawl4ai_client import Crawl4AiClientError, Crawl4AiMarkdownClient
 from flight_hunter.deals.models import DealPageMarkdown, SearxngSearchResponse
 from flight_hunter.deals.searxng_client import SearxngClient, SearxngClientError
-from flight_hunter.providers.aviasales_data.smoke import run_smoke_check
+from flight_hunter.providers.aviasales_search.client import (
+    AviasalesSearchClient,
+    AviasalesSearchError,
+)
 
 
 class SearxngSmokeClient(Protocol):
@@ -27,6 +30,10 @@ class SearxngSmokeClient(Protocol):
 
 class Crawl4AiSmokeClient(Protocol):
     async def fetch_markdown(self, url: str, *, title: str = "") -> DealPageMarkdown: ...
+
+
+class AviasalesSearchSmokeClient(Protocol):
+    def suggest_places(self, term: str, *, max_results: int = 5) -> tuple[object, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,16 +57,22 @@ async def run_source_smoke(
     source: str,
     query: str = "авиабилеты MOW IST акция",
     url: str | None = None,
+    aviasales_client_factory: Callable[[AppSettings], AviasalesSearchSmokeClient] | None = None,
     searxng_client_factory: Callable[[AppSettings], SearxngSmokeClient] | None = None,
     crawl4ai_client_factory: Callable[[AppSettings], Crawl4AiSmokeClient] | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> SourceSmokeResult:
     now = clock or (lambda: datetime.now(UTC))
+    aviasales_factory = aviasales_client_factory or _aviasales_search_client
     searxng_factory = searxng_client_factory or _searxng_client
     crawl4ai_factory = crawl4ai_client_factory or _crawl4ai_client
     normalized_source = source.strip().lower()
-    if normalized_source == "aviasales_data":
-        return _aviasales_data_smoke(settings=settings, checked_at=now())
+    if normalized_source == "aviasales_search":
+        return _aviasales_search_smoke(
+            settings=settings,
+            client_factory=aviasales_factory,
+            checked_at=now(),
+        )
     if normalized_source == "searxng":
         return _searxng_smoke(
             settings=settings,
@@ -80,7 +93,7 @@ async def run_source_smoke(
         code="unsupported_source",
         item_count=0,
         checked_at=now(),
-        message="supported sources: aviasales_data, searxng, crawl4ai",
+        message="supported sources: aviasales_search, searxng, crawl4ai",
     )
 
 
@@ -104,23 +117,54 @@ def format_source_smoke_result(result: SourceSmokeResult) -> str:
     return json.dumps(ordered_payload, ensure_ascii=False, indent=2)
 
 
-def _aviasales_data_smoke(
+def _aviasales_search_smoke(
     *,
     settings: AppSettings,
+    client_factory: Callable[[AppSettings], AviasalesSearchSmokeClient],
     checked_at: datetime,
 ) -> SourceSmokeResult:
-    result = run_smoke_check(settings=settings)
+    if not settings.aviasales_search_enabled:
+        return SourceSmokeResult(
+            source="aviasales_search",
+            ok=False,
+            code="aviasales_search_disabled",
+            item_count=0,
+            checked_at=checked_at,
+        )
+    if not settings.aviasales_search_credentials_present:
+        return SourceSmokeResult(
+            source="aviasales_search",
+            ok=False,
+            code="aviasales_search_credentials_missing",
+            item_count=0,
+            checked_at=checked_at,
+        )
+    try:
+        places = client_factory(settings).suggest_places("LED", max_results=5)
+    except AviasalesSearchError as exc:
+        return SourceSmokeResult(
+            source="aviasales_search",
+            ok=False,
+            code=str(exc) or "aviasales_search_unavailable",
+            item_count=0,
+            checked_at=checked_at,
+        )
+    except Exception as exc:  # process boundary: classify transport/runtime failures.
+        return SourceSmokeResult(
+            source="aviasales_search",
+            ok=False,
+            code="aviasales_search_unavailable",
+            item_count=0,
+            checked_at=checked_at,
+            message=exc.__class__.__name__,
+        )
     return SourceSmokeResult(
-        source="aviasales_data",
-        ok=result.ok,
-        code=result.code,
-        item_count=result.item_count,
+        source="aviasales_search",
+        ok=True,
+        code="ok",
+        item_count=len(places),
         checked_at=checked_at,
-        received_at=result.received_at,
-        retry_after_seconds=result.retry_after_seconds,
-        rate_limit=result.rate_limit,
-        rate_limit_remaining=result.rate_limit_remaining,
-        rate_limit_reset=result.rate_limit_reset,
+        received_at=checked_at,
     )
 
 
@@ -235,6 +279,13 @@ def _searxng_client(settings: AppSettings) -> SearxngSmokeClient:
     )
 
 
+def _aviasales_search_client(settings: AppSettings) -> AviasalesSearchSmokeClient:
+    return AviasalesSearchClient(
+        signature=settings.aviasales_search_signature or "",
+        marker=settings.aviasales_search_marker or "",
+    )
+
+
 def _crawl4ai_client(settings: AppSettings) -> Crawl4AiSmokeClient:
     return Crawl4AiMarkdownClient(
         enabled=settings.crawl4ai_enabled,
@@ -253,7 +304,7 @@ def main() -> int:
     parser.add_argument(
         "--source",
         required=True,
-        choices=("aviasales_data", "searxng", "crawl4ai"),
+        choices=("aviasales_search", "searxng", "crawl4ai"),
     )
     parser.add_argument("--query", default="авиабилеты MOW IST акция")
     parser.add_argument("--url", default=None)

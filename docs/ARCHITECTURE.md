@@ -1,37 +1,37 @@
-# Flight Hunter — целевая архитектура
+﻿# Flight Hunter вЂ” С†РµР»РµРІР°СЏ Р°СЂС…РёС‚РµРєС‚СѓСЂР°
 
-## 1. Архитектурная позиция
+## 1. РђСЂС…РёС‚РµРєС‚СѓСЂРЅР°СЏ РїРѕР·РёС†РёСЏ
 
-Flight Hunter — self-hosted, invitation-only приложение для семьи и друзей. Оно не продаёт билеты и не притворяется единственным источником истины. Его задача:
+Flight Hunter вЂ” self-hosted, invitation-only РїСЂРёР»РѕР¶РµРЅРёРµ РґР»СЏ СЃРµРјСЊРё Рё РґСЂСѓР·РµР№. РћРЅРѕ РЅРµ РїСЂРѕРґР°С‘С‚ Р±РёР»РµС‚С‹ Рё РЅРµ РїСЂРёС‚РІРѕСЂСЏРµС‚СЃСЏ РµРґРёРЅСЃС‚РІРµРЅРЅС‹Рј РёСЃС‚РѕС‡РЅРёРєРѕРј РёСЃС‚РёРЅС‹. Р•РіРѕ Р·Р°РґР°С‡Р°:
 
-- собрать разрешённые данные из нескольких источников;
-- нормализовать предложения;
-- найти дешёвые даты, соседние аэропорты и разумные комбинации;
-- сохранять историю наблюдений;
-- оценивать цену, длительность и риск;
-- запускать live refresh только там, где это разрешено;
-- отправлять полезные, не спамящие уведомления в Telegram;
-- объяснять пользователю, почему вариант считается выгодным.
+- СЃРѕР±СЂР°С‚СЊ СЂР°Р·СЂРµС€С‘РЅРЅС‹Рµ РґР°РЅРЅС‹Рµ РёР· РЅРµСЃРєРѕР»СЊРєРёС… РёСЃС‚РѕС‡РЅРёРєРѕРІ;
+- РЅРѕСЂРјР°Р»РёР·РѕРІР°С‚СЊ РїСЂРµРґР»РѕР¶РµРЅРёСЏ;
+- РЅР°Р№С‚Рё РґРµС€С‘РІС‹Рµ РґР°С‚С‹, СЃРѕСЃРµРґРЅРёРµ Р°СЌСЂРѕРїРѕСЂС‚С‹ Рё СЂР°Р·СѓРјРЅС‹Рµ РєРѕРјР±РёРЅР°С†РёРё;
+- СЃРѕС…СЂР°РЅСЏС‚СЊ РёСЃС‚РѕСЂРёСЋ РЅР°Р±Р»СЋРґРµРЅРёР№;
+- РѕС†РµРЅРёРІР°С‚СЊ С†РµРЅСѓ, РґР»РёС‚РµР»СЊРЅРѕСЃС‚СЊ Рё СЂРёСЃРє;
+- Р·Р°РїСѓСЃРєР°С‚СЊ live refresh С‚РѕР»СЊРєРѕ С‚Р°Рј, РіРґРµ СЌС‚Рѕ СЂР°Р·СЂРµС€РµРЅРѕ;
+- РѕС‚РїСЂР°РІР»СЏС‚СЊ РїРѕР»РµР·РЅС‹Рµ, РЅРµ СЃРїР°РјСЏС‰РёРµ СѓРІРµРґРѕРјР»РµРЅРёСЏ РІ Telegram;
+- РѕР±СЉСЏСЃРЅСЏС‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЋ, РїРѕС‡РµРјСѓ РІР°СЂРёР°РЅС‚ СЃС‡РёС‚Р°РµС‚СЃСЏ РІС‹РіРѕРґРЅС‹Рј.
 
-Архитектура — **модульный монолит с отдельными процессами**, а не набор микросервисов. Один репозиторий, одна доменная модель, отдельные runtime-процессы:
+РђСЂС…РёС‚РµРєС‚СѓСЂР° вЂ” **РјРѕРґСѓР»СЊРЅС‹Р№ РјРѕРЅРѕР»РёС‚ СЃ РѕС‚РґРµР»СЊРЅС‹РјРё РїСЂРѕС†РµСЃСЃР°РјРё**, Р° РЅРµ РЅР°Р±РѕСЂ РјРёРєСЂРѕСЃРµСЂРІРёСЃРѕРІ. РћРґРёРЅ СЂРµРїРѕР·РёС‚РѕСЂРёР№, РѕРґРЅР° РґРѕРјРµРЅРЅР°СЏ РјРѕРґРµР»СЊ, РѕС‚РґРµР»СЊРЅС‹Рµ runtime-РїСЂРѕС†РµСЃСЃС‹:
 
-- `web` — Next.js UI/PWA;
-- `api` — FastAPI REST/SSE;
-- `worker` — фоновые задачи и scheduler;
-- `bot` — Telegram webhook processor;
-- `postgres` — PostgreSQL + PostGIS;
-- `redis` — очередь, кэш и distributed locks;
-- `object-storage` — опционально S3/MinIO для exports/fixtures;
-- `reverse-proxy` — Caddy/Traefik;
-- observability stack — включаемый profile.
+- `web` вЂ” Next.js UI/PWA;
+- `api` вЂ” FastAPI REST/SSE;
+- `worker` вЂ” С„РѕРЅРѕРІС‹Рµ Р·Р°РґР°С‡Рё Рё scheduler;
+- `bot` вЂ” Telegram webhook processor;
+- `postgres` вЂ” PostgreSQL + PostGIS;
+- `redis` вЂ” РѕС‡РµСЂРµРґСЊ, РєСЌС€ Рё distributed locks;
+- `object-storage` вЂ” РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ S3/MinIO РґР»СЏ exports/fixtures;
+- `reverse-proxy` вЂ” Caddy/Traefik;
+- observability stack вЂ” РІРєР»СЋС‡Р°РµРјС‹Р№ profile.
 
-Логический агентный слой не должен превращать систему в недетерминированный «рой». LLM используется для понимания естественного языка и объяснений, а поиск, ограничения, денежные расчёты, маршрутизация и alerts выполняются детерминированным кодом.
+Р›РѕРіРёС‡РµСЃРєРёР№ Р°РіРµРЅС‚РЅС‹Р№ СЃР»РѕР№ РЅРµ РґРѕР»Р¶РµРЅ РїСЂРµРІСЂР°С‰Р°С‚СЊ СЃРёСЃС‚РµРјСѓ РІ РЅРµРґРµС‚РµСЂРјРёРЅРёСЂРѕРІР°РЅРЅС‹Р№ В«СЂРѕР№В». LLM РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РґР»СЏ РїРѕРЅРёРјР°РЅРёСЏ РµСЃС‚РµСЃС‚РІРµРЅРЅРѕРіРѕ СЏР·С‹РєР° Рё РѕР±СЉСЏСЃРЅРµРЅРёР№, Р° РїРѕРёСЃРє, РѕРіСЂР°РЅРёС‡РµРЅРёСЏ, РґРµРЅРµР¶РЅС‹Рµ СЂР°СЃС‡С‘С‚С‹, РјР°СЂС€СЂСѓС‚РёР·Р°С†РёСЏ Рё alerts РІС‹РїРѕР»РЅСЏСЋС‚СЃСЏ РґРµС‚РµСЂРјРёРЅРёСЂРѕРІР°РЅРЅС‹Рј РєРѕРґРѕРј.
 
 ---
 
-## 2. Рекомендуемый стек
+## 2. Р РµРєРѕРјРµРЅРґСѓРµРјС‹Р№ СЃС‚РµРє
 
-Перед началом реализации coding agent проверяет актуальные stable/LTS версии и фиксирует их в ADR и lock-файлах. Базовый выбор:
+РџРµСЂРµРґ РЅР°С‡Р°Р»РѕРј СЂРµР°Р»РёР·Р°С†РёРё coding agent РїСЂРѕРІРµСЂСЏРµС‚ Р°РєС‚СѓР°Р»СЊРЅС‹Рµ stable/LTS РІРµСЂСЃРёРё Рё С„РёРєСЃРёСЂСѓРµС‚ РёС… РІ ADR Рё lock-С„Р°Р№Р»Р°С…. Р‘Р°Р·РѕРІС‹Р№ РІС‹Р±РѕСЂ:
 
 ### Backend
 
@@ -42,14 +42,14 @@ Flight Hunter — self-hosted, invitation-only приложение для се�
 - Alembic;
 - PostgreSQL + PostGIS;
 - Redis;
-- Dramatiq или Celery для очередей; выбрать один после короткого ADR;
-- APScheduler только как trigger producer, не как единственный durable scheduler;
+- Dramatiq РёР»Рё Celery РґР»СЏ РѕС‡РµСЂРµРґРµР№; РІС‹Р±СЂР°С‚СЊ РѕРґРёРЅ РїРѕСЃР»Рµ РєРѕСЂРѕС‚РєРѕРіРѕ ADR;
+- APScheduler С‚РѕР»СЊРєРѕ РєР°Рє trigger producer, РЅРµ РєР°Рє РµРґРёРЅСЃС‚РІРµРЅРЅС‹Р№ durable scheduler;
 - HTTPX;
-- Tenacity или собственный retry policy;
+- Tenacity РёР»Рё СЃРѕР±СЃС‚РІРµРЅРЅС‹Р№ retry policy;
 - structlog;
 - OpenTelemetry;
 - Prometheus client;
-- aiogram 3 для Telegram;
+- aiogram 3 РґР»СЏ Telegram;
 - pytest, Hypothesis, respx, testcontainers.
 
 ### Frontend
@@ -58,95 +58,94 @@ Flight Hunter — self-hosted, invitation-only приложение для се�
 - TypeScript strict;
 - React;
 - Tailwind CSS;
-- shadcn/ui или Radix primitives;
+- shadcn/ui РёР»Рё Radix primitives;
 - TanStack Query;
 - TanStack Table;
 - React Hook Form + Zod;
-- ECharts/Recharts для истории цен и матриц;
-- MapLibre для карты аэропортов, если карта включена;
-- Playwright для E2E собственного приложения;
+- ECharts/Recharts РґР»СЏ РёСЃС‚РѕСЂРёРё С†РµРЅ Рё РјР°С‚СЂРёС†;
+- MapLibre РґР»СЏ РєР°СЂС‚С‹ Р°СЌСЂРѕРїРѕСЂС‚РѕРІ, РµСЃР»Рё РєР°СЂС‚Р° РІРєР»СЋС‡РµРЅР°;
+- Playwright РґР»СЏ E2E СЃРѕР±СЃС‚РІРµРЅРЅРѕРіРѕ РїСЂРёР»РѕР¶РµРЅРёСЏ;
 - Vitest + Testing Library.
 
-### Репозиторий и эксплуатация
+### Р РµРїРѕР·РёС‚РѕСЂРёР№ Рё СЌРєСЃРїР»СѓР°С‚Р°С†РёСЏ
 
-- pnpm workspace или Turborepo;
-- uv для Python dependencies;
-- Docker Compose для self-host;
+- pnpm workspace РёР»Рё Turborepo;
+- uv РґР»СЏ Python dependencies;
+- Docker Compose РґР»СЏ self-host;
 - GitHub Actions;
 - pre-commit;
 - Ruff, mypy/pyright, ESLint, Prettier;
 - Renovate/Dependabot;
-- Caddy для TLS и reverse proxy;
-- Sentry-compatible error sink — опционально;
-- Grafana/Prometheus/Loki — production profile.
+- Caddy РґР»СЏ TLS Рё reverse proxy;
+- Sentry-compatible error sink вЂ” РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ;
+- Grafana/Prometheus/Loki вЂ” production profile.
 
-Не вводить Kubernetes как обязательное условие. Helm/Terraform можно добавить как дополнительный deployment target после полностью рабочего Docker Compose.
+РќРµ РІРІРѕРґРёС‚СЊ Kubernetes РєР°Рє РѕР±СЏР·Р°С‚РµР»СЊРЅРѕРµ СѓСЃР»РѕРІРёРµ. Helm/Terraform РјРѕР¶РЅРѕ РґРѕР±Р°РІРёС‚СЊ РєР°Рє РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹Р№ deployment target РїРѕСЃР»Рµ РїРѕР»РЅРѕСЃС‚СЊСЋ СЂР°Р±РѕС‡РµРіРѕ Docker Compose.
 
 ---
 
-## 3. Структура монорепозитория
+## 3. РЎС‚СЂСѓРєС‚СѓСЂР° РјРѕРЅРѕСЂРµРїРѕР·РёС‚РѕСЂРёСЏ
 
 ```text
 flight-hunter/
-├─ AGENTS.md
-├─ README.md
-├─ Makefile
-├─ compose.yaml
-├─ compose.observability.yaml
-├─ .env.example
-├─ .github/
-│  └─ workflows/
-├─ apps/
-│  ├─ web/
-│  ├─ api/
-│  ├─ worker/
-│  └─ bot/
-├─ packages/
-│  ├─ domain/                 # чистая доменная логика
-│  ├─ application/            # use cases / orchestration
-│  ├─ persistence/            # SQLAlchemy, migrations, repositories
-│  ├─ providers/              # адаптеры авиаданных
-│  │  ├─ aviasales_data/
-│  │  ├─ aviasales_search/
-│  │  ├─ skyscanner_indicative/
-│  │  ├─ skyscanner_live/
-│  │  ├─ duffel/
-│  │  ├─ deal_feed/
-│  │  ├─ manual/
-│  │  └─ fake/
-│  ├─ geo/                    # аэропорты, PostGIS, nearby
-│  ├─ money/                  # FX, minor units, fees
-│  ├─ ranking/
-│  ├─ itinerary_engine/
-│  ├─ price_intelligence/
-│  ├─ notifications/
-│  ├─ policy/
-│  ├─ llm/
-│  └─ contracts/              # JSON schemas / generated clients
-├─ docs/
-│  ├─ adr/
-│  ├─ api/
-│  ├─ runbooks/
-│  ├─ provider-contracts/
-│  ├─ privacy/
-│  └─ threat-model.md
-├─ fixtures/
-│  ├─ providers/
-│  └─ demo/
-└─ scripts/
+в”њв”Ђ AGENTS.md
+в”њв”Ђ README.md
+в”њв”Ђ Makefile
+в”њв”Ђ compose.yaml
+в”њв”Ђ compose.observability.yaml
+в”њв”Ђ .env.example
+в”њв”Ђ .github/
+в”‚  в””в”Ђ workflows/
+в”њв”Ђ apps/
+в”‚  в”њв”Ђ web/
+в”‚  в”њв”Ђ api/
+в”‚  в”њв”Ђ worker/
+в”‚  в””в”Ђ bot/
+в”њв”Ђ packages/
+в”‚  в”њв”Ђ domain/                 # С‡РёСЃС‚Р°СЏ РґРѕРјРµРЅРЅР°СЏ Р»РѕРіРёРєР°
+в”‚  в”њв”Ђ application/            # use cases / orchestration
+в”‚  в”њв”Ђ persistence/            # SQLAlchemy, migrations, repositories
+в”‚  в”њв”Ђ providers/              # Р°РґР°РїС‚РµСЂС‹ Р°РІРёР°РґР°РЅРЅС‹С…
+в”‚  в”‚  в”њв”Ђ aviasales_search/
+в”‚  в”‚  в”њв”Ђ skyscanner_indicative/
+в”‚  в”‚  в”њв”Ђ skyscanner_live/
+в”‚  в”‚  в”њв”Ђ duffel/
+в”‚  в”‚  в”њв”Ђ deal_feed/
+в”‚  в”‚  в”њв”Ђ manual/
+в”‚  в”‚  в””в”Ђ fake/
+в”‚  в”њв”Ђ geo/                    # Р°СЌСЂРѕРїРѕСЂС‚С‹, PostGIS, nearby
+в”‚  в”њв”Ђ money/                  # FX, minor units, fees
+в”‚  в”њв”Ђ ranking/
+в”‚  в”њв”Ђ itinerary_engine/
+в”‚  в”њв”Ђ price_intelligence/
+в”‚  в”њв”Ђ notifications/
+в”‚  в”њв”Ђ policy/
+в”‚  в”њв”Ђ llm/
+в”‚  в””в”Ђ contracts/              # JSON schemas / generated clients
+в”њв”Ђ docs/
+в”‚  в”њв”Ђ adr/
+в”‚  в”њв”Ђ api/
+в”‚  в”њв”Ђ runbooks/
+в”‚  в”њв”Ђ provider-contracts/
+в”‚  в”њв”Ђ privacy/
+в”‚  в””в”Ђ threat-model.md
+в”њв”Ђ fixtures/
+в”‚  в”њв”Ђ providers/
+в”‚  в””в”Ђ demo/
+в””в”Ђ scripts/
 ```
 
-Python-пакеты могут быть размещены в `src/flight_hunter/...`; важна граница модулей, а не буквальная структура.
+Python-РїР°РєРµС‚С‹ РјРѕРіСѓС‚ Р±С‹С‚СЊ СЂР°Р·РјРµС‰РµРЅС‹ РІ `src/flight_hunter/...`; РІР°Р¶РЅР° РіСЂР°РЅРёС†Р° РјРѕРґСѓР»РµР№, Р° РЅРµ Р±СѓРєРІР°Р»СЊРЅР°СЏ СЃС‚СЂСѓРєС‚СѓСЂР°.
 
 ---
 
-## 4. Ключевой слой: Provider Policy Engine
+## 4. РљР»СЋС‡РµРІРѕР№ СЃР»РѕР№: Provider Policy Engine
 
-### 4.1. Почему он обязателен
+### 4.1. РџРѕС‡РµРјСѓ РѕРЅ РѕР±СЏР·Р°С‚РµР»РµРЅ
 
-Одинаковый HTTP client для разных поставщиков недостаточен. Правила Aviasales Search, Aviasales Data, Skyscanner Live и Duffel различаются. Ограничения должны предотвращаться кодом.
+РћРґРёРЅР°РєРѕРІС‹Р№ HTTP client РґР»СЏ СЂР°Р·РЅС‹С… РїРѕСЃС‚Р°РІС‰РёРєРѕРІ РЅРµРґРѕСЃС‚Р°С‚РѕС‡РµРЅ. РџСЂР°РІРёР»Р° Aviasales Search, Skyscanner Live Рё Duffel СЂР°Р·Р»РёС‡Р°СЋС‚СЃСЏ. РћРіСЂР°РЅРёС‡РµРЅРёСЏ РґРѕР»Р¶РЅС‹ РїСЂРµРґРѕС‚РІСЂР°С‰Р°С‚СЊСЃСЏ РєРѕРґРѕРј.
 
-### 4.2. Модель политики
+### 4.2. РњРѕРґРµР»СЊ РїРѕР»РёС‚РёРєРё
 
 ```python
 class ProviderPolicy:
@@ -189,7 +188,7 @@ class ProviderPolicy:
 
 ### 4.3. UserActionGrant
 
-Для user-initiated API каждый запуск требует grant:
+Р”Р»СЏ user-initiated API РєР°Р¶РґС‹Р№ Р·Р°РїСѓСЃРє С‚СЂРµР±СѓРµС‚ grant:
 
 ```python
 class UserActionGrant:
@@ -206,49 +205,49 @@ class UserActionGrant:
 
 Grant:
 
-- создаётся только при реальном действии пользователя;
-- одноразовый;
-- связан с конкретными параметрами поиска;
-- имеет короткий TTL;
-- проверяется policy guard до вызова провайдера;
-- не может создаваться worker-ом.
+- СЃРѕР·РґР°С‘С‚СЃСЏ С‚РѕР»СЊРєРѕ РїСЂРё СЂРµР°Р»СЊРЅРѕРј РґРµР№СЃС‚РІРёРё РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ;
+- РѕРґРЅРѕСЂР°Р·РѕРІС‹Р№;
+- СЃРІСЏР·Р°РЅ СЃ РєРѕРЅРєСЂРµС‚РЅС‹РјРё РїР°СЂР°РјРµС‚СЂР°РјРё РїРѕРёСЃРєР°;
+- РёРјРµРµС‚ РєРѕСЂРѕС‚РєРёР№ TTL;
+- РїСЂРѕРІРµСЂСЏРµС‚СЃСЏ policy guard РґРѕ РІС‹Р·РѕРІР° РїСЂРѕРІР°Р№РґРµСЂР°;
+- РЅРµ РјРѕР¶РµС‚ СЃРѕР·РґР°РІР°С‚СЊСЃСЏ worker-РѕРј.
 
-### 4.4. Изоляция результатов
+### 4.4. РР·РѕР»СЏС†РёСЏ СЂРµР·СѓР»СЊС‚Р°С‚РѕРІ
 
-`SearchRun` имеет `merge_scope`:
+`SearchRun` РёРјРµРµС‚ `merge_scope`:
 
-- `MERGEABLE` — разрешено нормализовать и сравнивать с другими источниками;
-- `PROVIDER_ISOLATED` — отдельная выдача, не попадает в общий ranker;
-- `PRIVATE_TRANSIENT` — хранится только с минимальным TTL.
+- `MERGEABLE` вЂ” СЂР°Р·СЂРµС€РµРЅРѕ РЅРѕСЂРјР°Р»РёР·РѕРІР°С‚СЊ Рё СЃСЂР°РІРЅРёРІР°С‚СЊ СЃ РґСЂСѓРіРёРјРё РёСЃС‚РѕС‡РЅРёРєР°РјРё;
+- `PROVIDER_ISOLATED` вЂ” РѕС‚РґРµР»СЊРЅР°СЏ РІС‹РґР°С‡Р°, РЅРµ РїРѕРїР°РґР°РµС‚ РІ РѕР±С‰РёР№ ranker;
+- `PRIVATE_TRANSIENT` вЂ” С…СЂР°РЅРёС‚СЃСЏ С‚РѕР»СЊРєРѕ СЃ РјРёРЅРёРјР°Р»СЊРЅС‹Рј TTL.
 
-Aviasales Search всегда `PROVIDER_ISOLATED`.
+Aviasales Search РІСЃРµРіРґР° `PROVIDER_ISOLATED`.
 
 ---
 
-## 5. Каноническая модель авиапредложения
+## 5. РљР°РЅРѕРЅРёС‡РµСЃРєР°СЏ РјРѕРґРµР»СЊ Р°РІРёР°РїСЂРµРґР»РѕР¶РµРЅРёСЏ
 
-### 5.1. Деньги
+### 5.1. Р”РµРЅСЊРіРё
 
-- хранить сумму в integer minor units;
-- хранить ISO 4217 currency;
-- отдельно `provider_amount`, `normalized_amount`, `fx_rate`, `fx_observed_at`;
-- total price всегда относится к явно указанному набору пассажиров;
-- комиссии карты/FX моделируются отдельно и не смешиваются с provider fare без label.
+- С…СЂР°РЅРёС‚СЊ СЃСѓРјРјСѓ РІ integer minor units;
+- С…СЂР°РЅРёС‚СЊ ISO 4217 currency;
+- РѕС‚РґРµР»СЊРЅРѕ `provider_amount`, `normalized_amount`, `fx_rate`, `fx_observed_at`;
+- total price РІСЃРµРіРґР° РѕС‚РЅРѕСЃРёС‚СЃСЏ Рє СЏРІРЅРѕ СѓРєР°Р·Р°РЅРЅРѕРјСѓ РЅР°Р±РѕСЂСѓ РїР°СЃСЃР°Р¶РёСЂРѕРІ;
+- РєРѕРјРёСЃСЃРёРё РєР°СЂС‚С‹/FX РјРѕРґРµР»РёСЂСѓСЋС‚СЃСЏ РѕС‚РґРµР»СЊРЅРѕ Рё РЅРµ СЃРјРµС€РёРІР°СЋС‚СЃСЏ СЃ provider fare Р±РµР· label.
 
-### 5.2. Времена
+### 5.2. Р’СЂРµРјРµРЅР°
 
-- все timestamps в БД — timezone-aware UTC;
-- для сегмента хранить local datetime и IANA timezone origin/destination;
-- длительность вычислять по UTC, а показывать локальное время;
-- DST покрыть тестами.
+- РІСЃРµ timestamps РІ Р‘Р” вЂ” timezone-aware UTC;
+- РґР»СЏ СЃРµРіРјРµРЅС‚Р° С…СЂР°РЅРёС‚СЊ local datetime Рё IANA timezone origin/destination;
+- РґР»РёС‚РµР»СЊРЅРѕСЃС‚СЊ РІС‹С‡РёСЃР»СЏС‚СЊ РїРѕ UTC, Р° РїРѕРєР°Р·С‹РІР°С‚СЊ Р»РѕРєР°Р»СЊРЅРѕРµ РІСЂРµРјСЏ;
+- DST РїРѕРєСЂС‹С‚СЊ С‚РµСЃС‚Р°РјРё.
 
-### 5.3. Основные сущности
+### 5.3. РћСЃРЅРѕРІРЅС‹Рµ СЃСѓС‰РЅРѕСЃС‚Рё
 
 #### User / Household
 
 - `users`;
 - `households`;
-- `household_memberships` с ролями owner/admin/member/viewer;
+- `household_memberships` СЃ СЂРѕР»СЏРјРё owner/admin/member/viewer;
 - invitation-only registration;
 - per-user locale, timezone, base currency, Telegram preferences.
 
@@ -362,7 +361,7 @@ Aviasales Search всегда `PROVIDER_ISOLATED`.
 
 ---
 
-## 6. Поисковый конвейер
+## 6. РџРѕРёСЃРєРѕРІС‹Р№ РєРѕРЅРІРµР№РµСЂ
 
 ```mermaid
 flowchart LR
@@ -383,79 +382,79 @@ flowchart LR
 
 ### 6.1. Intent parser
 
-LLM допускается для фраз вида:
+LLM РґРѕРїСѓСЃРєР°РµС‚СЃСЏ РґР»СЏ С„СЂР°Р· РІРёРґР°:
 
-- «из Варшавы в Японию на 10–14 дней в октябре, можно из Берлина, багаж один»;
-- «лови до 1800 PLN, максимум одна пересадка».
+- В«РёР· Р’Р°СЂС€Р°РІС‹ РІ РЇРїРѕРЅРёСЋ РЅР° 10вЂ“14 РґРЅРµР№ РІ РѕРєС‚СЏР±СЂРµ, РјРѕР¶РЅРѕ РёР· Р‘РµСЂР»РёРЅР°, Р±Р°РіР°Р¶ РѕРґРёРЅВ»;
+- В«Р»РѕРІРё РґРѕ 1800 PLN, РјР°РєСЃРёРјСѓРј РѕРґРЅР° РїРµСЂРµСЃР°РґРєР°В».
 
-Но LLM возвращает только `SearchIntentDraft` по JSON Schema. Затем deterministic validator:
+РќРѕ LLM РІРѕР·РІСЂР°С‰Р°РµС‚ С‚РѕР»СЊРєРѕ `SearchIntentDraft` РїРѕ JSON Schema. Р—Р°С‚РµРј deterministic validator:
 
-- разрешает неоднозначные города;
-- проверяет даты;
-- нормализует валюту;
-- запрашивает недостающие данные через UI/bot;
-- не выдумывает аэропорты, цены или рейсы.
+- СЂР°Р·СЂРµС€Р°РµС‚ РЅРµРѕРґРЅРѕР·РЅР°С‡РЅС‹Рµ РіРѕСЂРѕРґР°;
+- РїСЂРѕРІРµСЂСЏРµС‚ РґР°С‚С‹;
+- РЅРѕСЂРјР°Р»РёР·СѓРµС‚ РІР°Р»СЋС‚Сѓ;
+- Р·Р°РїСЂР°С€РёРІР°РµС‚ РЅРµРґРѕСЃС‚Р°СЋС‰РёРµ РґР°РЅРЅС‹Рµ С‡РµСЂРµР· UI/bot;
+- РЅРµ РІС‹РґСѓРјС‹РІР°РµС‚ Р°СЌСЂРѕРїРѕСЂС‚С‹, С†РµРЅС‹ РёР»Рё СЂРµР№СЃС‹.
 
-Без LLM все функции доступны через обычную форму.
+Р‘РµР· LLM РІСЃРµ С„СѓРЅРєС†РёРё РґРѕСЃС‚СѓРїРЅС‹ С‡РµСЂРµР· РѕР±С‹С‡РЅСѓСЋ С„РѕСЂРјСѓ.
 
 ### 6.2. Expansion planner
 
 #### Flexible dates
 
-Для ±3 дней round trip теоретически 49 комбинаций. Нельзя слепо делать 49 live-запросов. Алгоритм:
+Р”Р»СЏ В±3 РґРЅРµР№ round trip С‚РµРѕСЂРµС‚РёС‡РµСЃРєРё 49 РєРѕРјР±РёРЅР°С†РёР№. РќРµР»СЊР·СЏ СЃР»РµРїРѕ РґРµР»Р°С‚СЊ 49 live-Р·Р°РїСЂРѕСЃРѕРІ. РђР»РіРѕСЂРёС‚Рј:
 
-1. Получить cached/indicative matrix одним или минимальным числом запросов.
-2. Отфильтровать невозможные stay lengths.
-3. Оценить top candidates по цене и пользовательским ограничениям.
-4. Показать heatmap.
-5. Live refresh выполнять только для выбранной пользователем комбинации или top-N, если договор прямо разрешает.
+1. РџРѕР»СѓС‡РёС‚СЊ cached/indicative matrix РѕРґРЅРёРј РёР»Рё РјРёРЅРёРјР°Р»СЊРЅС‹Рј С‡РёСЃР»РѕРј Р·Р°РїСЂРѕСЃРѕРІ.
+2. РћС‚С„РёР»СЊС‚СЂРѕРІР°С‚СЊ РЅРµРІРѕР·РјРѕР¶РЅС‹Рµ stay lengths.
+3. РћС†РµРЅРёС‚СЊ top candidates РїРѕ С†РµРЅРµ Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРёРј РѕРіСЂР°РЅРёС‡РµРЅРёСЏРј.
+4. РџРѕРєР°Р·Р°С‚СЊ heatmap.
+5. Live refresh РІС‹РїРѕР»РЅСЏС‚СЊ С‚РѕР»СЊРєРѕ РґР»СЏ РІС‹Р±СЂР°РЅРЅРѕР№ РїРѕР»СЊР·РѕРІР°С‚РµР»РµРј РєРѕРјР±РёРЅР°С†РёРё РёР»Рё top-N, РµСЃР»Рё РґРѕРіРѕРІРѕСЂ РїСЂСЏРјРѕ СЂР°Р·СЂРµС€Р°РµС‚.
 
 #### Nearby airports
 
 1. Resolve origin/destination to coordinates/metro groups.
-2. PostGIS `ST_DWithin` для радиуса, по умолчанию до 150 км.
-3. Отфильтровать аэропорты без IATA, закрытые и коммерчески нерелевантные.
-4. Рассчитать great-circle distance.
-5. Добавить приблизительные ground time/cost с confidence label.
-6. Не считать далёкий аэропорт выгодным, если наземный трансфер съедает экономию.
+2. PostGIS `ST_DWithin` РґР»СЏ СЂР°РґРёСѓСЃР°, РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ РґРѕ 150 РєРј.
+3. РћС‚С„РёР»СЊС‚СЂРѕРІР°С‚СЊ Р°СЌСЂРѕРїРѕСЂС‚С‹ Р±РµР· IATA, Р·Р°РєСЂС‹С‚С‹Рµ Рё РєРѕРјРјРµСЂС‡РµСЃРєРё РЅРµСЂРµР»РµРІР°РЅС‚РЅС‹Рµ.
+4. Р Р°СЃСЃС‡РёС‚Р°С‚СЊ great-circle distance.
+5. Р”РѕР±Р°РІРёС‚СЊ РїСЂРёР±Р»РёР·РёС‚РµР»СЊРЅС‹Рµ ground time/cost СЃ confidence label.
+6. РќРµ СЃС‡РёС‚Р°С‚СЊ РґР°Р»С‘РєРёР№ Р°СЌСЂРѕРїРѕСЂС‚ РІС‹РіРѕРґРЅС‹Рј, РµСЃР»Рё РЅР°Р·РµРјРЅС‹Р№ С‚СЂР°РЅСЃС„РµСЂ СЃСЉРµРґР°РµС‚ СЌРєРѕРЅРѕРјРёСЋ.
 
 #### Candidate budget
 
-Planner получает request budget:
+Planner РїРѕР»СѓС‡Р°РµС‚ request budget:
 
 - max provider calls;
 - max date combinations;
 - max airport pairs;
 - max total execution time;
-- max monetary API cost, если провайдер тарифицируется.
+- max monetary API cost, РµСЃР»Рё РїСЂРѕРІР°Р№РґРµСЂ С‚Р°СЂРёС„РёС†РёСЂСѓРµС‚СЃСЏ.
 
-Использовать beam search: сначала дешёвые/вероятные комбинации, затем расширение при наличии бюджета.
+РСЃРїРѕР»СЊР·РѕРІР°С‚СЊ beam search: СЃРЅР°С‡Р°Р»Р° РґРµС€С‘РІС‹Рµ/РІРµСЂРѕСЏС‚РЅС‹Рµ РєРѕРјР±РёРЅР°С†РёРё, Р·Р°С‚РµРј СЂР°СЃС€РёСЂРµРЅРёРµ РїСЂРё РЅР°Р»РёС‡РёРё Р±СЋРґР¶РµС‚Р°.
 
 ### 6.3. Provider task planner
 
-На каждый candidate формирует задачу с:
+РќР° РєР°Р¶РґС‹Р№ candidate С„РѕСЂРјРёСЂСѓРµС‚ Р·Р°РґР°С‡Сѓ СЃ:
 
 - provider;
 - query parameters;
 - execution mode;
-- `UserActionGrant`, если требуется;
+- `UserActionGrant`, РµСЃР»Рё С‚СЂРµР±СѓРµС‚СЃСЏ;
 - quota reservation;
 - idempotency key;
 - deadline;
 - result merge scope.
 
-### 6.4. Нормализация
+### 6.4. РќРѕСЂРјР°Р»РёР·Р°С†РёСЏ
 
-Каждый adapter возвращает provider-specific DTO. Mapper создаёт canonical `OfferCandidate` и сохраняет:
+РљР°Р¶РґС‹Р№ adapter РІРѕР·РІСЂР°С‰Р°РµС‚ provider-specific DTO. Mapper СЃРѕР·РґР°С‘С‚ canonical `OfferCandidate` Рё СЃРѕС…СЂР°РЅСЏРµС‚:
 
-- provenance каждого поля;
-- неизвестные значения как `unknown`, не `false`;
-- raw field bag только если policy разрешает;
+- provenance РєР°Р¶РґРѕРіРѕ РїРѕР»СЏ;
+- РЅРµРёР·РІРµСЃС‚РЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ РєР°Рє `unknown`, РЅРµ `false`;
+- raw field bag С‚РѕР»СЊРєРѕ РµСЃР»Рё policy СЂР°Р·СЂРµС€Р°РµС‚;
 - parsing warnings.
 
-### 6.5. Дедупликация
+### 6.5. Р”РµРґСѓРїР»РёРєР°С†РёСЏ
 
-Canonical fingerprint строится из:
+Canonical fingerprint СЃС‚СЂРѕРёС‚СЃСЏ РёР·:
 
 - ordered segments;
 - operating carrier + flight number;
@@ -467,76 +466,76 @@ Canonical fingerprint строится из:
 - seller/agent;
 - passenger mix.
 
-Два предложения с одинаковым itinerary, но разными продавцами или условиями, не теряются: UI группирует их, но хранит отдельные offers.
+Р”РІР° РїСЂРµРґР»РѕР¶РµРЅРёСЏ СЃ РѕРґРёРЅР°РєРѕРІС‹Рј itinerary, РЅРѕ СЂР°Р·РЅС‹РјРё РїСЂРѕРґР°РІС†Р°РјРё РёР»Рё СѓСЃР»РѕРІРёСЏРјРё, РЅРµ С‚РµСЂСЏСЋС‚СЃСЏ: UI РіСЂСѓРїРїРёСЂСѓРµС‚ РёС…, РЅРѕ С…СЂР°РЅРёС‚ РѕС‚РґРµР»СЊРЅС‹Рµ offers.
 
 ---
 
 ## 7. Itinerary Engine
 
-### 7.1. Виды маршрутов
+### 7.1. Р’РёРґС‹ РјР°СЂС€СЂСѓС‚РѕРІ
 
-- прямой;
-- обычная пересадка на одном билете;
+- РїСЂСЏРјРѕР№;
+- РѕР±С‹С‡РЅР°СЏ РїРµСЂРµСЃР°РґРєР° РЅР° РѕРґРЅРѕРј Р±РёР»РµС‚Рµ;
 - multi-city/open jaw;
-- комбинация one-way билетов;
+- РєРѕРјР±РёРЅР°С†РёСЏ one-way Р±РёР»РµС‚РѕРІ;
 - split ticket;
 - self-transfer;
 - positioning flight;
 - airport change;
-- hidden-city research — отдельный experimental режим.
+- hidden-city research вЂ” РѕС‚РґРµР»СЊРЅС‹Р№ experimental СЂРµР¶РёРј.
 
-### 7.2. Графовая модель
+### 7.2. Р“СЂР°С„РѕРІР°СЏ РјРѕРґРµР»СЊ
 
 - vertex: `(airport, timestamp window, state)`;
-- edge: flight offer slice или ground transfer;
+- edge: flight offer slice РёР»Рё ground transfer;
 - edge attributes: price, duration, provider, PNR, baggage, expiry, risk;
 - path constraints: minimum connection, maximum total duration, max stops, airport-change policy, overnight policy, visa/entry unknown, terminal transition.
 
-Использовать constrained k-shortest paths или beam search, а не полный перебор.
+РСЃРїРѕР»СЊР·РѕРІР°С‚СЊ constrained k-shortest paths РёР»Рё beam search, Р° РЅРµ РїРѕР»РЅС‹Р№ РїРµСЂРµР±РѕСЂ.
 
 ### 7.3. Minimum connection
 
-Если provider не даёт защищённость/Minimum Connection Time:
+Р•СЃР»Рё provider РЅРµ РґР°С‘С‚ Р·Р°С‰РёС‰С‘РЅРЅРѕСЃС‚СЊ/Minimum Connection Time:
 
-- не утверждать, что пересадка гарантирована;
-- использовать консервативные configurable defaults;
-- для self-transfer добавлять buffer по типу аэропорта, domestic/international, terminal/airport change и baggage;
-- высокий риск исключать из default results.
+- РЅРµ СѓС‚РІРµСЂР¶РґР°С‚СЊ, С‡С‚Рѕ РїРµСЂРµСЃР°РґРєР° РіР°СЂР°РЅС‚РёСЂРѕРІР°РЅР°;
+- РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ РєРѕРЅСЃРµСЂРІР°С‚РёРІРЅС‹Рµ configurable defaults;
+- РґР»СЏ self-transfer РґРѕР±Р°РІР»СЏС‚СЊ buffer РїРѕ С‚РёРїСѓ Р°СЌСЂРѕРїРѕСЂС‚Р°, domestic/international, terminal/airport change Рё baggage;
+- РІС‹СЃРѕРєРёР№ СЂРёСЃРє РёСЃРєР»СЋС‡Р°С‚СЊ РёР· default results.
 
 ### 7.4. Split tickets
 
-Split-ticket candidate должен содержать:
+Split-ticket candidate РґРѕР»Р¶РµРЅ СЃРѕРґРµСЂР¶Р°С‚СЊ:
 
-- отдельные PNR/заказы;
-- общий total price;
+- РѕС‚РґРµР»СЊРЅС‹Рµ PNR/Р·Р°РєР°Р·С‹;
+- РѕР±С‰РёР№ total price;
 - baggage recheck requirement;
 - connection buffer;
 - missed-connection risk;
 - immigration/visa uncertainty;
-- отдельные правила изменения/возврата;
-- явное сравнение с лучшим single-ticket вариантом.
+- РѕС‚РґРµР»СЊРЅС‹Рµ РїСЂР°РІРёР»Р° РёР·РјРµРЅРµРЅРёСЏ/РІРѕР·РІСЂР°С‚Р°;
+- СЏРІРЅРѕРµ СЃСЂР°РІРЅРµРЅРёРµ СЃ Р»СѓС‡С€РёРј single-ticket РІР°СЂРёР°РЅС‚РѕРј.
 
-Показывать только если экономия превышает configurable minimum после наземных расходов и risk penalty.
+РџРѕРєР°Р·С‹РІР°С‚СЊ С‚РѕР»СЊРєРѕ РµСЃР»Рё СЌРєРѕРЅРѕРјРёСЏ РїСЂРµРІС‹С€Р°РµС‚ configurable minimum РїРѕСЃР»Рµ РЅР°Р·РµРјРЅС‹С… СЂР°СЃС…РѕРґРѕРІ Рё risk penalty.
 
 ### 7.5. Hidden-city research
 
-Feature flag выключен по умолчанию. Режим:
+Feature flag РІС‹РєР»СЋС‡РµРЅ РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ. Р РµР¶РёРј:
 
-- не включается в общий «Лучший» рейтинг;
-- требует явного подтверждения предупреждения;
-- не автоматизирует покупку;
-- не предлагает checked baggage;
-- показывает риск аннулирования последующих сегментов, проблем с обратным билетом, rerouting и последствий по правилам авиакомпании;
-- хранит событие acknowledgement;
-- называется «исследовательский вариант», а не «лайфхак без риска».
+- РЅРµ РІРєР»СЋС‡Р°РµС‚СЃСЏ РІ РѕР±С‰РёР№ В«Р›СѓС‡С€РёР№В» СЂРµР№С‚РёРЅРі;
+- С‚СЂРµР±СѓРµС‚ СЏРІРЅРѕРіРѕ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ РїСЂРµРґСѓРїСЂРµР¶РґРµРЅРёСЏ;
+- РЅРµ Р°РІС‚РѕРјР°С‚РёР·РёСЂСѓРµС‚ РїРѕРєСѓРїРєСѓ;
+- РЅРµ РїСЂРµРґР»Р°РіР°РµС‚ checked baggage;
+- РїРѕРєР°Р·С‹РІР°РµС‚ СЂРёСЃРє Р°РЅРЅСѓР»РёСЂРѕРІР°РЅРёСЏ РїРѕСЃР»РµРґСѓСЋС‰РёС… СЃРµРіРјРµРЅС‚РѕРІ, РїСЂРѕР±Р»РµРј СЃ РѕР±СЂР°С‚РЅС‹Рј Р±РёР»РµС‚РѕРј, rerouting Рё РїРѕСЃР»РµРґСЃС‚РІРёР№ РїРѕ РїСЂР°РІРёР»Р°Рј Р°РІРёР°РєРѕРјРїР°РЅРёРё;
+- С…СЂР°РЅРёС‚ СЃРѕР±С‹С‚РёРµ acknowledgement;
+- РЅР°Р·С‹РІР°РµС‚СЃСЏ В«РёСЃСЃР»РµРґРѕРІР°С‚РµР»СЊСЃРєРёР№ РІР°СЂРёР°РЅС‚В», Р° РЅРµ В«Р»Р°Р№С„С…Р°Рє Р±РµР· СЂРёСЃРєР°В».
 
 ---
 
-## 8. Ranking и объяснимость
+## 8. Ranking Рё РѕР±СЉСЏСЃРЅРёРјРѕСЃС‚СЊ
 
 ### 8.1. Pareto frontier
 
-Сначала исключить dominated варианты по:
+РЎРЅР°С‡Р°Р»Р° РёСЃРєР»СЋС‡РёС‚СЊ dominated РІР°СЂРёР°РЅС‚С‹ РїРѕ:
 
 - total trip cost;
 - total duration;
@@ -545,9 +544,9 @@ Feature flag выключен по умолчанию. Режим:
 - freshness;
 - baggage fit.
 
-Затем weighted score по профилю пользователя.
+Р—Р°С‚РµРј weighted score РїРѕ РїСЂРѕС„РёР»СЋ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ.
 
-### 8.2. Компоненты score
+### 8.2. РљРѕРјРїРѕРЅРµРЅС‚С‹ score
 
 ```text
 value_score =
@@ -561,14 +560,14 @@ value_score =
 + w_schedule * departure_time_penalty
 ```
 
-Не использовать «магические» веса без отображения. Пользователь может выбрать preset:
+РќРµ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ В«РјР°РіРёС‡РµСЃРєРёРµВ» РІРµСЃР° Р±РµР· РѕС‚РѕР±СЂР°Р¶РµРЅРёСЏ. РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РјРѕР¶РµС‚ РІС‹Р±СЂР°С‚СЊ preset:
 
-- Самый дешёвый;
-- Лучший баланс;
-- Самый быстрый;
-- Минимум риска;
-- С багажом;
-- Семейный.
+- РЎР°РјС‹Р№ РґРµС€С‘РІС‹Р№;
+- Р›СѓС‡С€РёР№ Р±Р°Р»Р°РЅСЃ;
+- РЎР°РјС‹Р№ Р±С‹СЃС‚СЂС‹Р№;
+- РњРёРЅРёРјСѓРј СЂРёСЃРєР°;
+- РЎ Р±Р°РіР°Р¶РѕРј;
+- РЎРµРјРµР№РЅС‹Р№.
 
 ### 8.2.1. Implemented offer risk contract
 
@@ -586,53 +585,53 @@ keeping the same API shape.
 
 ### 8.3. Total trip cost
 
-Помимо fare:
+РџРѕРјРёРјРѕ fare:
 
-- baggage fees, если известны;
-- seat/ancillary — отдельно и только если известны;
-- card FX/foreign transaction fee по пользовательской настройке;
+- baggage fees, РµСЃР»Рё РёР·РІРµСЃС‚РЅС‹;
+- seat/ancillary вЂ” РѕС‚РґРµР»СЊРЅРѕ Рё С‚РѕР»СЊРєРѕ РµСЃР»Рё РёР·РІРµСЃС‚РЅС‹;
+- card FX/foreign transaction fee РїРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРѕР№ РЅР°СЃС‚СЂРѕР№РєРµ;
 - estimated ground transfer;
-- overnight hotel estimate — optional и помечен как estimate;
+- overnight hotel estimate вЂ” optional Рё РїРѕРјРµС‡РµРЅ РєР°Рє estimate;
 - positioning flight;
 - self-transfer contingency.
 
-Не добавлять неизвестные расходы как точные числа. Использовать ranges/confidence.
+РќРµ РґРѕР±Р°РІР»СЏС‚СЊ РЅРµРёР·РІРµСЃС‚РЅС‹Рµ СЂР°СЃС…РѕРґС‹ РєР°Рє С‚РѕС‡РЅС‹Рµ С‡РёСЃР»Р°. РСЃРїРѕР»СЊР·РѕРІР°С‚СЊ ranges/confidence.
 
 ### 8.4. Explainability
 
-Для каждого результата deterministic explanation facts:
+Р”Р»СЏ РєР°Р¶РґРѕРіРѕ СЂРµР·СѓР»СЊС‚Р°С‚Р° deterministic explanation facts:
 
-- «на 18% дешевле медианы ваших 42 наблюдений»;
-- «на 320 PLN дешевле лучшего single-ticket, но два PNR»;
-- «аэропорт в 112 км; оценка трансфера 2 ч 10 мин»;
-- «цена cached, наблюдалась 5 часов назад»;
-- «тариф без зарегистрированного багажа».
+- В«РЅР° 18% РґРµС€РµРІР»Рµ РјРµРґРёР°РЅС‹ РІР°С€РёС… 42 РЅР°Р±Р»СЋРґРµРЅРёР№В»;
+- В«РЅР° 320 PLN РґРµС€РµРІР»Рµ Р»СѓС‡С€РµРіРѕ single-ticket, РЅРѕ РґРІР° PNRВ»;
+- В«Р°СЌСЂРѕРїРѕСЂС‚ РІ 112 РєРј; РѕС†РµРЅРєР° С‚СЂР°РЅСЃС„РµСЂР° 2 С‡ 10 РјРёРЅВ»;
+- В«С†РµРЅР° cached, РЅР°Р±Р»СЋРґР°Р»Р°СЃСЊ 5 С‡Р°СЃРѕРІ РЅР°Р·Р°РґВ»;
+- В«С‚Р°СЂРёС„ Р±РµР· Р·Р°СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°РЅРЅРѕРіРѕ Р±Р°РіР°Р¶Р°В».
 
-LLM может превратить facts в читаемый текст, но не добавляет новые утверждения.
+LLM РјРѕР¶РµС‚ РїСЂРµРІСЂР°С‚РёС‚СЊ facts РІ С‡РёС‚Р°РµРјС‹Р№ С‚РµРєСЃС‚, РЅРѕ РЅРµ РґРѕР±Р°РІР»СЏРµС‚ РЅРѕРІС‹Рµ СѓС‚РІРµСЂР¶РґРµРЅРёСЏ.
 
 ---
 
 ## 9. Price Intelligence
 
-### 9.1. История
+### 9.1. РСЃС‚РѕСЂРёСЏ
 
-Сохранять append-only snapshots. Не перезаписывать прошлые цены. Для одинакового наблюдения допускается compaction с count, но исходная временная последовательность должна восстанавливаться.
+РЎРѕС…СЂР°РЅСЏС‚СЊ append-only snapshots. РќРµ РїРµСЂРµР·Р°РїРёСЃС‹РІР°С‚СЊ РїСЂРѕС€Р»С‹Рµ С†РµРЅС‹. Р”Р»СЏ РѕРґРёРЅР°РєРѕРІРѕРіРѕ РЅР°Р±Р»СЋРґРµРЅРёСЏ РґРѕРїСѓСЃРєР°РµС‚СЃСЏ compaction СЃ count, РЅРѕ РёСЃС…РѕРґРЅР°СЏ РІСЂРµРјРµРЅРЅР°СЏ РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕСЃС‚СЊ РґРѕР»Р¶РЅР° РІРѕСЃСЃС‚Р°РЅР°РІР»РёРІР°С‚СЊСЃСЏ.
 
 ### 9.2. Buy-now score
 
-Не существует hardcoded «самого дешёвого вторника в 02:00». Оценка строится по данным конкретного watch:
+РќРµ СЃСѓС‰РµСЃС‚РІСѓРµС‚ hardcoded В«СЃР°РјРѕРіРѕ РґРµС€С‘РІРѕРіРѕ РІС‚РѕСЂРЅРёРєР° РІ 02:00В». РћС†РµРЅРєР° СЃС‚СЂРѕРёС‚СЃСЏ РїРѕ РґР°РЅРЅС‹Рј РєРѕРЅРєСЂРµС‚РЅРѕРіРѕ watch:
 
-- percentile текущей цены;
-- robust z-score относительно медианы/MAD;
+- percentile С‚РµРєСѓС‰РµР№ С†РµРЅС‹;
+- robust z-score РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅРѕ РјРµРґРёР°РЅС‹/MAD;
 - recent slope;
 - volatility;
 - days to departure;
-- число наблюдений;
+- С‡РёСЃР»Рѕ РЅР°Р±Р»СЋРґРµРЅРёР№;
 - freshness;
 - cross-source confirmation;
-- seat/fare expiry, если известно.
+- seat/fare expiry, РµСЃР»Рё РёР·РІРµСЃС‚РЅРѕ.
 
-При недостатке данных показывать `INSUFFICIENT_DATA`, а не уверенный совет.
+РџСЂРё РЅРµРґРѕСЃС‚Р°С‚РєРµ РґР°РЅРЅС‹С… РїРѕРєР°Р·С‹РІР°С‚СЊ `INSUFFICIENT_DATA`, Р° РЅРµ СѓРІРµСЂРµРЅРЅС‹Р№ СЃРѕРІРµС‚.
 
 ### 9.3. Suspected error fare
 
@@ -649,34 +648,34 @@ anomaly_score =
 - missing_fees_penalty
 ```
 
-Требования:
+РўСЂРµР±РѕРІР°РЅРёСЏ:
 
-- сравнивать одинаковый passenger mix/cabin/baggage;
-- исключать ошибочную валюту и one-way/round-trip mismatch;
-- проверять, что itinerary валиден;
-- по возможности делать разрешённый refresh;
-- label: «подозрение на аномально низкую цену»;
-- никогда не обещать, что билет будет выписан;
-- уведомление должно советовать проверить условия и не строить невозвратные планы до ticketing confirmation.
+- СЃСЂР°РІРЅРёРІР°С‚СЊ РѕРґРёРЅР°РєРѕРІС‹Р№ passenger mix/cabin/baggage;
+- РёСЃРєР»СЋС‡Р°С‚СЊ РѕС€РёР±РѕС‡РЅСѓСЋ РІР°Р»СЋС‚Сѓ Рё one-way/round-trip mismatch;
+- РїСЂРѕРІРµСЂСЏС‚СЊ, С‡С‚Рѕ itinerary РІР°Р»РёРґРµРЅ;
+- РїРѕ РІРѕР·РјРѕР¶РЅРѕСЃС‚Рё РґРµР»Р°С‚СЊ СЂР°Р·СЂРµС€С‘РЅРЅС‹Р№ refresh;
+- label: В«РїРѕРґРѕР·СЂРµРЅРёРµ РЅР° Р°РЅРѕРјР°Р»СЊРЅРѕ РЅРёР·РєСѓСЋ С†РµРЅСѓВ»;
+- РЅРёРєРѕРіРґР° РЅРµ РѕР±РµС‰Р°С‚СЊ, С‡С‚Рѕ Р±РёР»РµС‚ Р±СѓРґРµС‚ РІС‹РїРёСЃР°РЅ;
+- СѓРІРµРґРѕРјР»РµРЅРёРµ РґРѕР»Р¶РЅРѕ СЃРѕРІРµС‚РѕРІР°С‚СЊ РїСЂРѕРІРµСЂРёС‚СЊ СѓСЃР»РѕРІРёСЏ Рё РЅРµ СЃС‚СЂРѕРёС‚СЊ РЅРµРІРѕР·РІСЂР°С‚РЅС‹Рµ РїР»Р°РЅС‹ РґРѕ ticketing confirmation.
 
-### 9.4. Горящие направления
+### 9.4. Р“РѕСЂСЏС‰РёРµ РЅР°РїСЂР°РІР»РµРЅРёСЏ
 
-`DealScanner` работает только на источниках, разрешающих background discovery. Он не перебирает весь мир live-запросами. Стратегия:
+`DealScanner` СЂР°Р±РѕС‚Р°РµС‚ С‚РѕР»СЊРєРѕ РЅР° РёСЃС‚РѕС‡РЅРёРєР°С…, СЂР°Р·СЂРµС€Р°СЋС‰РёС… background discovery. РћРЅ РЅРµ РїРµСЂРµР±РёСЂР°РµС‚ РІРµСЃСЊ РјРёСЂ live-Р·Р°РїСЂРѕСЃР°РјРё. РЎС‚СЂР°С‚РµРіРёСЏ:
 
-1. Пользователь задаёт origin set, регионы, период, длительность, бюджет.
-2. Получить popular/alternative directions и cached/indicative matrix.
-3. Сформировать ограниченный candidate set.
-4. Сравнить с собственной историей.
-5. Отправить alert при превышении deal threshold.
-6. Предложить кнопку «Проверить live», которая создаёт UserActionGrant.
+1. РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ Р·Р°РґР°С‘С‚ origin set, СЂРµРіРёРѕРЅС‹, РїРµСЂРёРѕРґ, РґР»РёС‚РµР»СЊРЅРѕСЃС‚СЊ, Р±СЋРґР¶РµС‚.
+2. РџРѕР»СѓС‡РёС‚СЊ popular/alternative directions Рё cached/indicative matrix.
+3. РЎС„РѕСЂРјРёСЂРѕРІР°С‚СЊ РѕРіСЂР°РЅРёС‡РµРЅРЅС‹Р№ candidate set.
+4. РЎСЂР°РІРЅРёС‚СЊ СЃ СЃРѕР±СЃС‚РІРµРЅРЅРѕР№ РёСЃС‚РѕСЂРёРµР№.
+5. РћС‚РїСЂР°РІРёС‚СЊ alert РїСЂРё РїСЂРµРІС‹С€РµРЅРёРё deal threshold.
+6. РџСЂРµРґР»РѕР¶РёС‚СЊ РєРЅРѕРїРєСѓ В«РџСЂРѕРІРµСЂРёС‚СЊ liveВ», РєРѕС‚РѕСЂР°СЏ СЃРѕР·РґР°С‘С‚ UserActionGrant.
 
 ---
 
 ## 10. Watch Scheduler
 
-### 10.1. Принципы
+### 10.1. РџСЂРёРЅС†РёРїС‹
 
-- provider policy выше пользовательского желания;
+- provider policy РІС‹С€Рµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРѕРіРѕ Р¶РµР»Р°РЅРёСЏ;
 - adaptive interval;
 - quota-aware;
 - jitter;
@@ -685,34 +684,34 @@ anomaly_score =
 - distributed lock;
 - idempotency;
 - dead-letter queue;
-- quiet hours относятся к доставке, а не обязательно к сбору;
-- не выполнять бессмысленные запросы после вылета/истечения watch.
+- quiet hours РѕС‚РЅРѕСЃСЏС‚СЃСЏ Рє РґРѕСЃС‚Р°РІРєРµ, Р° РЅРµ РѕР±СЏР·Р°С‚РµР»СЊРЅРѕ Рє СЃР±РѕСЂСѓ;
+- РЅРµ РІС‹РїРѕР»РЅСЏС‚СЊ Р±РµСЃСЃРјС‹СЃР»РµРЅРЅС‹Рµ Р·Р°РїСЂРѕСЃС‹ РїРѕСЃР»Рµ РІС‹Р»РµС‚Р°/РёСЃС‚РµС‡РµРЅРёСЏ watch.
 
-### 10.2. Пример базовой частоты
+### 10.2. РџСЂРёРјРµСЂ Р±Р°Р·РѕРІРѕР№ С‡Р°СЃС‚РѕС‚С‹
 
-Только для источников, разрешающих background:
+РўРѕР»СЊРєРѕ РґР»СЏ РёСЃС‚РѕС‡РЅРёРєРѕРІ, СЂР°Р·СЂРµС€Р°СЋС‰РёС… background:
 
-- >120 дней: раз в 24 часа;
-- 61–120 дней: раз в 12 часов;
-- 15–60 дней: раз в 6 часов;
-- 3–14 дней: раз в 2 часа;
-- <72 часов: раз в 1 час только если provider policy и quota это допускают;
-- cached API всё равно не опрашивать чаще, чем обновляется полезная информация.
+- >120 РґРЅРµР№: СЂР°Р· РІ 24 С‡Р°СЃР°;
+- 61вЂ“120 РґРЅРµР№: СЂР°Р· РІ 12 С‡Р°СЃРѕРІ;
+- 15вЂ“60 РґРЅРµР№: СЂР°Р· РІ 6 С‡Р°СЃРѕРІ;
+- 3вЂ“14 РґРЅРµР№: СЂР°Р· РІ 2 С‡Р°СЃР°;
+- <72 С‡Р°СЃРѕРІ: СЂР°Р· РІ 1 С‡Р°СЃ С‚РѕР»СЊРєРѕ РµСЃР»Рё provider policy Рё quota СЌС‚Рѕ РґРѕРїСѓСЃРєР°СЋС‚;
+- cached API РІСЃС‘ СЂР°РІРЅРѕ РЅРµ РѕРїСЂР°С€РёРІР°С‚СЊ С‡Р°С‰Рµ, С‡РµРј РѕР±РЅРѕРІР»СЏРµС‚СЃСЏ РїРѕР»РµР·РЅР°СЏ РёРЅС„РѕСЂРјР°С†РёСЏ.
 
-Это defaults, а не обещание. Scheduler учитывает `cache_ttl`, `last_modified`, quota и отсутствие изменений.
+Р­С‚Рѕ defaults, Р° РЅРµ РѕР±РµС‰Р°РЅРёРµ. Scheduler СѓС‡РёС‚С‹РІР°РµС‚ `cache_ttl`, `last_modified`, quota Рё РѕС‚СЃСѓС‚СЃС‚РІРёРµ РёР·РјРµРЅРµРЅРёР№.
 
 ### 10.3. Alert hysteresis
 
-Новый alert только если:
+РќРѕРІС‹Р№ alert С‚РѕР»СЊРєРѕ РµСЃР»Рё:
 
-- цена ниже absolute threshold; или
-- падение больше X%; или
-- новый historical low; или
-- deal score пересёк threshold;
-- и изменение материально относительно последнего отправленного;
-- и cooldown истёк, кроме нового сильного рекорда.
+- С†РµРЅР° РЅРёР¶Рµ absolute threshold; РёР»Рё
+- РїР°РґРµРЅРёРµ Р±РѕР»СЊС€Рµ X%; РёР»Рё
+- РЅРѕРІС‹Р№ historical low; РёР»Рё
+- deal score РїРµСЂРµСЃС‘Рє threshold;
+- Рё РёР·РјРµРЅРµРЅРёРµ РјР°С‚РµСЂРёР°Р»СЊРЅРѕ РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅРѕ РїРѕСЃР»РµРґРЅРµРіРѕ РѕС‚РїСЂР°РІР»РµРЅРЅРѕРіРѕ;
+- Рё cooldown РёСЃС‚С‘Рє, РєСЂРѕРјРµ РЅРѕРІРѕРіРѕ СЃРёР»СЊРЅРѕРіРѕ СЂРµРєРѕСЂРґР°.
 
-Дедупликация по `(watch, canonical itinerary group, reason bucket, price bucket)`.
+Р”РµРґСѓРїР»РёРєР°С†РёСЏ РїРѕ `(watch, canonical itinerary group, reason bucket, price bucket)`.
 
 ---
 
@@ -720,63 +719,63 @@ anomaly_score =
 
 ### 11.1. Production mode
 
-- webhook через HTTPS;
-- проверка `X-Telegram-Bot-Api-Secret-Token`;
-- idempotency по `update_id`;
-- long polling только для local development;
-- token только в secret store/env;
-- bot не доверяет Telegram username как идентификатору аккаунта.
+- webhook С‡РµСЂРµР· HTTPS;
+- РїСЂРѕРІРµСЂРєР° `X-Telegram-Bot-Api-Secret-Token`;
+- idempotency РїРѕ `update_id`;
+- long polling С‚РѕР»СЊРєРѕ РґР»СЏ local development;
+- token С‚РѕР»СЊРєРѕ РІ secret store/env;
+- bot РЅРµ РґРѕРІРµСЂСЏРµС‚ Telegram username РєР°Рє РёРґРµРЅС‚РёС„РёРєР°С‚РѕСЂСѓ Р°РєРєР°СѓРЅС‚Р°.
 
 ### 11.2. Linking
 
-1. Авторизованный web-пользователь генерирует одноразовый link code.
-2. Нажимает deep link `/start <code>`.
-3. Backend связывает Telegram user id с account.
-4. Code одноразовый и короткоживущий.
-5. В настройках можно отозвать связь.
+1. РђРІС‚РѕСЂРёР·РѕРІР°РЅРЅС‹Р№ web-РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РіРµРЅРµСЂРёСЂСѓРµС‚ РѕРґРЅРѕСЂР°Р·РѕРІС‹Р№ link code.
+2. РќР°Р¶РёРјР°РµС‚ deep link `/start <code>`.
+3. Backend СЃРІСЏР·С‹РІР°РµС‚ Telegram user id СЃ account.
+4. Code РѕРґРЅРѕСЂР°Р·РѕРІС‹Р№ Рё РєРѕСЂРѕС‚РєРѕР¶РёРІСѓС‰РёР№.
+5. Р’ РЅР°СЃС‚СЂРѕР№РєР°С… РјРѕР¶РЅРѕ РѕС‚РѕР·РІР°С‚СЊ СЃРІСЏР·СЊ.
 
-### 11.3. Команды
+### 11.3. РљРѕРјР°РЅРґС‹
 
 - `/start`;
-- `/search` — guided flow;
-- `/watch` — создать отслеживание;
+- `/search` вЂ” guided flow;
+- `/watch` вЂ” СЃРѕР·РґР°С‚СЊ РѕС‚СЃР»РµР¶РёРІР°РЅРёРµ;
 - `/watches`;
-- `/pause` и `/resume`;
+- `/pause` Рё `/resume`;
 - `/deals`;
 - `/settings`;
 - `/link`;
 - `/help`.
 
-Основной UX — inline keyboards и Web App/deep links, а не длинные команды.
+РћСЃРЅРѕРІРЅРѕР№ UX вЂ” inline keyboards Рё Web App/deep links, Р° РЅРµ РґР»РёРЅРЅС‹Рµ РєРѕРјР°РЅРґС‹.
 
-### 11.4. Уведомление
+### 11.4. РЈРІРµРґРѕРјР»РµРЅРёРµ
 
-Должно помещать главное в первый экран:
+Р”РѕР»Р¶РЅРѕ РїРѕРјРµС‰Р°С‚СЊ РіР»Р°РІРЅРѕРµ РІ РїРµСЂРІС‹Р№ СЌРєСЂР°РЅ:
 
 ```text
-🔥 Новый минимум: WAW → NRT
-2 184 PLN за 2 пассажиров · −17% от медианы
-12–25 октября · 1 пересадка · 16ч 40м
-Источник: cached, наблюдалось 18 минут назад
-Багаж: ручная кладь; checked bag неизвестен
+рџ”Ґ РќРѕРІС‹Р№ РјРёРЅРёРјСѓРј: WAW в†’ NRT
+2 184 PLN Р·Р° 2 РїР°СЃСЃР°Р¶РёСЂРѕРІ В· в€’17% РѕС‚ РјРµРґРёР°РЅС‹
+12вЂ“25 РѕРєС‚СЏР±СЂСЏ В· 1 РїРµСЂРµСЃР°РґРєР° В· 16С‡ 40Рј
+РСЃС‚РѕС‡РЅРёРє: cached, РЅР°Р±Р»СЋРґР°Р»РѕСЃСЊ 18 РјРёРЅСѓС‚ РЅР°Р·Р°Рґ
+Р‘Р°РіР°Р¶: СЂСѓС‡РЅР°СЏ РєР»Р°РґСЊ; checked bag РЅРµРёР·РІРµСЃС‚РµРЅ
 
-[Открыть сравнение] [Проверить live] [Не уведомлять 24ч]
+[РћС‚РєСЂС‹С‚СЊ СЃСЂР°РІРЅРµРЅРёРµ] [РџСЂРѕРІРµСЂРёС‚СЊ live] [РќРµ СѓРІРµРґРѕРјР»СЏС‚СЊ 24С‡]
 ```
 
-Не отправлять booking link заранее, если политика провайдера требует генерацию после клика.
+РќРµ РѕС‚РїСЂР°РІР»СЏС‚СЊ booking link Р·Р°СЂР°РЅРµРµ, РµСЃР»Рё РїРѕР»РёС‚РёРєР° РїСЂРѕРІР°Р№РґРµСЂР° С‚СЂРµР±СѓРµС‚ РіРµРЅРµСЂР°С†РёСЋ РїРѕСЃР»Рµ РєР»РёРєР°.
 
 ---
 
 ## 12. Web UI
 
-### 12.1. Основные экраны
+### 12.1. РћСЃРЅРѕРІРЅС‹Рµ СЌРєСЂР°РЅС‹
 
 1. **Dashboard**
-   - активные watches;
-   - лучшие изменения;
+   - Р°РєС‚РёРІРЅС‹Рµ watches;
+   - Р»СѓС‡С€РёРµ РёР·РјРµРЅРµРЅРёСЏ;
    - provider health;
-   - новые deals;
-   - ближайшие поездки.
+   - РЅРѕРІС‹Рµ deals;
+   - Р±Р»РёР¶Р°Р№С€РёРµ РїРѕРµР·РґРєРё.
 
 2. **Search**
    - structured form + natural-language input;
@@ -830,13 +829,13 @@ anomaly_score =
    - audit log;
    - backup status.
 
-### 12.2. UX требования
+### 12.2. UX С‚СЂРµР±РѕРІР°РЅРёСЏ
 
 - responsive PWA;
 - WCAG AA baseline;
 - keyboard navigation;
 - dark/light mode;
-- RU and EN from day one, locale architecture готова к PL;
+- RU and EN from day one, locale architecture РіРѕС‚РѕРІР° Рє PL;
 - skeleton/progress without fake results;
 - errors explain provider failure and next action;
 - cached/live distinction visible, not hidden in tooltip;
@@ -846,7 +845,7 @@ anomaly_score =
 
 ## 13. API surface
 
-Примерные endpoints:
+РџСЂРёРјРµСЂРЅС‹Рµ endpoints:
 
 ```text
 POST   /api/v1/auth/invitations
@@ -873,37 +872,37 @@ POST   /api/v1/privacy/export
 DELETE /api/v1/account
 ```
 
-Все mutating endpoints поддерживают idempotency key, где это разумно. OpenAPI генерирует frontend client.
+Р’СЃРµ mutating endpoints РїРѕРґРґРµСЂР¶РёРІР°СЋС‚ idempotency key, РіРґРµ СЌС‚Рѕ СЂР°Р·СѓРјРЅРѕ. OpenAPI РіРµРЅРµСЂРёСЂСѓРµС‚ frontend client.
 
 ---
 
-## 14. Безопасность и приватность
+## 14. Р‘РµР·РѕРїР°СЃРЅРѕСЃС‚СЊ Рё РїСЂРёРІР°С‚РЅРѕСЃС‚СЊ
 
 - invitation-only;
-- Argon2id для паролей, если password auth включён;
-- предпочтительно OIDC/passkeys/magic link;
+- Argon2id РґР»СЏ РїР°СЂРѕР»РµР№, РµСЃР»Рё password auth РІРєР»СЋС‡С‘РЅ;
+- РїСЂРµРґРїРѕС‡С‚РёС‚РµР»СЊРЅРѕ OIDC/passkeys/magic link;
 - secure, HTTP-only, SameSite cookies;
 - CSRF protection;
-- RBAC на household/admin boundaries;
-- provider secrets зашифрованы at rest или передаются через secret manager;
-- secrets никогда не попадают в frontend, logs, fixtures, exports;
-- outbound host allowlist для provider adapters;
-- защита от SSRF;
-- timeout/size limits для HTTP;
+- RBAC РЅР° household/admin boundaries;
+- provider secrets Р·Р°С€РёС„СЂРѕРІР°РЅС‹ at rest РёР»Рё РїРµСЂРµРґР°СЋС‚СЃСЏ С‡РµСЂРµР· secret manager;
+- secrets РЅРёРєРѕРіРґР° РЅРµ РїРѕРїР°РґР°СЋС‚ РІ frontend, logs, fixtures, exports;
+- outbound host allowlist РґР»СЏ provider adapters;
+- Р·Р°С‰РёС‚Р° РѕС‚ SSRF;
+- timeout/size limits РґР»СЏ HTTP;
 - signed webhook secrets;
-- audit log для admin/provider changes;
-- rate limits на auth/search/Telegram actions;
+- audit log РґР»СЏ admin/provider changes;
+- rate limits РЅР° auth/search/Telegram actions;
 - dependency and secret scanning;
 - encrypted backups;
 - data export/delete;
-- configurable retention для raw provider payloads;
-- threat model в репозитории.
+- configurable retention РґР»СЏ raw provider payloads;
+- threat model РІ СЂРµРїРѕР·РёС‚РѕСЂРёРё.
 
 ---
 
 ## 15. Observability
 
-### Метрики
+### РњРµС‚СЂРёРєРё
 
 - search latency per provider;
 - provider error rate;
@@ -921,7 +920,7 @@ DELETE /api/v1/account
   starts, parser offer counts, search duration and sent alerts; labels stay low-cardinality and do
   not include ids, tokens, URLs or message text.
 
-### Логи
+### Р›РѕРіРё
 
 - JSON structured;
 - correlation id, search run id, provider run id;
@@ -934,7 +933,7 @@ DELETE /api/v1/account
 
 ### Tracing
 
-HTTP request → planner → provider calls → normalization → ranking → notification.
+HTTP request в†’ planner в†’ provider calls в†’ normalization в†’ ranking в†’ notification.
 
 ### Runbooks
 
@@ -994,7 +993,7 @@ HTTP request → planner → provider calls → normalization → ranking → no
 
 ### E2E
 
-- invite → sign in;
+- invite в†’ sign in;
 - create search;
 - view matrix;
 - create watch;
@@ -1007,15 +1006,15 @@ HTTP request → planner → provider calls → normalization → ranking → no
 
 ### Coverage gates
 
-- domain/policy/ranking/itinerary modules: ≥85%;
-- backend total: ≥75%;
+- domain/policy/ranking/itinerary modules: в‰Ґ85%;
+- backend total: в‰Ґ75%;
 - frontend critical flows covered; numeric coverage secondary to meaningful assertions.
 
 ---
 
 ## 17. Deployment
 
-`docker compose up --build` должен запускать:
+`docker compose up --build` РґРѕР»Р¶РµРЅ Р·Р°РїСѓСЃРєР°С‚СЊ:
 
 - web;
 - api;
@@ -1043,18 +1042,18 @@ Production checklist:
 
 ---
 
-## 18. Архитектурные запреты
+## 18. РђСЂС…РёС‚РµРєС‚СѓСЂРЅС‹Рµ Р·Р°РїСЂРµС‚С‹
 
-- Не связывать домен с конкретным provider response.
-- Не вызывать live API из frontend.
-- Не хранить деньги как float.
-- Не сравнивать цены без passenger/cabin/baggage normalization.
-- Не запускать 49 live-поисков для ±3 дней автоматически.
-- Не объединять provider-isolated results.
-- Не создавать booking link до пользовательского клика, если запрещено.
-- Не выдавать cached цену за live.
-- Не использовать LLM для арифметики, маршрутизации или policy decisions.
-- Не делать scraping fallback «на всякий случай».
-- Не обходить CAPTCHA/антибот/географические ограничения.
-- Не отправлять повторяющиеся Telegram alerts без material change.
-- Не оставлять TODO, fake implementation или мок в production path.
+- РќРµ СЃРІСЏР·С‹РІР°С‚СЊ РґРѕРјРµРЅ СЃ РєРѕРЅРєСЂРµС‚РЅС‹Рј provider response.
+- РќРµ РІС‹Р·С‹РІР°С‚СЊ live API РёР· frontend.
+- РќРµ С…СЂР°РЅРёС‚СЊ РґРµРЅСЊРіРё РєР°Рє float.
+- РќРµ СЃСЂР°РІРЅРёРІР°С‚СЊ С†РµРЅС‹ Р±РµР· passenger/cabin/baggage normalization.
+- РќРµ Р·Р°РїСѓСЃРєР°С‚СЊ 49 live-РїРѕРёСЃРєРѕРІ РґР»СЏ В±3 РґРЅРµР№ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё.
+- РќРµ РѕР±СЉРµРґРёРЅСЏС‚СЊ provider-isolated results.
+- РќРµ СЃРѕР·РґР°РІР°С‚СЊ booking link РґРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРѕРіРѕ РєР»РёРєР°, РµСЃР»Рё Р·Р°РїСЂРµС‰РµРЅРѕ.
+- РќРµ РІС‹РґР°РІР°С‚СЊ cached С†РµРЅСѓ Р·Р° live.
+- РќРµ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ LLM РґР»СЏ Р°СЂРёС„РјРµС‚РёРєРё, РјР°СЂС€СЂСѓС‚РёР·Р°С†РёРё РёР»Рё policy decisions.
+- РќРµ РґРµР»Р°С‚СЊ scraping fallback В«РЅР° РІСЃСЏРєРёР№ СЃР»СѓС‡Р°Р№В».
+- РќРµ РѕР±С…РѕРґРёС‚СЊ CAPTCHA/Р°РЅС‚РёР±РѕС‚/РіРµРѕРіСЂР°С„РёС‡РµСЃРєРёРµ РѕРіСЂР°РЅРёС‡РµРЅРёСЏ.
+- РќРµ РѕС‚РїСЂР°РІР»СЏС‚СЊ РїРѕРІС‚РѕСЂСЏСЋС‰РёРµСЃСЏ Telegram alerts Р±РµР· material change.
+- РќРµ РѕСЃС‚Р°РІР»СЏС‚СЊ TODO, fake implementation РёР»Рё РјРѕРє РІ production path.

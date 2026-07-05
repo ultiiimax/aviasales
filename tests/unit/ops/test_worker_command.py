@@ -50,7 +50,7 @@ from flight_hunter.providers.personal_observer.runner import (
 FIXTURE = Path("tests/fixtures/browser/tutu/search_result_source_specific.html")
 HOUSEHOLD_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 USER_ID = UUID("11111111-1111-1111-1111-111111111111")
-NOW = datetime(2026, 6, 29, 21, 0, tzinfo=UTC)
+NOW = datetime(2026, 7, 6, 21, 0, tzinfo=UTC)
 
 
 def test_worker_processes_queued_browser_observation_jobs(
@@ -895,10 +895,10 @@ def _live_offer(observation_id: UUID) -> FlightOffer:
 def _settings() -> AppSettings:
     return AppSettings(
         database_url="sqlite+aiosqlite:///:memory:",
-        aviasales_data_enabled=False,
-        travelpayouts_api_token=None,
-        aviasales_data_default_market="pl",
-        aviasales_data_internal_rpm=30,
+        aviasales_search_enabled=False,
+        aviasales_search_signature=None,
+        aviasales_search_marker=None,
+        aviasales_search_internal_rpm=20,
         telegram_enabled=False,
         telegram_webhook_secret=None,
     )

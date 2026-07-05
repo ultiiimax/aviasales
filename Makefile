@@ -1,6 +1,6 @@
-.PHONY: help bootstrap dev dev-api test test-unit test-integration test-e2e lint typecheck migrate seed-demo quality provider-contracts security travelpayouts-smoke source-smoke browser-smoke parse-fixture redact-url sanitize-html backup backup-verify restore cleanup-live-observations import-airports worker worker-healthcheck compose-up compose-down compose-worker-up compose-deals-up compose-deals-config
+.PHONY: help bootstrap dev dev-api test test-unit test-integration test-e2e lint typecheck migrate seed-demo quality provider-contracts security source-smoke browser-smoke parse-fixture redact-url sanitize-html backup backup-verify restore cleanup-live-observations import-airports worker worker-healthcheck compose-up compose-down compose-worker-up compose-deals-up compose-deals-config
 
-SOURCE ?= searxng
+SOURCE ?= aviasales_search
 FIXTURE_ARGS ?=
 SANITIZE_ARGS ?=
 REDACT_URL ?=
@@ -22,8 +22,7 @@ help:
 	@echo "  make quality            Run test, lint, and typecheck"
 	@echo "  make provider-contracts Run current policy contract tests"
 	@echo "  make security           Run local secret scanner"
-	@echo "  make travelpayouts-smoke Run one sanitized Aviasales Data API smoke check"
-	@echo "  make source-smoke SOURCE=searxng Run one sanitized source smoke check"
+	@echo "  make source-smoke SOURCE=aviasales_search Run one sanitized source smoke check"
 	@echo "  make browser-smoke      Run local Playwright Chromium smoke check"
 	@echo "  make parse-fixture FIXTURE_ARGS='...' Parse sanitized observer fixture"
 	@echo "  make redact-url REDACT_URL='...' Redact credentials/query secrets from a URL"
@@ -80,9 +79,6 @@ provider-contracts:
 
 security:
 	uv run flight-hunter-security-scan
-
-travelpayouts-smoke:
-	uv run travelpayouts-smoke
 
 source-smoke:
 	uv run flight-hunter-source-smoke --source "$(SOURCE)"

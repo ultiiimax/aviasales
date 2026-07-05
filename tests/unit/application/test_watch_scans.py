@@ -64,7 +64,7 @@ async def test_watch_scan_persists_snapshot_and_advances_schedule() -> None:
 
 
 @pytest.mark.anyio
-async def test_watch_scan_never_calls_background_disallowed_provider() -> None:
+async def test_watch_scan_never_calls_user_action_provider() -> None:
     session_factory = await _session_factory()
     unsafe_provider = RecordingProvider(
         policy=ProviderPolicy.aviasales_search(
@@ -99,7 +99,7 @@ async def test_watch_scan_never_calls_background_disallowed_provider() -> None:
     assert summary.watches_skipped == 1
     assert watch is not None
     assert watch.last_scan_status == "skipped"
-    assert watch.last_scan_error_code == "live_provider_not_allowed_in_scheduler"
+    assert watch.last_scan_error_code == "user_action_required"
     assert health[0].status == "skipped"
 
 

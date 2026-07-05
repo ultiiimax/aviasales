@@ -1,5 +1,3 @@
-# ruff: noqa: RUF001
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +12,7 @@ class PriceSourceType(StrEnum):
 
 
 class PriceKind(StrEnum):
+    LIVE = "live"
     CACHED = "cached"
     USER_CONFIRMED_LIVE = "user_confirmed_live"
 
@@ -41,18 +40,18 @@ class PriceSourceCatalog:
         return cls(
             sources=(
                 PriceSource(
-                    id="aviasales_data",
-                    name="Aviasales / Travelpayouts Data API",
+                    id="aviasales_search",
+                    name="Aviasales mobile API",
                     source_type=PriceSourceType.API,
-                    price_kind=PriceKind.CACHED,
+                    price_kind=PriceKind.LIVE,
                     supports_rub=True,
                     in_app_booking=False,
                     purchase_flow="external_clickout",
-                    requires_manual_confirmation=True,
-                    setup_required_ru="Travelpayouts account и API token.",
+                    requires_manual_confirmation=False,
+                    setup_required_ru="AVIASALES_SEARCH_SIGNATURE and AVIASALES_SEARCH_MARKER.",
                     notes_ru=(
-                        "Официальный cached API. Цена не считается live и всегда требует "
-                        "проверки перед покупкой."
+                        "Live Aviasales mobile search. Purchase URL is resolved only after an "
+                        "explicit booking action."
                     ),
                 ),
                 PriceSource(
@@ -64,35 +63,32 @@ class PriceSourceCatalog:
                     in_app_booking=False,
                     purchase_flow="external_clickout",
                     requires_manual_confirmation=True,
-                    setup_required_ru="Партнерская ссылка или обычная ссылка на поиск.",
-                    notes_ru="Пользователь открывает Aviasales и подтверждает актуальную цену там.",
+                    setup_required_ru="Partner or normal Aviasales search link.",
+                    notes_ru="User opens Aviasales and verifies the final price there.",
                 ),
                 PriceSource(
                     id="yandex_travel",
-                    name="Яндекс Путешествия",
+                    name="Yandex Travel",
                     source_type=PriceSourceType.PARTNER_LINK,
                     price_kind=PriceKind.USER_CONFIRMED_LIVE,
                     supports_rub=True,
                     in_app_booking=False,
                     purchase_flow="external_clickout",
                     requires_manual_confirmation=True,
-                    setup_required_ru="Заявка в Yandex Distribution для партнерских ссылок.",
-                    notes_ru=(
-                        "Для авиа обычно используем click-out. API в документации Яндекса "
-                        "описан прежде всего для отелей."
-                    ),
+                    setup_required_ru="Yandex Distribution access or manual search link.",
+                    notes_ru="Click-out source; final price is confirmed on Yandex Travel.",
                 ),
                 PriceSource(
                     id="tutu",
-                    name="Туту",
+                    name="Tutu",
                     source_type=PriceSourceType.PARTNER_LINK,
                     price_kind=PriceKind.USER_CONFIRMED_LIVE,
                     supports_rub=True,
                     in_app_booking=False,
                     purchase_flow="external_clickout",
                     requires_manual_confirmation=True,
-                    setup_required_ru="Партнерская программа/ссылка, если доступна для проекта.",
-                    notes_ru="Покупка и финальная цена подтверждаются на стороне Туту.",
+                    setup_required_ru="Partner program or manual search link.",
+                    notes_ru="Purchase and final price are confirmed on Tutu.",
                 ),
                 PriceSource(
                     id="onetwotrip",
@@ -103,44 +99,8 @@ class PriceSourceCatalog:
                     in_app_booking=False,
                     purchase_flow="external_clickout",
                     requires_manual_confirmation=True,
-                    setup_required_ru="Партнерская договоренность или ручная ссылка на поиск.",
-                    notes_ru="Не используем скрытый scraping; пользователь проверяет цену снаружи.",
-                ),
-                PriceSource(
-                    id="aeroflot",
-                    name="Аэрофлот",
-                    source_type=PriceSourceType.CARRIER_SITE,
-                    price_kind=PriceKind.USER_CONFIRMED_LIVE,
-                    supports_rub=True,
-                    in_app_booking=False,
-                    purchase_flow="external_clickout",
-                    requires_manual_confirmation=True,
-                    setup_required_ru="Официальный сайт перевозчика, без API-обхода.",
-                    notes_ru="Подходит для проверки цены напрямую у перевозчика.",
-                ),
-                PriceSource(
-                    id="pobeda",
-                    name="Победа",
-                    source_type=PriceSourceType.CARRIER_SITE,
-                    price_kind=PriceKind.USER_CONFIRMED_LIVE,
-                    supports_rub=True,
-                    in_app_booking=False,
-                    purchase_flow="external_clickout",
-                    requires_manual_confirmation=True,
-                    setup_required_ru="Официальный сайт перевозчика, без API-обхода.",
-                    notes_ru="Важно отдельно учитывать багаж и выбор места.",
-                ),
-                PriceSource(
-                    id="s7",
-                    name="S7 Airlines",
-                    source_type=PriceSourceType.CARRIER_SITE,
-                    price_kind=PriceKind.USER_CONFIRMED_LIVE,
-                    supports_rub=True,
-                    in_app_booking=False,
-                    purchase_flow="external_clickout",
-                    requires_manual_confirmation=True,
-                    setup_required_ru="Официальный сайт перевозчика, без API-обхода.",
-                    notes_ru="Подходит для прямой проверки тарифа и правил у перевозчика.",
+                    setup_required_ru="Partner agreement or manual search link.",
+                    notes_ru="User verifies the price outside Flight Hunter.",
                 ),
                 *_additional_carrier_sources(),
             )
@@ -151,6 +111,9 @@ def _additional_carrier_sources() -> tuple[PriceSource, ...]:
     return tuple(
         _carrier_source(source_id=source_id, name=name)
         for source_id, name in (
+            ("aeroflot", "Aeroflot"),
+            ("pobeda", "Pobeda"),
+            ("s7", "S7 Airlines"),
             ("ural_airlines", "Ural Airlines"),
             ("nordwind", "Nordwind"),
             ("red_wings", "Red Wings"),

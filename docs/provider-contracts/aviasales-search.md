@@ -1,32 +1,154 @@
 # Aviasales Search API Contract Notes
 
-Verified: 2026-06-23
+Verified: 2026-07-05 (`suggest.aviasales.ru` smoke: OK, 1 result for `LED`);
+search/result/click schema from 2026-07-04 live capture against
+`tickets-api.aviasales.ru`.
 
-Official sources:
+Source: reverse-engineered from Aviasales Android APK `Aviasales_7.24.0` (local
+hobby project, not a partner integration). The mobile API endpoints below are
+used directly — no authorization, no partner token, no official ToS gating. See
+`AGENTS.md` for the project's stance on this.
 
-- https://support.travelpayouts.com/hc/en-us/articles/30565016140434-Aviasales-Flight-Search-API-real-time-and-multi-city-search
-- https://support.travelpayouts.com/hc/en-us/articles/210995808-How-to-get-access-to-the-Aviasales-Search-API
-- https://support.travelpayouts.com/hc/en-us/articles/34788165535250-Search-API-usage-rules
-- https://support.travelpayouts.com/hc/en-us/articles/203956173-Aviasales-Flights-Search-API-old-version
+Implementation status: **implemented** as a live adapter at
+`src/flight_hunter/providers/aviasales_search/` with fixture-based contract tests.
+Live calls are made with `curl_cffi` Chrome TLS impersonation to pass CloudFront
+WAF. No live calls run in CI.
 
-Implementation status: policy skeleton only. No Search API HTTP client is implemented in the current slice.
+## Endpoint inventory
 
-Policy facts used by Flight Hunter:
+| Endpoint | Method | Purpose | Auth |
+|---|---|---|---|
+| `https://tickets-api.aviasales.ru/search/v2/start` | POST | Start a search, get `search_id` + `results_url` | `X-Signature` header |
+| `https://{results_url}/search/v3.2/results` | POST | Poll result chunks until tickets appear | `X-Signature` + `X-Request-Id` |
+| `https://tickets-api.aviasales.ru/searches/{search_id}/clicks/{proposal_id}` | GET | Resolve a purchase URL for a specific proposal | `marker` query |
+| `https://suggest.aviasales.ru/v2/places.json` | GET | City/airport IATA autocomplete | `marker` query |
+| `https://explore-api.aviasales.ru/v1/hot_offers/list.json` | GET | Hot offers | `marker` query |
+| `https://explore-api.aviasales.ru/api/v6/calendar.json` | GET | Price calendar | `marker` query |
+| `https://ariadne.aviasales.ru/api/gql` | POST | GraphQL feed/blocks (`MainPageBlocksV1`, `DirectionPageBlocksV2`, `WeekendPricesListV1`, `AIFlexibleCalendarResultsV4`) | — |
 
-- Access is only for projects with confirmed 50,000+ MAU.
-- The new Flight Search API version is available from November 1, 2025.
-- The old API version stops working on June 15, 2026 and must not be used for new work.
-- Search requests must be initiated by a real user action.
-- Search results must be shown to the user and must not be automatically collected.
-- Results must not be combined with APIs from other flight metasearch services.
-- Booking links may be generated only after the user clicks the booking action.
-- API requests must be sent server-side; client-side calls are not supported.
+Reference: `api finder/aviasales_api/README.md` (decompiled APK protocol notes).
 
-Current Flight Hunter policy:
+## Request schema — `/search/v2/start`
 
-- Adapter disabled by default.
-- `credentials_present=false` and `access_approved=false` until explicitly configured.
-- `background_requests_allowed=false`.
-- `user_action_required=true`.
-- `merge_with_other_sources_allowed=false`, so `merge_scope=PROVIDER_ISOLATED`.
-- `booking_link_requires_click=true` and `preload_booking_links_allowed=false`.
+Headers:
+```
+User-Agent: Aviasales/7.24.0 (Android; 14; Pixel_8) okhttp/5.3.2
+X-Client-Type: mobile
+X-Signature: 856890a7-59b2-4043-9bc7-e478bb4e6405   (hardcoded in APK)
+Referer: https://www.aviasales.ru/
+Accept: application/json
+```
+
+Body:
+```json
+{
+  "search_params": {
+    "directions": [
+      {"origin": "MOW", "destination": "LED", "date": "2026-09-15",
+       "is_origin_airport": false, "is_destination_airport": false}
+    ],
+    "passengers": {"adults": 1, "children": 0, "infants": 0},
+    "trip_class": "Y"
+  },
+  "marker": "mobile_app.{md5(android_id)}",
+  "market_code": "RU", "currency_code": "RUB",
+  "languages": {"ru": 1.0}, "debug": {}, "brand": "AS",
+  "search_source": "mobile", "filters": {}
+}
+```
+
+Round trip: append a second direction with swapped origin/destination and
+`date` = return date.
+
+Response: `{"search_id": "...", "results_url": "host.aviasales.ru", "blet_url": "..."}`.
+
+## Request schema — `/search/v3.2/results` (polling)
+
+POST `https://{results_url}/search/v3.2/results` with header `X-Request-Id: {uuid}`.
+
+Body:
+```json
+{
+  "search_id": "...", "limit": 50,
+  "last_update_timestamp": 0,
+  "required_tickets": [], "highlighted_ticket": null,
+  "search_by_airport": false, "price_per_person": false,
+  "filters_state": {}
+}
+```
+
+`last_update_timestamp` is updated to the max seen across chunks. Poll every ~2s
+until a chunk with non-empty `tickets` arrives (the adapter stops early on the
+first ticket-bearing chunk; more rounds gather incremental updates if needed).
+
+## Response schema — result chunk
+
+Top-level keys (verified from live capture 2026-07-04):
+`tickets`, `flight_legs`, `airlines`, `agents`, `alliances`, `equipments`,
+`places`, `meta`, `search_params`, `last_update_timestamp`, `chunk_id`, `order`,
+`cheapest_ticket`, `filtered_cheapest_ticket`, `direct_flights_v2`, `filters`,
+`brand`.
+
+### `tickets[]`
+- `id`: internal ticket id
+- `signature`: ticket signature (redacted in fixtures)
+- `segments[]`: each `{flights: [leg_index, ...], transfers: [], tags: []}` —
+  `flights` are **indices** into the chunk's `flight_legs` array
+- `proposals[]`: each `{id: "agent_id:index", price: {value, currency_code},
+  price_per_person, agent_id, flight_terms, unified_price, weight, tags,
+  minimum_fare, is_warmcache, cashback, cashback_per_person}`
+- `flight_terms`: keyed by leg index, each `{fare_code, trip_class,
+  seats_available, marketing_carrier_designator: {carrier, airline_id, number},
+  baggage: {count}, handbags: {count, weight}}`
+
+### `flight_legs[]`
+- `origin`, `destination`: IATA airport codes
+- `local_departure_date_time`, `local_arrival_date_time`: `"YYYY-MM-DD HH:MM"`
+- `departure_unix_timestamp`, `arrival_unix_timestamp`
+- `operating_carrier_designator`: `{carrier, airline_id, number}`
+- `equipment`: `{code, type, name}`
+- `signature` (redacted in fixtures)
+
+### `airlines` / `agents` / `places`
+Dictionaries keyed by IATA/id. `airlines[id].name.ru.default`, `agents[id].label.ru.default`
+(or `.gate_name`), `places.airports[iata].name.ru.default`.
+
+## Purchase URL — `/clicks/{proposal_id}`
+
+GET `https://tickets-api.aviasales.ru/searches/{search_id}/clicks/{proposal_id}?marker=...&host={results_host}&blet_request_id={uuid}`.
+
+`proposal_id` is the proposal `id` field (format `"agent_id:index"`, e.g. `"312:154"`).
+
+Response: `{"url": "https://www.kupibilet.ru/booking/..."}` — direct booking URL
+on the gate's site. The adapter resolves this **lazily on user click**, not
+preloaded for every offer.
+
+## Marker / identification
+
+`marker = "mobile_app." + md5(android_id)`. Any generated marker is accepted by
+the server for search. No account or JWT is required for search/prices/gates/
+purchase links. JWT via `auth.aviasales.ru` is only for personal profile/orders.
+
+## Transport — CloudFront WAF
+
+Plain `httpx`/`requests` get HTTP 403 from CloudFront. The adapter uses
+`curl_cffi` with `impersonate="chrome120"` (Chrome TLS fingerprint) plus the
+mobile app headers (`User-Agent`, `X-Client-Type: mobile`, `Referer`). This is
+the same approach as the decompiled APK client. HTTP 403 is surfaced as
+`aviasales_search_blocked` so the UI can show an honest `blocked` state.
+
+## Policy (Flight Hunter, local hobby project)
+
+- Adapter disabled until `AVIASALES_SEARCH_ENABLED=true` and
+  `AVIASALES_SEARCH_SIGNATURE` / `AVIASALES_SEARCH_MARKER` are set in `.env`.
+  Missing credentials → `credentials_missing` denial, no HTTP call.
+- Data kind: `LIVE`. Results carry `observed_at` and `Freshness.LIVE`.
+- Background watch scans **allowed** (scheduler context authorized).
+- Results are **mergeable** with other sources.
+- Booking URL resolved lazily on click (`resolve_purchase_url`), not preloaded.
+- `X-Signature`, `marker`, signed booking URLs and full tokens never appear in
+  logs, API responses, or client bundles.
+- `Retry-After` and rate-limit headers respected. 403 → `blocked` (no retry).
+  429 → `rate_limited`. 5xx → retry with backoff/jitter (max 2).
+- `curl_cffi` transport is the default; a fake transport is injected in tests so
+  no live call is made in CI.

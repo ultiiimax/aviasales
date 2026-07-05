@@ -25,7 +25,6 @@ def test_makefile_exposes_required_operational_targets() -> None:
         "provider-contracts",
         "security",
         "source-smoke",
-        "travelpayouts-smoke",
         "browser-smoke",
         "parse-fixture",
         "redact-url",

@@ -186,6 +186,51 @@ class ProviderPolicy:
             ),
         )
 
+    @classmethod
+    def aviasales_search_live(
+        cls,
+        *,
+        terms_verified_at: datetime,
+        credentials_present: bool,
+        enabled: bool,
+        internal_rpm: int = 20,
+    ) -> ProviderPolicy:
+        return cls(
+            provider_id="aviasales_search",
+            policy_version="2026-07-04",
+            terms_url="https://tickets-api.aviasales.ru",
+            terms_verified_at=terms_verified_at,
+            enabled=enabled,
+            credentials_present=credentials_present,
+            access_approved=True,
+            data_kind=DataKind.LIVE,
+            background_requests_allowed=True,
+            user_action_required=False,
+            merge_with_other_sources_allowed=True,
+            persist_raw_results_allowed=False,
+            persist_normalized_results_allowed=True,
+            booking_link_requires_click=False,
+            preload_booking_links_allowed=False,
+            server_side_only=True,
+            real_user_ip_required=False,
+            max_requests_per_minute=internal_rpm,
+            max_requests_per_hour_per_user_ip=None,
+            cache_ttl_seconds=0,
+            result_ttl_seconds=900,
+            max_concurrent_requests=2,
+            supports_flexible_dates=False,
+            supports_nearby_airports=False,
+            supports_multi_city=True,
+            supports_one_way=True,
+            supports_round_trip=True,
+            supports_baggage=True,
+            supports_fare_rules=True,
+            notes=(
+                "Local hobby project: Aviasales mobile API used directly. Live data. "
+                "Background watch scans allowed. Booking URL resolved lazily on click."
+            ),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class UserActionGrant:

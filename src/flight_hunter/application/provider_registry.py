@@ -39,12 +39,11 @@ class ProviderRegistry:
         return cls(
             (
                 ProviderPolicy.fake(terms_verified_at=now),
-                _aviasales_data_policy(now, app_settings),
-                ProviderPolicy.aviasales_search(
+                ProviderPolicy.aviasales_search_live(
                     terms_verified_at=now,
-                    credentials_present=False,
-                    access_approved=False,
-                    enabled=False,
+                    credentials_present=app_settings.aviasales_search_credentials_present,
+                    enabled=app_settings.aviasales_search_enabled,
+                    internal_rpm=app_settings.aviasales_search_internal_rpm,
                 ),
                 _skyscanner_indicative_policy(now),
                 _skyscanner_live_policy(now),
@@ -101,44 +100,6 @@ class ProviderRegistry:
             blocked_reasons=tuple(blocked_reasons),
             notes=policy.notes,
         )
-
-
-def _aviasales_data_policy(
-    terms_verified_at: datetime,
-    settings: AppSettings,
-) -> ProviderPolicy:
-    return ProviderPolicy(
-        provider_id="aviasales_data",
-        policy_version="2026-06-23",
-        terms_url="https://support.travelpayouts.com/hc/en-us/articles/203956163-Aviasales-Data-API",
-        terms_verified_at=terms_verified_at,
-        enabled=settings.aviasales_data_enabled,
-        credentials_present=settings.aviasales_data_credentials_present,
-        access_approved=True,
-        data_kind=DataKind.CACHED,
-        background_requests_allowed=True,
-        user_action_required=False,
-        merge_with_other_sources_allowed=True,
-        persist_raw_results_allowed=False,
-        persist_normalized_results_allowed=True,
-        booking_link_requires_click=True,
-        preload_booking_links_allowed=False,
-        server_side_only=True,
-        real_user_ip_required=False,
-        max_requests_per_minute=settings.aviasales_data_internal_rpm,
-        max_requests_per_hour_per_user_ip=None,
-        cache_ttl_seconds=21600,
-        result_ttl_seconds=604800,
-        max_concurrent_requests=2,
-        supports_flexible_dates=True,
-        supports_nearby_airports=True,
-        supports_multi_city=False,
-        supports_one_way=True,
-        supports_round_trip=True,
-        supports_baggage=False,
-        supports_fare_rules=False,
-        notes=("Cached Travelpayouts/Aviasales Data API; disabled until credentials exist."),
-    )
 
 
 def _skyscanner_indicative_policy(terms_verified_at: datetime) -> ProviderPolicy:

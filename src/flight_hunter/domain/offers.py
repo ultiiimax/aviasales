@@ -114,6 +114,28 @@ def _trip_type(value: TripType | str | None, *, return_date: str | None) -> Trip
 
 
 @dataclass(frozen=True, slots=True)
+class FlightSegmentSummary:
+    airline_code: str
+    airline_name: str | None
+    flight_number: str | None
+    origin: str
+    destination: str
+    depart_at: str
+    arrive_at: str
+
+    def __post_init__(self) -> None:
+        origin = self.origin.upper()
+        destination = self.destination.upper()
+        if origin and not _IATA_RE.fullmatch(origin):
+            raise ValueError("segment origin must be an IATA code")
+        if destination and not _IATA_RE.fullmatch(destination):
+            raise ValueError("segment destination must be an IATA code")
+        object.__setattr__(self, "origin", origin)
+        object.__setattr__(self, "destination", destination)
+        object.__setattr__(self, "airline_code", self.airline_code.upper())
+
+
+@dataclass(frozen=True, slots=True)
 class FlightOffer:
     provider_id: str
     provider_offer_id: str
@@ -128,6 +150,9 @@ class FlightOffer:
     requires_live_confirmation: bool
     baggage_summary: str | None
     price_basis: PriceBasis | str = PriceBasis.TOTAL_FOR_PASSENGERS
+    seller_name: str | None = None
+    segments: tuple[FlightSegmentSummary, ...] = ()
+    booking_action_ref: str | None = None
 
     def __post_init__(self) -> None:
         if not self.provider_id:
@@ -140,4 +165,5 @@ class FlightOffer:
         if price_basis == PriceBasis.PROVIDER_SINGLE_ADULT_TICKET and self.passengers != 1:
             raise ValueError("single-adult ticket prices require passengers=1")
         object.__setattr__(self, "price_basis", price_basis)
+        object.__setattr__(self, "segments", tuple(self.segments))
         require_aware_datetime(self.observed_at, "observed_at")

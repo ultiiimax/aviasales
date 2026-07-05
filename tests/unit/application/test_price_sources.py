@@ -15,13 +15,14 @@ def test_catalog_marks_no_source_as_in_app_booking() -> None:
     assert all(source.purchase_flow == "external_clickout" for source in catalog.sources)
 
 
-def test_catalog_separates_cached_api_from_external_rub_searches() -> None:
+def test_catalog_separates_live_mobile_api_from_external_rub_searches() -> None:
     catalog = PriceSourceCatalog.default()
     by_id = {source.id: source for source in catalog.sources}
 
-    assert by_id["aviasales_data"].price_kind == PriceKind.CACHED
-    assert by_id["aviasales_data"].source_type == PriceSourceType.API
-    assert by_id["aviasales_data"].supports_rub
+    assert by_id["aviasales_search"].price_kind == PriceKind.LIVE
+    assert by_id["aviasales_search"].source_type == PriceSourceType.API
+    assert by_id["aviasales_search"].supports_rub
+    assert not by_id["aviasales_search"].requires_manual_confirmation
     assert by_id["yandex_travel"].source_type == PriceSourceType.PARTNER_LINK
     assert by_id["yandex_travel"].price_kind == PriceKind.USER_CONFIRMED_LIVE
     assert by_id["tutu"].source_type == PriceSourceType.PARTNER_LINK

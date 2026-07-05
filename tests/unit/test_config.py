@@ -5,17 +5,19 @@ from pathlib import Path
 from flight_hunter.config import AppSettings, load_env_file
 
 
-def test_settings_detects_travelpayouts_credentials_without_exposing_value(
+def test_settings_detects_aviasales_search_credentials_without_exposing_value(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("AVIASALES_DATA_ENABLED", "true")
-    monkeypatch.setenv("TRAVELPAYOUTS_API_TOKEN", "secret-value")
+    monkeypatch.setenv("AVIASALES_SEARCH_ENABLED", "true")
+    monkeypatch.setenv("AVIASALES_SEARCH_SIGNATURE", "secret-signature")
+    monkeypatch.setenv("AVIASALES_SEARCH_MARKER", "secret-marker")
 
     settings = AppSettings.from_env()
 
-    assert settings.aviasales_data_enabled
-    assert settings.travelpayouts_api_token == "secret-value"
-    assert settings.aviasales_data_credentials_present
+    assert settings.aviasales_search_enabled
+    assert settings.aviasales_search_signature == "secret-signature"
+    assert settings.aviasales_search_marker == "secret-marker"
+    assert settings.aviasales_search_credentials_present
 
 
 def test_settings_parse_invitation_auth_env(monkeypatch) -> None:
@@ -36,19 +38,21 @@ def test_load_env_file_sets_missing_values_without_overriding_existing_env(
 ) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "AVIASALES_DATA_ENABLED=true\n"
-        "TRAVELPAYOUTS_API_TOKEN=file-secret\n"
-        "AVIASALES_DATA_DEFAULT_MARKET=pl\n",
+        "AVIASALES_SEARCH_ENABLED=true\n"
+        "AVIASALES_SEARCH_SIGNATURE=file-signature\n"
+        "AVIASALES_SEARCH_MARKER=file-marker\n"
+        "APP_SECRET_KEY=file-app-secret\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("TRAVELPAYOUTS_API_TOKEN", "existing-secret")
+    monkeypatch.setenv("AVIASALES_SEARCH_MARKER", "existing-marker")
 
     load_env_file(env_file)
     settings = AppSettings.from_env()
 
-    assert settings.aviasales_data_enabled
-    assert settings.travelpayouts_api_token == "existing-secret"
-    assert settings.aviasales_data_default_market == "pl"
+    assert settings.aviasales_search_enabled
+    assert settings.aviasales_search_signature == "file-signature"
+    assert settings.aviasales_search_marker == "existing-marker"
+    assert settings.app_secret_key == "file-app-secret"
 
 
 def test_settings_parse_personal_observer_and_clickout_lists(monkeypatch) -> None:

@@ -50,7 +50,8 @@ def test_providers_endpoint_exposes_disabled_reasons_without_secrets() -> None:
     assert response.status_code == 200
     providers = {item["provider_id"]: item for item in response.json()["providers"]}
     assert providers["fake"]["enabled"] is True
-    assert providers["aviasales_search"]["merge_scope"] == "provider_isolated"
+    assert providers["aviasales_search"]["merge_scope"] == "mergeable"
+    assert providers["aviasales_search"]["background_requests_allowed"] is True
     assert "credentials_missing" in providers["aviasales_search"]["blocked_reasons"]
     assert "token" not in str(response.json()).lower()
 
@@ -875,20 +876,22 @@ def test_search_endpoint_rejects_passenger_mix_total_mismatch() -> None:
     assert response.status_code == 422
 
 
-def test_providers_endpoint_can_show_aviasales_data_enabled_without_leaking_token(
+def test_providers_endpoint_can_show_aviasales_search_enabled_without_leaking_secrets(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("AVIASALES_DATA_ENABLED", "true")
-    monkeypatch.setenv("TRAVELPAYOUTS_API_TOKEN", "secret-value")
+    monkeypatch.setenv("AVIASALES_SEARCH_ENABLED", "true")
+    monkeypatch.setenv("AVIASALES_SEARCH_SIGNATURE", "secret-signature")
+    monkeypatch.setenv("AVIASALES_SEARCH_MARKER", "secret-marker")
     client = TestClient(create_app())
 
     response = client.get("/api/v1/providers")
 
     assert response.status_code == 200
     providers = {item["provider_id"]: item for item in response.json()["providers"]}
-    assert providers["aviasales_data"]["enabled"] is True
-    assert providers["aviasales_data"]["credentials_present"] is True
-    assert "secret-value" not in str(response.json())
+    assert providers["aviasales_search"]["enabled"] is True
+    assert providers["aviasales_search"]["credentials_present"] is True
+    assert "secret-signature" not in str(response.json())
+    assert "secret-marker" not in str(response.json())
 
 
 async def _session_factory():

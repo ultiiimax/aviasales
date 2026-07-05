@@ -12,9 +12,10 @@ def test_env_example_exists_with_safe_placeholders() -> None:
     assert "AUTH_BOOTSTRAP_TOKEN=" in content
     assert "AUTH_SESSION_TTL_SECONDS=2592000" in content
     assert "AUTH_ALLOW_LEGACY_HEADERS=true" in content
-    assert "AVIASALES_DATA_ENABLED=false" in content
-    assert "TRAVELPAYOUTS_API_TOKEN=" in content
-    assert "TRAVELPAYOUTS_API_TOKEN=72a" not in content
+    assert "APP_SECRET_KEY=replace-with-strong-random-secret" in content
+    assert "AVIASALES_SEARCH_ENABLED=false" in content
+    assert "AVIASALES_SEARCH_SIGNATURE=" in content
+    assert "AVIASALES_SEARCH_MARKER=mobile_app.replace-with-md5-of-android-id" in content
     assert "TELEGRAM_BOT_TOKEN=" in content
     assert "AGENT_PROVIDER=deterministic_presets" in content
     assert "AGENT_MCP_ENABLED=false" in content

@@ -9,23 +9,24 @@ from flight_hunter.application.source_contracts import (
 )
 from flight_hunter.config import AppSettings
 
-NOW = datetime(2026, 6, 29, 12, 0, tzinfo=UTC)
+NOW = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
 
 
 def _settings(
     *,
     aviasales_enabled: bool = False,
-    token: str | None = None,
+    signature: str | None = None,
+    marker: str | None = None,
     searxng_enabled: bool = False,
     crawl4ai_enabled: bool = False,
     deal_discovery_allowed_hosts: tuple[str, ...] = (),
 ) -> AppSettings:
     return AppSettings(
         database_url="sqlite+aiosqlite:///./flight_hunter_dev.db",
-        aviasales_data_enabled=aviasales_enabled,
-        travelpayouts_api_token=token,
-        aviasales_data_default_market="pl",
-        aviasales_data_internal_rpm=30,
+        aviasales_search_enabled=aviasales_enabled,
+        aviasales_search_signature=signature,
+        aviasales_search_marker=marker,
+        aviasales_search_internal_rpm=20,
         searxng_enabled=searxng_enabled,
         searxng_base_url="http://localhost:8088",
         crawl4ai_enabled=crawl4ai_enabled,
@@ -36,62 +37,55 @@ def _settings(
     )
 
 
-def test_source_contract_catalog_marks_aviasales_data_as_implemented_but_gated() -> None:
+def test_source_contract_catalog_marks_aviasales_search_as_live_implemented() -> None:
     settings = _settings()
     registry = ProviderRegistry.default(clock=lambda: NOW, settings=settings)
     catalog = SourceContractCatalog.default(settings=settings, registry=registry)
 
     sources = {source.source_id: source for source in catalog.readiness()}
 
-    aviasales_data = sources["aviasales_data"]
-    assert aviasales_data.stage == ImplementationStage.IMPLEMENTED
-    assert aviasales_data.adapter_module == "flight_hunter.providers.aviasales_data.adapter"
-    assert aviasales_data.data_kind == "cached"
-    assert aviasales_data.background_requests_allowed is True
-    assert aviasales_data.merge_scope == "mergeable"
-    assert aviasales_data.enabled is False
-    assert aviasales_data.credentials_present is False
-    assert "credentials_missing" in aviasales_data.blocked_reasons
-    assert "AVIASALES_DATA_ENABLED" in aviasales_data.required_env
-    assert "TRAVELPAYOUTS_API_TOKEN" in aviasales_data.required_env
-    assert "popular_directions_cached_radar" in aviasales_data.operations
-    assert "special_offers_cached_radar" in aviasales_data.operations
-    assert "cached_deal_seed_discovery" in aviasales_data.operations
-    assert "cached_deal_seeds_candidate_only" in aviasales_data.invariants
-    assert "https://api.travelpayouts.com" in aviasales_data.egress_policy
-    assert "https://www.aviasales.ru" in aviasales_data.egress_policy
+    aviasales_search = sources["aviasales_search"]
+    assert aviasales_search.stage == ImplementationStage.IMPLEMENTED
+    assert aviasales_search.adapter_module == "flight_hunter.providers.aviasales_search.adapter"
+    assert aviasales_search.data_kind == "live"
+    assert aviasales_search.background_requests_allowed is True
+    assert aviasales_search.user_action_required is False
+    assert aviasales_search.merge_scope == "mergeable"
+    assert aviasales_search.enabled is False
+    assert aviasales_search.credentials_present is False
+    assert "credentials_missing" in aviasales_search.blocked_reasons
+    assert "adapter_not_implemented" not in aviasales_search.blocked_reasons
+    assert "AVIASALES_SEARCH_SIGNATURE" in aviasales_search.required_env
+    assert "AVIASALES_SEARCH_MARKER" in aviasales_search.required_env
+    assert "live_search" in aviasales_search.operations
+    assert "lazy_purchase_url" in aviasales_search.operations
+    assert "suggest_places" in aviasales_search.operations
+    assert "hot_offers" in aviasales_search.operations
+    assert "calendar_prices" in aviasales_search.operations
+    assert "typed_graphql_blocks" in aviasales_search.operations
+    assert "purchase_url_explicit_resolve" in aviasales_search.invariants
+    assert "https://tickets-api.aviasales.ru" in aviasales_search.egress_policy
+    assert "https://ariadne.aviasales.ru" in aviasales_search.egress_policy
 
 
 def test_source_contract_catalog_reflects_enabled_credentials_without_leaking_values() -> None:
-    settings = _settings(aviasales_enabled=True, token="secret-value")
+    settings = _settings(
+        aviasales_enabled=True,
+        signature="secret-signature",
+        marker="secret-marker",
+    )
     registry = ProviderRegistry.default(clock=lambda: NOW, settings=settings)
     catalog = SourceContractCatalog.default(settings=settings, registry=registry)
-
-    aviasales_data = {source.source_id: source for source in catalog.readiness()}["aviasales_data"]
-
-    assert aviasales_data.enabled is True
-    assert aviasales_data.credentials_present is True
-    assert aviasales_data.blocked_reasons == ()
-    assert "secret-value" not in str(aviasales_data)
-
-
-def test_source_contract_catalog_keeps_aviasales_search_isolated_and_user_action_only() -> None:
-    registry = ProviderRegistry.default(clock=lambda: NOW, settings=_settings())
-    catalog = SourceContractCatalog.default(settings=_settings(), registry=registry)
 
     aviasales_search = {source.source_id: source for source in catalog.readiness()}[
         "aviasales_search"
     ]
 
-    assert aviasales_search.stage == ImplementationStage.POLICY_SKELETON
-    assert aviasales_search.data_kind == "live"
-    assert aviasales_search.merge_scope == "provider_isolated"
-    assert aviasales_search.background_requests_allowed is False
-    assert aviasales_search.user_action_required is True
-    assert aviasales_search.enabled is False
-    assert "access_not_approved" in aviasales_search.blocked_reasons
-    assert "adapter_not_implemented" in aviasales_search.blocked_reasons
-    assert "booking_link_click_gate" in aviasales_search.invariants
+    assert aviasales_search.enabled is True
+    assert aviasales_search.credentials_present is True
+    assert aviasales_search.blocked_reasons == ()
+    assert "secret-signature" not in str(aviasales_search)
+    assert "secret-marker" not in str(aviasales_search)
 
 
 def test_every_policy_provider_has_a_source_contract() -> None:

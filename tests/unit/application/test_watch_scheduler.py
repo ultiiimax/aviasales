@@ -89,22 +89,20 @@ def test_scheduler_registry_accepts_cached_background_provider() -> None:
     assert registry.denials == {}
 
 
-def test_scheduler_registry_rejects_live_provider_even_if_background_flag_is_wrong() -> None:
-    unsafe_live_policy = _provider_policy(
-        "misconfigured_browser_observer",
+def test_scheduler_registry_accepts_live_provider_when_policy_allows_background() -> None:
+    live_policy = _provider_policy(
+        "aviasales_search",
         data_kind=DataKind.LIVE,
         background_requests_allowed=True,
         user_action_required=False,
     )
     registry = SchedulerProviderRegistry()
 
-    accepted = registry.register(ProviderRuntimeState(policy=unsafe_live_policy))
+    accepted = registry.register(ProviderRuntimeState(policy=live_policy))
 
-    assert accepted is False
-    assert registry.providers == ()
-    assert registry.denials == {
-        "misconfigured_browser_observer": "live_provider_not_allowed_in_scheduler"
-    }
+    assert accepted is True
+    assert [provider.policy.provider_id for provider in registry.providers] == ["aviasales_search"]
+    assert registry.denials == {}
 
 
 def test_scheduler_registry_rejects_user_action_provider_before_planning() -> None:

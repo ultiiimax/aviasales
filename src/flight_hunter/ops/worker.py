@@ -49,8 +49,8 @@ from flight_hunter.persistence.repositories import (
     WorkerControlRepository,
     WorkerHeartbeatRepository,
 )
-from flight_hunter.providers.aviasales_data.adapter import AviasalesDataAdapter
-from flight_hunter.providers.aviasales_data.client import AviasalesDataClient
+from flight_hunter.providers.aviasales_search.adapter import AviasalesSearchAdapter
+from flight_hunter.providers.aviasales_search.client import AviasalesSearchClient
 from flight_hunter.providers.fake import FakeFlightProvider
 from flight_hunter.providers.personal_observer import (
     PersonalObserverConfig,
@@ -1029,15 +1029,17 @@ def _health_message(decision: PersonalObservationRunDecision, *, status: str) ->
 
 def _watch_scan_providers(
     settings: AppSettings,
-) -> dict[str, AviasalesDataAdapter | FakeFlightProvider]:
-    if settings.aviasales_data_enabled and settings.travelpayouts_api_token is not None:
+) -> dict[str, AviasalesSearchAdapter | FakeFlightProvider]:
+    if settings.aviasales_search_enabled and settings.aviasales_search_credentials_present:
         return {
-            "aviasales_data": AviasalesDataAdapter(
-                client=AviasalesDataClient(token=settings.travelpayouts_api_token),
-                enabled=settings.aviasales_data_enabled,
-                credentials_present=settings.aviasales_data_credentials_present,
-                market=settings.aviasales_data_default_market,
-                internal_rpm=settings.aviasales_data_internal_rpm,
+            "aviasales_search": AviasalesSearchAdapter(
+                client=AviasalesSearchClient(
+                    signature=settings.aviasales_search_signature or "",
+                    marker=settings.aviasales_search_marker or "",
+                ),
+                enabled=settings.aviasales_search_enabled,
+                credentials_present=settings.aviasales_search_credentials_present,
+                internal_rpm=settings.aviasales_search_internal_rpm,
             )
         }
     return {"fake": FakeFlightProvider()}

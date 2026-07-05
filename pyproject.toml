@@ -7,6 +7,7 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
   "aiosqlite>=0.21.0,<1.0.0",
   "alembic>=1.17.0,<2.0.0",
+  "curl_cffi>=0.7,<1.0.0",
   "fastapi>=0.125.0,<1.0.0",
   "httpx2>=2.4.0",
   "sqlalchemy[asyncio]>=2.0.45,<3.0.0",
@@ -30,7 +31,6 @@ flight-hunter-source-smoke = "flight_hunter.ops.source_smoke:main"
 flight-hunter-worker = "flight_hunter.ops.worker:main"
 flight-hunter-worker-healthcheck = "flight_hunter.ops.worker_healthcheck:main"
 flight-hunter-restore = "flight_hunter.ops.backup:restore_main"
-travelpayouts-smoke = "flight_hunter.providers.aviasales_data.smoke:main"
 
 [build-system]
 requires = ["hatchling"]

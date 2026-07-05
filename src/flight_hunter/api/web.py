@@ -12,7 +12,7 @@ def render_index_html() -> str:
   <title>Flight Hunter</title>
   <meta name="theme-color" content="#126d7a">
   <link rel="manifest" href="/manifest.webmanifest">
-  <meta name="description" content="Flight Hunter: семейный поиск авиабилетов с честной свежестью цен.">
+  <meta name="description" content="Flight Hunter: СЃРµРјРµР№РЅС‹Р№ РїРѕРёСЃРє Р°РІРёР°Р±РёР»РµС‚РѕРІ СЃ С‡РµСЃС‚РЅРѕР№ СЃРІРµР¶РµСЃС‚СЊСЋ С†РµРЅ.">
   <link rel="icon" href='data:image/svg+xml,
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
       <rect width="64" height="64" rx="12" fill="%2314242c"/>
@@ -649,10 +649,10 @@ def render_index_html() -> str:
         </span>
         <div class="brand-title">
           <strong>Flight Hunter</strong>
-          <span>семейный поиск билетов без выдуманных цен</span>
+          <span>СЃРµРјРµР№РЅС‹Р№ РїРѕРёСЃРє Р±РёР»РµС‚РѕРІ Р±РµР· РІС‹РґСѓРјР°РЅРЅС‹С… С†РµРЅ</span>
         </div>
       </div>
-      <div class="status-line" id="status-line">локальный режим · данные помечаются по свежести</div>
+      <div class="status-line" id="status-line">Р»РѕРєР°Р»СЊРЅС‹Р№ СЂРµР¶РёРј В· РґР°РЅРЅС‹Рµ РїРѕРјРµС‡Р°СЋС‚СЃСЏ РїРѕ СЃРІРµР¶РµСЃС‚Рё</div>
     </header>
 
     <section class="panel auth-panel" aria-labelledby="auth-heading">
@@ -680,15 +680,15 @@ def render_index_html() -> str:
         <div class="panel-header">
           <div>
             <h1 class="panel-title" id="assistant-heading">Agent cockpit</h1>
-            <div class="panel-kicker">Human-in-the-loop агент понимает маршрут словами, строит typed tool plan и запускает только policy-разрешенные действия.</div>
+            <div class="panel-kicker">Human-in-the-loop Р°РіРµРЅС‚ РїРѕРЅРёРјР°РµС‚ РјР°СЂС€СЂСѓС‚ СЃР»РѕРІР°РјРё, СЃС‚СЂРѕРёС‚ typed tool plan Рё Р·Р°РїСѓСЃРєР°РµС‚ С‚РѕР»СЊРєРѕ policy-СЂР°Р·СЂРµС€РµРЅРЅС‹Рµ РґРµР№СЃС‚РІРёСЏ.</div>
           </div>
           <span class="badge ok" id="agent-mode">harness</span>
         </div>
         <div class="assistant-body">
-          <div class="quick-actions" id="preset-list" aria-label="Сценарии ИИ">
-            <button class="chip" type="button" data-preset="flexible_dates">Даты ±3 дня</button>
-            <button class="chip" type="button" data-preset="nearby_airports">Аэропорты рядом</button>
-            <button class="chip" type="button" data-preset="buy_timing">Когда покупать</button>
+          <div class="quick-actions" id="preset-list" aria-label="РЎС†РµРЅР°СЂРёРё РР">
+            <button class="chip" type="button" data-preset="flexible_dates">Р”Р°С‚С‹ В±3 РґРЅСЏ</button>
+            <button class="chip" type="button" data-preset="nearby_airports">РђСЌСЂРѕРїРѕСЂС‚С‹ СЂСЏРґРѕРј</button>
+            <button class="chip" type="button" data-preset="buy_timing">РљРѕРіРґР° РїРѕРєСѓРїР°С‚СЊ</button>
           </div>
           <div class="runtime-strip" id="runtime-strip" aria-label="Agent runtime">
             <div class="runtime-node">
@@ -709,21 +709,21 @@ def render_index_html() -> str:
             </div>
           </div>
           <div class="chat-log" id="chat-log" aria-live="polite">
-            <div class="message bot">Напиши: “Хочу из СПб улететь в Шанхай в октябре”. Агент разберёт intent, покажет аэропорты, попросит дату вместо угадывания и не сделает live-вызов без твоего клика.</div>
+            <div class="message bot">РќР°РїРёС€Рё: вЂњРҐРѕС‡Сѓ РёР· РЎРџР± СѓР»РµС‚РµС‚СЊ РІ РЁР°РЅС…Р°Р№ РІ РѕРєС‚СЏР±СЂРµвЂќ. РђРіРµРЅС‚ СЂР°Р·Р±РµСЂС‘С‚ intent, РїРѕРєР°Р¶РµС‚ Р°СЌСЂРѕРїРѕСЂС‚С‹, РїРѕРїСЂРѕСЃРёС‚ РґР°С‚Сѓ РІРјРµСЃС‚Рѕ СѓРіР°РґС‹РІР°РЅРёСЏ Рё РЅРµ СЃРґРµР»Р°РµС‚ live-РІС‹Р·РѕРІ Р±РµР· С‚РІРѕРµРіРѕ РєР»РёРєР°.</div>
           </div>
           <div class="agent-sidecars" id="decision-rail">
             <div>
-              <div class="fineprint">Варианты аэропортов</div>
+              <div class="fineprint">Р’Р°СЂРёР°РЅС‚С‹ Р°СЌСЂРѕРїРѕСЂС‚РѕРІ</div>
               <div class="choice-list" id="airport-choice-list"></div>
             </div>
             <div>
-              <div class="fineprint">Действия агента</div>
+              <div class="fineprint">Р”РµР№СЃС‚РІРёСЏ Р°РіРµРЅС‚Р°</div>
               <div class="action-list" id="agent-action-list"></div>
             </div>
           </div>
           <form class="assistant-input" id="assistant-form">
-            <textarea name="agent_prompt" placeholder="Например: из Варшавы в Барселону 2026-10-12 2026-10-19 следи"></textarea>
-            <button class="primary" type="submit">Спросить агента</button>
+            <textarea name="agent_prompt" placeholder="РќР°РїСЂРёРјРµСЂ: РёР· Р’Р°СЂС€Р°РІС‹ РІ Р‘Р°СЂСЃРµР»РѕРЅСѓ 2026-10-12 2026-10-19 СЃР»РµРґРё"></textarea>
+            <button class="primary" type="submit">РЎРїСЂРѕСЃРёС‚СЊ Р°РіРµРЅС‚Р°</button>
           </form>
         </div>
       </aside>
@@ -731,48 +731,41 @@ def render_index_html() -> str:
       <section class="panel" aria-labelledby="search-heading">
         <div class="panel-header">
           <div>
-            <h2 class="panel-title" id="search-heading">Маршрут</h2>
-            <div class="panel-kicker">Сначала показываем cached-варианты. Live-проверка запускается отдельной кнопкой.</div>
+            <h2 class="panel-title" id="search-heading">РњР°СЂС€СЂСѓС‚</h2>
+            <div class="panel-kicker">РЎРЅР°С‡Р°Р»Р° РїРѕРєР°Р·С‹РІР°РµРј cached-РІР°СЂРёР°РЅС‚С‹. Live-РїСЂРѕРІРµСЂРєР° Р·Р°РїСѓСЃРєР°РµС‚СЃСЏ РѕС‚РґРµР»СЊРЅРѕР№ РєРЅРѕРїРєРѕР№.</div>
           </div>
         </div>
         <form class="search-form" id="search-form">
-          <label>Откуда
+          <label>РћС‚РєСѓРґР°
             <input name="origin" value="WAW" maxlength="3" autocomplete="off" required>
           </label>
-          <label>Куда
+          <label>РљСѓРґР°
             <input name="destination" value="BCN" maxlength="3" autocomplete="off" required>
           </label>
-          <label>Вылет
+          <label>Р’С‹Р»РµС‚
             <input name="departure_date" type="date" value="2026-10-12" required>
           </label>
-          <label>Обратно
+          <label>РћР±СЂР°С‚РЅРѕ
             <input name="return_date" type="date" value="2026-10-19">
           </label>
-          <label>Взрослые
+          <label>Р’Р·СЂРѕСЃР»С‹Рµ
             <input name="adults" type="number" min="1" value="2" required>
           </label>
-          <label>Дети
+          <label>Р”РµС‚Рё
             <input name="children" type="number" min="0" value="0" required>
           </label>
-          <label>Младенцы
+          <label>РњР»Р°РґРµРЅС†С‹
             <input name="infants" type="number" min="0" value="0" required>
           </label>
-          <label>Валюта
+          <label>Р’Р°Р»СЋС‚Р°
             <input name="currency" value="RUB" maxlength="3" autocomplete="off" required>
           </label>
-          <label>Radar min
-            <input name="min_price_minor" type="number" min="0" step="100" value="1000000" required>
-          </label>
-          <label>Radar max
-            <input name="max_price_minor" type="number" min="0" step="100" value="2000000" required>
-          </label>
           <div class="form-actions">
-            <span class="fineprint" id="passenger-total">2 пассажира · туда-обратно</span>
-            <div class="quick-actions" aria-label="Ручные проверки">
-              <button class="secondary" type="button" id="cached-radar-button">Cached radar</button>
-              <button class="secondary" type="button" id="personal-observe-button">Считать из браузера</button>
-              <button class="secondary" type="button" id="deal-discovery-button">Найти акции</button>
-              <button class="primary" type="submit" id="submit-button">Найти билеты</button>
+            <span class="fineprint" id="passenger-total">2 РїР°СЃСЃР°Р¶РёСЂР° В· С‚СѓРґР°-РѕР±СЂР°С‚РЅРѕ</span>
+            <div class="quick-actions" aria-label="Р СѓС‡РЅС‹Рµ РїСЂРѕРІРµСЂРєРё">
+              <button class="secondary" type="button" id="personal-observe-button">РЎС‡РёС‚Р°С‚СЊ РёР· Р±СЂР°СѓР·РµСЂР°</button>
+              <button class="secondary" type="button" id="deal-discovery-button">РќР°Р№С‚Рё Р°РєС†РёРё</button>
+              <button class="primary" type="submit" id="submit-button">РќР°Р№С‚Рё Р±РёР»РµС‚С‹</button>
             </div>
           </div>
         </form>
@@ -784,12 +777,12 @@ def render_index_html() -> str:
         <aside class="panel" aria-labelledby="providers-heading">
           <div class="panel-header">
             <div>
-              <h2 class="panel-title" id="providers-heading">Источники</h2>
-              <div class="panel-kicker">Что сейчас можно использовать.</div>
+              <h2 class="panel-title" id="providers-heading">РСЃС‚РѕС‡РЅРёРєРё</h2>
+              <div class="panel-kicker">Р§С‚Рѕ СЃРµР№С‡Р°СЃ РјРѕР¶РЅРѕ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ.</div>
             </div>
           </div>
           <div class="provider-list" id="providers-list">
-            <div class="empty-state">Загружаю источники...</div>
+            <div class="empty-state">Р—Р°РіСЂСѓР¶Р°СЋ РёСЃС‚РѕС‡РЅРёРєРё...</div>
           </div>
         </aside>
 
@@ -797,15 +790,15 @@ def render_index_html() -> str:
           <div class="panel-header">
             <div>
               <h2 class="panel-title" id="watches-heading">Watches</h2>
-              <div class="panel-kicker">Слежение работает по расписанию и не запускает браузер без клика.</div>
+              <div class="panel-kicker">РЎР»РµР¶РµРЅРёРµ СЂР°Р±РѕС‚Р°РµС‚ РїРѕ СЂР°СЃРїРёСЃР°РЅРёСЋ Рё РЅРµ Р·Р°РїСѓСЃРєР°РµС‚ Р±СЂР°СѓР·РµСЂ Р±РµР· РєР»РёРєР°.</div>
             </div>
           </div>
           <div class="watch-toolbar">
-            <button class="secondary" type="button" id="create-watch-button">Следить за маршрутом</button>
-            <button class="secondary" type="button" id="refresh-watches-button">Обновить watches</button>
+            <button class="secondary" type="button" id="create-watch-button">РЎР»РµРґРёС‚СЊ Р·Р° РјР°СЂС€СЂСѓС‚РѕРј</button>
+            <button class="secondary" type="button" id="refresh-watches-button">РћР±РЅРѕРІРёС‚СЊ watches</button>
           </div>
           <div class="watch-list" id="watch-list">
-            <div class="empty-state">Загружаю watches...</div>
+            <div class="empty-state">Р—Р°РіСЂСѓР¶Р°СЋ watches...</div>
           </div>
           <div class="watch-history" id="watch-history-list"></div>
         </section>
@@ -816,10 +809,10 @@ def render_index_html() -> str:
               <h2 class="panel-title" id="admin-health-heading">Health</h2>
               <div class="panel-kicker">Read-only provider/source status; no live checks on refresh.</div>
             </div>
-            <button class="secondary" type="button" id="refresh-admin-health-button">Обновить</button>
+            <button class="secondary" type="button" id="refresh-admin-health-button">РћР±РЅРѕРІРёС‚СЊ</button>
           </div>
           <div class="admin-health-list" id="admin-health-list">
-            <div class="empty-state">Загружаю health...</div>
+            <div class="empty-state">Р—Р°РіСЂСѓР¶Р°СЋ health...</div>
           </div>
         </section>
 
@@ -829,10 +822,10 @@ def render_index_html() -> str:
               <h2 class="panel-title" id="audit-heading">Audit</h2>
               <div class="panel-kicker">Household-scoped lifecycle log; read-only.</div>
             </div>
-            <button class="secondary" type="button" id="refresh-audit-button">РћР±РЅРѕРІРёС‚СЊ</button>
+            <button class="secondary" type="button" id="refresh-audit-button">Р С›Р В±Р Р…Р С•Р Р†Р С‘РЎвЂљРЎРЉ</button>
           </div>
           <div class="admin-health-list" id="audit-list">
-            <div class="empty-state">Р—Р°РіСЂСѓР¶Р°СЋ audit...</div>
+            <div class="empty-state">Р вЂ”Р В°Р С–РЎР‚РЎС“Р В¶Р В°РЎР‹ audit...</div>
           </div>
         </section>
       </div>
@@ -840,15 +833,14 @@ def render_index_html() -> str:
       <section class="panel" aria-labelledby="results-heading">
         <div class="panel-header">
           <div>
-            <h2 class="panel-title" id="results-heading">Результаты</h2>
-            <div class="panel-kicker">Цены из кэша, ссылки для проверки и свежие наблюдения из браузера показываются отдельно.</div>
+            <h2 class="panel-title" id="results-heading">Р РµР·СѓР»СЊС‚Р°С‚С‹</h2>
+            <div class="panel-kicker">Р¦РµРЅС‹ РёР· РєСЌС€Р°, СЃСЃС‹Р»РєРё РґР»СЏ РїСЂРѕРІРµСЂРєРё Рё СЃРІРµР¶РёРµ РЅР°Р±Р»СЋРґРµРЅРёСЏ РёР· Р±СЂР°СѓР·РµСЂР° РїРѕРєР°Р·С‹РІР°СЋС‚СЃСЏ РѕС‚РґРµР»СЊРЅРѕ.</div>
           </div>
-          <span class="small" id="results-count">0 вариантов</span>
+          <span class="small" id="results-count">0 РІР°СЂРёР°РЅС‚РѕРІ</span>
         </div>
         <div class="result-list" id="results-list">
-          <div class="empty-state">Заполни маршрут и нажми “Найти билеты”.</div>
+          <div class="empty-state">Р—Р°РїРѕР»РЅРё РјР°СЂС€СЂСѓС‚ Рё РЅР°Р¶РјРё вЂњРќР°Р№С‚Рё Р±РёР»РµС‚С‹вЂќ.</div>
         </div>
-        <div class="denial-list" id="cached-radar-list"></div>
         <div class="denial-list" id="confirmation-list"></div>
         <div class="denial-list" id="live-list"></div>
         <div class="denial-list" id="denials-list"></div>
@@ -859,14 +851,12 @@ def render_index_html() -> str:
   <script>
     const providersList = document.querySelector("#providers-list");
     const resultsList = document.querySelector("#results-list");
-    const cachedRadarList = document.querySelector("#cached-radar-list");
     const confirmationList = document.querySelector("#confirmation-list");
     const liveList = document.querySelector("#live-list");
     const denialsList = document.querySelector("#denials-list");
     const resultsCount = document.querySelector("#results-count");
     const statusLine = document.querySelector("#status-line");
     const submitButton = document.querySelector("#submit-button");
-    const cachedRadarButton = document.querySelector("#cached-radar-button");
     const personalObserveButton = document.querySelector("#personal-observe-button");
     const dealDiscoveryButton = document.querySelector("#deal-discovery-button");
     const createWatchButton = document.querySelector("#create-watch-button");
@@ -900,11 +890,11 @@ def render_index_html() -> str:
     const sessionTokenKey = "flight_hunter_session_token";
 
     const manualConfirmationActions = [
-      {status: "confirmed", label: "Совпала"},
-      {status: "price_changed", label: "Изменилась"},
-      {status: "sold_out", label: "Нет мест"},
-      {status: "bought", label: "Купил"},
-      {status: "wrong_route", label: "Маршрут не тот"}
+      {status: "confirmed", label: "РЎРѕРІРїР°Р»Р°"},
+      {status: "price_changed", label: "РР·РјРµРЅРёР»Р°СЃСЊ"},
+      {status: "sold_out", label: "РќРµС‚ РјРµСЃС‚"},
+      {status: "bought", label: "РљСѓРїРёР»"},
+      {status: "wrong_route", label: "РњР°СЂС€СЂСѓС‚ РЅРµ С‚РѕС‚"}
     ];
 
     const reasonLabels = {
@@ -919,17 +909,17 @@ def render_index_html() -> str:
       stale_price: "stale",
       provider_single_adult_ticket: "single adult ticket",
       unknown_freshness: "freshness unknown",
-      requires_live_confirmation: "проверить перед покупкой",
-      baggage_unknown: "багаж неизвестен",
-      provider_disabled: "выключен",
-      credentials_missing: "нужен ключ",
-      access_not_approved: "доступ не подтвержден",
-      background_not_allowed: "фон запрещен"
+      requires_live_confirmation: "РїСЂРѕРІРµСЂРёС‚СЊ РїРµСЂРµРґ РїРѕРєСѓРїРєРѕР№",
+      baggage_unknown: "Р±Р°РіР°Р¶ РЅРµРёР·РІРµСЃС‚РµРЅ",
+      provider_disabled: "РІС‹РєР»СЋС‡РµРЅ",
+      credentials_missing: "РЅСѓР¶РµРЅ РєР»СЋС‡",
+      access_not_approved: "РґРѕСЃС‚СѓРї РЅРµ РїРѕРґС‚РІРµСЂР¶РґРµРЅ",
+      background_not_allowed: "С„РѕРЅ Р·Р°РїСЂРµС‰РµРЅ"
     };
 
     const providerLabels = {
-      fake: "Демо-источник",
-      aviasales_data: "Aviasales Data",
+      fake: "Р”РµРјРѕ-РёСЃС‚РѕС‡РЅРёРє",
+      aviasales_search: "Aviasales mobile API",
       aviasales_search: "Aviasales Search",
       skyscanner_indicative: "Skyscanner Indicative",
       skyscanner_live: "Skyscanner Live",
@@ -983,7 +973,7 @@ def render_index_html() -> str:
 
     function storeSession(session) {
       window.localStorage.setItem(sessionTokenKey, session.session_token);
-      authState.textContent = `Session: ${session.role} · ${session.household_id.slice(0, 8)}`;
+      authState.textContent = `Session: ${session.role} В· ${session.household_id.slice(0, 8)}`;
       authSignoutButton.disabled = false;
     }
 
@@ -1005,7 +995,7 @@ def render_index_html() -> str:
         });
         if (!response.ok) throw new Error(await codedMessage(response));
         const session = await response.json();
-        authState.textContent = `Session: ${session.role} · ${session.household_id.slice(0, 8)}`;
+        authState.textContent = `Session: ${session.role} В· ${session.household_id.slice(0, 8)}`;
         authSignoutButton.disabled = false;
       } catch (error) {
         clearSession();
@@ -1065,8 +1055,8 @@ def render_index_html() -> str:
     function priceBasisLabel(offer) {
       const basis = offer.price_basis || "total_for_passengers";
       if (basis === "total_for_passengers") return "";
-      if (basis === "provider_single_adult_ticket") return " · single adult ticket";
-      return ` · ${basis}`;
+      if (basis === "provider_single_adult_ticket") return " В· single adult ticket";
+      return ` В· ${basis}`;
     }
 
     function riskTone(level) {
@@ -1103,39 +1093,39 @@ def render_index_html() -> str:
     }
 
     function providerState(provider) {
-      if (provider.blocked_reasons.includes("credentials_missing")) return "Не подключен";
-      if (provider.blocked_reasons.includes("access_not_approved")) return "Нет доступа";
-      if (!provider.enabled) return "выключен";
-      if (provider.blocked_reasons.length > 0) return "ограничен";
-      return "готов";
+      if (provider.blocked_reasons.includes("credentials_missing")) return "РќРµ РїРѕРґРєР»СЋС‡РµРЅ";
+      if (provider.blocked_reasons.includes("access_not_approved")) return "РќРµС‚ РґРѕСЃС‚СѓРїР°";
+      if (!provider.enabled) return "РІС‹РєР»СЋС‡РµРЅ";
+      if (provider.blocked_reasons.length > 0) return "РѕРіСЂР°РЅРёС‡РµРЅ";
+      return "РіРѕС‚РѕРІ";
     }
 
     function providerHelp(provider) {
       if (provider.blocked_reasons.length === 0) {
-        return `${provider.data_kind} · можно использовать сейчас`;
+        return `${provider.data_kind} В· РјРѕР¶РЅРѕ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ СЃРµР№С‡Р°СЃ`;
       }
       const notes = [];
       if (provider.blocked_reasons.includes("credentials_missing")) {
-        notes.push("нужен API key в .env");
+        notes.push("РЅСѓР¶РµРЅ API key РІ .env");
       }
       if (provider.blocked_reasons.includes("access_not_approved")) {
-        notes.push("доступ у провайдера не подтвержден");
+        notes.push("РґРѕСЃС‚СѓРї Сѓ РїСЂРѕРІР°Р№РґРµСЂР° РЅРµ РїРѕРґС‚РІРµСЂР¶РґРµРЅ");
       }
       if (
         provider.blocked_reasons.includes("provider_disabled")
         && !provider.blocked_reasons.includes("credentials_missing")
       ) {
-        notes.push("выключен feature flag");
+        notes.push("РІС‹РєР»СЋС‡РµРЅ feature flag");
       }
-      return `${notes.join("; ")}. Это не ошибка поиска, просто реальные источники пока не настроены.`;
+      return `${notes.join("; ")}. Р­С‚Рѕ РЅРµ РѕС€РёР±РєР° РїРѕРёСЃРєР°, РїСЂРѕСЃС‚Рѕ СЂРµР°Р»СЊРЅС‹Рµ РёСЃС‚РѕС‡РЅРёРєРё РїРѕРєР° РЅРµ РЅР°СЃС‚СЂРѕРµРЅС‹.`;
     }
 
     function optionCountLabel(count) {
-      if (count % 10 === 1 && count % 100 !== 11) return `${count} вариант`;
+      if (count % 10 === 1 && count % 100 !== 11) return `${count} РІР°СЂРёР°РЅС‚`;
       if ([2, 3, 4].includes(count % 10) && ![12, 13, 14].includes(count % 100)) {
-        return `${count} варианта`;
+        return `${count} РІР°СЂРёР°РЅС‚Р°`;
       }
-      return `${count} вариантов`;
+      return `${count} РІР°СЂРёР°РЅС‚РѕРІ`;
     }
 
     function formatMinorAmount(minorUnits, currency) {
@@ -1149,7 +1139,7 @@ def render_index_html() -> str:
     }
 
     function formatIsoMinute(value) {
-      if (!value) return "нет срока";
+      if (!value) return "РЅРµС‚ СЃСЂРѕРєР°";
       const parsed = new Date(value);
       if (Number.isNaN(parsed.getTime())) return value;
       return parsed.toLocaleString("ru-RU", {
@@ -1159,9 +1149,9 @@ def render_index_html() -> str:
     }
 
     function dealCandidateExpiryLabel(candidate) {
-      if (!candidate.expires_at) return "срок не указан";
+      if (!candidate.expires_at) return "СЃСЂРѕРє РЅРµ СѓРєР°Р·Р°РЅ";
       const expired = Date.parse(candidate.expires_at) <= Date.now();
-      return `${expired ? "stale" : "candidate"} · до ${formatIsoMinute(candidate.expires_at)}`;
+      return `${expired ? "stale" : "candidate"} В· РґРѕ ${formatIsoMinute(candidate.expires_at)}`;
     }
 
     function buildSearchPayload() {
@@ -1184,35 +1174,10 @@ def render_index_html() -> str:
       };
     }
 
-    function buildCachedRadarPayload(radarKind) {
-      const form = new FormData(document.querySelector("#search-form"));
-      const payload = buildSearchPayload();
-      const radarPayload = {
-        radar_kind: radarKind,
-        origin: payload.origin,
-        destination: payload.destination,
-        departure_date: payload.departure_date,
-        return_date: payload.return_date,
-        passengers: payload.passengers,
-        adults: payload.adults,
-        children: payload.children,
-        infants: payload.infants,
-        currency: payload.currency
-      };
-      if (radarKind === "nearest_places_matrix") {
-        radarPayload.nearby_distance_km = 300;
-      }
-      if (radarKind === "price_range") {
-        radarPayload.min_price_minor = Math.max(0, numberValue(form, "min_price_minor", 1000000));
-        radarPayload.max_price_minor = Math.max(0, numberValue(form, "max_price_minor", 2000000));
-      }
-      return radarPayload;
-    }
-
     function updatePassengerSummary() {
       const payload = buildSearchPayload();
-      const trip = payload.return_date ? "туда-обратно" : "в одну сторону";
-      passengerTotal.textContent = `${payload.passengers} пасс. · ${trip}`;
+      const trip = payload.return_date ? "С‚СѓРґР°-РѕР±СЂР°С‚РЅРѕ" : "РІ РѕРґРЅСѓ СЃС‚РѕСЂРѕРЅСѓ";
+      passengerTotal.textContent = `${payload.passengers} РїР°СЃСЃ. В· ${trip}`;
     }
 
     function currentSlots() {
@@ -1269,7 +1234,7 @@ def render_index_html() -> str:
     function renderAgentRuntime(runtime) {
       const details = runtime || {};
       agentRuntime.textContent = details.model
-        ? `${details.backend || "deterministic_harness"} · ${details.model}`
+        ? `${details.backend || "deterministic_harness"} В· ${details.model}`
         : details.backend || "deterministic_harness";
       agentLoop.textContent = details.agentic_loop || "policy_validated_tool_plan";
       agentLivePolicy.textContent = details.live_calls_allowed
@@ -1345,7 +1310,7 @@ def render_index_html() -> str:
         const credentials = provider.credentials_present ? "credentials present" : "credentials missing";
         const reasons = (provider.blocked_reasons || []).join(", ") || "no blockers";
         row.querySelector(".small").textContent =
-          `${provider.data_kind} · ${credentials} · access=${provider.access_approved} · ${reasons}`;
+          `${provider.data_kind} В· ${credentials} В· access=${provider.access_approved} В· ${reasons}`;
         adminHealthList.append(row);
       });
 
@@ -1372,7 +1337,7 @@ def render_index_html() -> str:
           : "no recent event";
         const blockers = (source.blocked_reasons || []).join(", ") || "no blockers";
         row.querySelector(".small").textContent =
-          `${source.stage || "event-only"} · enabled=${source.enabled} · ${blockers} · ${latest}`;
+          `${source.stage || "event-only"} В· enabled=${source.enabled} В· ${blockers} В· ${latest}`;
         adminHealthList.append(row);
       });
 
@@ -1603,7 +1568,7 @@ def render_index_html() -> str:
       if (!events || events.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "Audit СЃРѕР±С‹С‚РёР№ РїРѕРєР° РЅРµС‚.";
+        empty.textContent = "Audit РЎРѓР С•Р В±РЎвЂ№РЎвЂљР С‘Р в„– Р С—Р С•Р С”Р В° Р Р…Р ВµРЎвЂљ.";
         auditList.append(empty);
         return;
       }
@@ -1643,19 +1608,19 @@ def render_index_html() -> str:
     }
 
     function watchStatus(watch) {
-      if (!watch.enabled) return {label: "выключен", tone: "off"};
-      if (watch.paused_until) return {label: "пауза", tone: "warn"};
-      if (watch.last_scan_status === "failed") return {label: "ошибка", tone: "warn"};
-      return {label: "активен", tone: "ok"};
+      if (!watch.enabled) return {label: "РІС‹РєР»СЋС‡РµРЅ", tone: "off"};
+      if (watch.paused_until) return {label: "РїР°СѓР·Р°", tone: "warn"};
+      if (watch.last_scan_status === "failed") return {label: "РѕС€РёР±РєР°", tone: "warn"};
+      return {label: "Р°РєС‚РёРІРµРЅ", tone: "ok"};
     }
 
     function watchMeta(watch) {
-      const trip = watch.return_date ? `${watch.departure_date} — ${watch.return_date}` : watch.departure_date;
+      const trip = watch.return_date ? `${watch.departure_date} вЂ” ${watch.return_date}` : watch.departure_date;
       const scan = watch.last_scanned_at
-        ? `последний scan ${watch.last_scanned_at}`
-        : "scan ещё не запускался";
-      const paused = watch.paused_until ? ` · пауза до ${watch.paused_until}` : "";
-      return `${trip} · ${watch.passengers} пасс. · ${watch.currency} · v${watch.version} · ${scan}${paused}`;
+        ? `РїРѕСЃР»РµРґРЅРёР№ scan ${watch.last_scanned_at}`
+        : "scan РµС‰С‘ РЅРµ Р·Р°РїСѓСЃРєР°Р»СЃСЏ";
+      const paused = watch.paused_until ? ` В· РїР°СѓР·Р° РґРѕ ${watch.paused_until}` : "";
+      return `${trip} В· ${watch.passengers} РїР°СЃСЃ. В· ${watch.currency} В· v${watch.version} В· ${scan}${paused}`;
     }
 
     function renderWatches(watches) {
@@ -1664,7 +1629,7 @@ def render_index_html() -> str:
       if (watchRecords.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "Активных watches пока нет.";
+        empty.textContent = "РђРєС‚РёРІРЅС‹С… watches РїРѕРєР° РЅРµС‚.";
         watchList.append(empty);
         return;
       }
@@ -1680,31 +1645,31 @@ def render_index_html() -> str:
           <div class="small"></div>
           <div class="watch-actions"></div>
         `;
-        row.querySelector(".provider-name").textContent = `${watch.origin} → ${watch.destination}`;
+        row.querySelector(".provider-name").textContent = `${watch.origin} в†’ ${watch.destination}`;
         row.querySelector(".badge").textContent = state.label;
         row.querySelector(".small").textContent = watchMeta(watch);
         const actions = row.querySelector(".watch-actions");
         const pauseButton = document.createElement("button");
         pauseButton.className = "chip";
         pauseButton.type = "button";
-        pauseButton.textContent = watch.paused_until ? "Возобновить" : "Пауза";
+        pauseButton.textContent = watch.paused_until ? "Р’РѕР·РѕР±РЅРѕРІРёС‚СЊ" : "РџР°СѓР·Р°";
         pauseButton.addEventListener("click", () =>
           watch.paused_until ? resumeWatch(watch) : pauseWatch(watch)
         );
         const historyButton = document.createElement("button");
         historyButton.className = "chip";
         historyButton.type = "button";
-        historyButton.textContent = "История";
+        historyButton.textContent = "РСЃС‚РѕСЂРёСЏ";
         historyButton.addEventListener("click", () => loadWatchHistory(watch));
         const archiveButton = document.createElement("button");
         archiveButton.className = "chip";
         archiveButton.type = "button";
-        archiveButton.textContent = "Архив";
+        archiveButton.textContent = "РђСЂС…РёРІ";
         archiveButton.addEventListener("click", () => archiveWatch(watch));
         const deleteButton = document.createElement("button");
         deleteButton.className = "chip";
         deleteButton.type = "button";
-        deleteButton.textContent = "Удалить";
+        deleteButton.textContent = "РЈРґР°Р»РёС‚СЊ";
         deleteButton.addEventListener("click", () => deleteWatch(watch));
         actions.append(pauseButton, historyButton, archiveButton, deleteButton);
         watchList.append(row);
@@ -1715,13 +1680,13 @@ def render_index_html() -> str:
       watchHistoryList.replaceChildren();
       appendSectionHeader(
         watchHistoryList,
-        "История watch",
-        `${watch.origin} → ${watch.destination}. Snapshots не являются live-гарантией.`
+        "РСЃС‚РѕСЂРёСЏ watch",
+        `${watch.origin} в†’ ${watch.destination}. Snapshots РЅРµ СЏРІР»СЏСЋС‚СЃСЏ live-РіР°СЂР°РЅС‚РёРµР№.`
       );
       if (!snapshots || snapshots.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "История цен пока пустая.";
+        empty.textContent = "РСЃС‚РѕСЂРёСЏ С†РµРЅ РїРѕРєР° РїСѓСЃС‚Р°СЏ.";
         watchHistoryList.append(empty);
         return;
       }
@@ -1729,11 +1694,11 @@ def render_index_html() -> str:
         const row = document.createElement("div");
         row.className = "denial-row small";
         const confirmation = snapshot.requires_live_confirmation
-          ? "нужна внешняя проверка"
-          : "подтверждение источника";
+          ? "РЅСѓР¶РЅР° РІРЅРµС€РЅСЏСЏ РїСЂРѕРІРµСЂРєР°"
+          : "РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ РёСЃС‚РѕС‡РЅРёРєР°";
         row.textContent =
-          `${providerLabel(snapshot.provider_id)} · ${formatMinorAmount(snapshot.amount_minor, snapshot.currency)}`
-          + ` · ${snapshot.freshness} · ${snapshot.observed_at} · ${confirmation}`;
+          `${providerLabel(snapshot.provider_id)} В· ${formatMinorAmount(snapshot.amount_minor, snapshot.currency)}`
+          + ` В· ${snapshot.freshness} В· ${snapshot.observed_at} В· ${confirmation}`;
         watchHistoryList.append(row);
       });
     }
@@ -1809,7 +1774,7 @@ def render_index_html() -> str:
     }
 
     async function deleteWatch(watch) {
-      if (!window.confirm("Удалить watch из активного списка?")) return;
+      if (!window.confirm("РЈРґР°Р»РёС‚СЊ watch РёР· Р°РєС‚РёРІРЅРѕРіРѕ СЃРїРёСЃРєР°?")) return;
       await mutateWatch(
         watch,
         `/api/v1/watches/${watch.id}`,
@@ -1935,11 +1900,11 @@ def render_index_html() -> str:
 
     function manualConfirmationStatusLabel(status) {
       const labels = {
-        confirmed: "цена совпала",
-        price_changed: "цена изменилась",
-        sold_out: "нет мест",
-        bought: "куплено",
-        wrong_route: "маршрут не тот"
+        confirmed: "С†РµРЅР° СЃРѕРІРїР°Р»Р°",
+        price_changed: "С†РµРЅР° РёР·РјРµРЅРёР»Р°СЃСЊ",
+        sold_out: "РЅРµС‚ РјРµСЃС‚",
+        bought: "РєСѓРїР»РµРЅРѕ",
+        wrong_route: "РјР°СЂС€СЂСѓС‚ РЅРµ С‚РѕС‚"
       };
       return labels[status] || status;
     }
@@ -1949,7 +1914,7 @@ def render_index_html() -> str:
       actions.className = "confirmation-actions";
       const status = document.createElement("div");
       status.className = "confirmation-status";
-      status.textContent = "Ручная проверка";
+      status.textContent = "Р СѓС‡РЅР°СЏ РїСЂРѕРІРµСЂРєР°";
       manualConfirmationActions.forEach((item) => {
         const button = document.createElement("button");
         button.className = "chip";
@@ -1973,7 +1938,7 @@ def render_index_html() -> str:
         body.amount_minor = target.price.minor_units;
         body.currency = target.price.currency;
       }
-      statusNode.textContent = "сохраняю...";
+      statusNode.textContent = "СЃРѕС…СЂР°РЅСЏСЋ...";
       try {
         const response = await fetch("/api/v1/manual-price-confirmations", {
           method: "POST",
@@ -1982,11 +1947,11 @@ def render_index_html() -> str:
         });
         if (!response.ok) throw new Error(await codedMessage(response));
         const saved = await response.json();
-        statusNode.textContent = `Сохранено: ${manualConfirmationStatusLabel(saved.status)}`;
+        statusNode.textContent = `РЎРѕС…СЂР°РЅРµРЅРѕ: ${manualConfirmationStatusLabel(saved.status)}`;
         await loadManualConfirmations();
         statusLine.textContent = "manual confirmation saved";
       } catch (error) {
-        statusNode.textContent = `Не сохранено: ${error.message}`;
+        statusNode.textContent = `РќРµ СЃРѕС…СЂР°РЅРµРЅРѕ: ${error.message}`;
         statusLine.textContent = "manual confirmation error";
       }
     }
@@ -1996,18 +1961,18 @@ def render_index_html() -> str:
       if (!confirmations || confirmations.length === 0) return;
       appendSectionHeader(
         confirmationList,
-        "Ручные подтверждения",
-        "Личная история проверок. Она не переписывает provider facts."
+        "Р СѓС‡РЅС‹Рµ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ",
+        "Р›РёС‡РЅР°СЏ РёСЃС‚РѕСЂРёСЏ РїСЂРѕРІРµСЂРѕРє. РћРЅР° РЅРµ РїРµСЂРµРїРёСЃС‹РІР°РµС‚ provider facts."
       );
       confirmations.forEach((confirmation) => {
         const row = document.createElement("div");
         row.className = "denial-row small";
         const price = confirmation.confirmed_price
-          ? ` · ${confirmation.confirmed_price.formatted}`
+          ? ` В· ${confirmation.confirmed_price.formatted}`
           : "";
         row.textContent =
-          `${manualConfirmationStatusLabel(confirmation.status)} · ${confirmation.source_id}`
-          + ` · ${confirmation.target_kind}${price} · ${confirmation.confirmed_at}`;
+          `${manualConfirmationStatusLabel(confirmation.status)} В· ${confirmation.source_id}`
+          + ` В· ${confirmation.target_kind}${price} В· ${confirmation.confirmed_at}`;
         confirmationList.append(row);
       });
     }
@@ -2025,73 +1990,9 @@ def render_index_html() -> str:
         confirmationList.replaceChildren();
         const row = document.createElement("div");
         row.className = "denial-row small";
-        row.textContent = `Ручные подтверждения: ${error.message}`;
+        row.textContent = `Р СѓС‡РЅС‹Рµ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ: ${error.message}`;
         confirmationList.append(row);
       }
-    }
-
-    function cachedRadarTitle(kind) {
-      return {
-        price_range: "Cached price range",
-        grouped_prices: "Cached grouped prices",
-        latest_prices: "Cached latest prices",
-        month_matrix: "Cached month matrix",
-        nearest_places_matrix: "Cached nearby places",
-        popular_directions: "Cached popular directions",
-        special_offers: "Cached special offers"
-      }[kind] || kind;
-    }
-
-    function renderCachedRadarResults(results) {
-      cachedRadarList.replaceChildren();
-      const totalOffers = results.reduce((sum, item) => sum + (item.offers || []).length, 0);
-      appendSectionHeader(
-        cachedRadarList,
-        "Cached radar",
-        totalOffers > 0
-          ? "Cached hints. Confirm externally before purchase."
-          : "No cached radar prices for this route or credentials are missing."
-      );
-      results.forEach((item) => {
-        const denials = item.pricing_denials || [];
-        if (denials.length > 0) {
-          const row = document.createElement("div");
-          row.className = "denial-row small";
-          row.textContent = `${cachedRadarTitle(item.radar_kind)}: ${denials.join(", ")}`;
-          cachedRadarList.append(row);
-        }
-        (item.offers || []).forEach((offer) => {
-          const row = document.createElement("div");
-          row.className = "result-row";
-          const caveats = (offer.ranking_reasons || []).map((reason) => {
-            const label = reasonLabel(reason);
-            const tone = reason.startsWith("cached_") ? "ok" : "warn";
-            return `<span class="badge ${tone}">${label}</span>`;
-          }).join("") + riskBadges(offer);
-          row.innerHTML = `
-            <div>
-              <div class="route"></div>
-              <div class="small"></div>
-            </div>
-            <div class="price"></div>
-            <div>
-              <div class="caveats">${caveats}</div>
-              <div class="risk-detail small"></div>
-              <div class="result-actions"></div>
-            </div>
-          `;
-          row.querySelector(".route").textContent =
-            `${offer.origin} → ${offer.destination}`;
-          row.querySelector(".small").textContent =
-            `${cachedRadarTitle(item.radar_kind)} · ${offer.departure_date}`
-            + `${offer.return_date ? " — " + offer.return_date : ""}`
-            + ` · ${offer.passengers} пасс.${priceBasisLabel(offer)} · ${offer.freshness}`;
-          row.querySelector(".price").textContent = offer.total_price.formatted;
-          row.querySelector(".risk-detail").textContent = riskExplanationText(offer);
-          appendManualConfirmationActions(row.querySelector(".result-actions"), pricedOfferTarget(offer));
-          cachedRadarList.append(row);
-        });
-      });
     }
 
     function renderResults(body) {
@@ -2103,7 +2004,6 @@ def render_index_html() -> str:
       lastSearchId = body.search_id || null;
       lastExternalLinks = externalLinks;
       resultsList.replaceChildren();
-      cachedRadarList.replaceChildren();
       confirmationList.replaceChildren();
       liveList.replaceChildren();
       denialsList.replaceChildren();
@@ -2113,16 +2013,16 @@ def render_index_html() -> str:
 
       appendSectionHeader(
         resultsList,
-        "Цены из кэша",
+        "Р¦РµРЅС‹ РёР· РєСЌС€Р°",
         freshnessSummary.needs_external_confirmation
-          ? "Нужна внешняя проверка перед покупкой."
-          : "Свежесть подтверждена источником."
+          ? "РќСѓР¶РЅР° РІРЅРµС€РЅСЏСЏ РїСЂРѕРІРµСЂРєР° РїРµСЂРµРґ РїРѕРєСѓРїРєРѕР№."
+          : "РЎРІРµР¶РµСЃС‚СЊ РїРѕРґС‚РІРµСЂР¶РґРµРЅР° РёСЃС‚РѕС‡РЅРёРєРѕРј."
       );
 
       if (offers.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "Нет mergeable-вариантов по текущему запросу.";
+        empty.textContent = "РќРµС‚ mergeable-РІР°СЂРёР°РЅС‚РѕРІ РїРѕ С‚РµРєСѓС‰РµРјСѓ Р·Р°РїСЂРѕСЃСѓ.";
         resultsList.append(empty);
       }
 
@@ -2144,15 +2044,15 @@ def render_index_html() -> str:
             <div class="caveats">${caveats}</div>
             <div class="risk-detail small"></div>
             <div class="result-actions">
-              <button class="secondary live-check-button" type="button">Проверить live</button>
+              <button class="secondary live-check-button" type="button">РџСЂРѕРІРµСЂРёС‚СЊ live</button>
             </div>
           </div>
         `;
-        row.querySelector(".route").textContent = `${offer.origin} → ${offer.destination}`;
+        row.querySelector(".route").textContent = `${offer.origin} в†’ ${offer.destination}`;
         row.querySelector(".small").textContent =
-          `${offer.departure_date}${offer.return_date ? " — " + offer.return_date : ""}`
-          + ` · ${offer.passengers} пасс. · ${providerLabel(offer.provider_id)}`
-          + `${priceBasisLabel(offer)} · ${offer.freshness}`;
+          `${offer.departure_date}${offer.return_date ? " вЂ” " + offer.return_date : ""}`
+          + ` В· ${offer.passengers} РїР°СЃСЃ. В· ${providerLabel(offer.provider_id)}`
+          + `${priceBasisLabel(offer)} В· ${offer.freshness}`;
         row.querySelector(".price").textContent = offer.total_price.formatted;
         row.querySelector(".risk-detail").textContent = riskExplanationText(offer);
         row.querySelector(".live-check-button").addEventListener("click", () => runLiveCheck());
@@ -2162,13 +2062,13 @@ def render_index_html() -> str:
 
       appendSectionHeader(
         resultsList,
-        "Ссылки для проверки",
-        "Это внешние сайты, не найденные цены. Откройте и проверьте маршрут вручную."
+        "РЎСЃС‹Р»РєРё РґР»СЏ РїСЂРѕРІРµСЂРєРё",
+        "Р­С‚Рѕ РІРЅРµС€РЅРёРµ СЃР°Р№С‚С‹, РЅРµ РЅР°Р№РґРµРЅРЅС‹Рµ С†РµРЅС‹. РћС‚РєСЂРѕР№С‚Рµ Рё РїСЂРѕРІРµСЂСЊС‚Рµ РјР°СЂС€СЂСѓС‚ РІСЂСѓС‡РЅСѓСЋ."
       );
       if (externalLinks.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "Пока нет внешних ссылок для проверки.";
+        empty.textContent = "РџРѕРєР° РЅРµС‚ РІРЅРµС€РЅРёС… СЃСЃС‹Р»РѕРє РґР»СЏ РїСЂРѕРІРµСЂРєРё.";
         resultsList.append(empty);
       }
       externalLinks.forEach((link) => {
@@ -2179,19 +2079,19 @@ def render_index_html() -> str:
             <div class="route"></div>
             <div class="small"></div>
           </div>
-          <div class="price">Цена неизвестна</div>
+          <div class="price">Р¦РµРЅР° РЅРµРёР·РІРµСЃС‚РЅР°</div>
           <div>
             <div class="caveats"><span class="badge warn">external check</span></div>
             <div class="result-actions">
-              <a class="secondary" target="_blank" rel="noopener noreferrer">Открыть на сайте</a>
+              <a class="secondary" target="_blank" rel="noopener noreferrer">РћС‚РєСЂС‹С‚СЊ РЅР° СЃР°Р№С‚Рµ</a>
             </div>
           </div>
         `;
         row.querySelector(".route").textContent =
           `${link.source_name}: ${link.origin} -> ${link.destination}`;
         row.querySelector(".small").textContent =
-          `${link.departure_date}${link.return_date ? " — " + link.return_date : ""}`
-          + ` · ${link.passengers} пасс. · ${link.notes_ru || "Проверить на внешнем сайте."}`;
+          `${link.departure_date}${link.return_date ? " вЂ” " + link.return_date : ""}`
+          + ` В· ${link.passengers} РїР°СЃСЃ. В· ${link.notes_ru || "РџСЂРѕРІРµСЂРёС‚СЊ РЅР° РІРЅРµС€РЅРµРј СЃР°Р№С‚Рµ."}`;
         row.querySelector("a").href = link.url;
         appendManualConfirmationActions(row.querySelector(".result-actions"), externalLinkTarget(link));
         resultsList.append(row);
@@ -2199,13 +2099,13 @@ def render_index_html() -> str:
 
       appendSectionHeader(
         liveList,
-        "Свежие наблюдения из браузера",
-        "Personal Browser Observer запускается только после явного действия пользователя."
+        "РЎРІРµР¶РёРµ РЅР°Р±Р»СЋРґРµРЅРёСЏ РёР· Р±СЂР°СѓР·РµСЂР°",
+        "Personal Browser Observer Р·Р°РїСѓСЃРєР°РµС‚СЃСЏ С‚РѕР»СЊРєРѕ РїРѕСЃР»Рµ СЏРІРЅРѕРіРѕ РґРµР№СЃС‚РІРёСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ."
       );
       if (observedOffers.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "Пока нет browser observation по этому запросу.";
+        empty.textContent = "РџРѕРєР° РЅРµС‚ browser observation РїРѕ СЌС‚РѕРјСѓ Р·Р°РїСЂРѕСЃСѓ.";
         liveList.append(empty);
       }
       observedOffers.forEach((offer) => {
@@ -2214,8 +2114,8 @@ def render_index_html() -> str:
         const details = document.createElement("div");
         details.className = "small";
         details.textContent =
-          `${offer.source_name}: ${offer.total_price ? offer.total_price.formatted : "цена не найдена"}`
-          + ` · confidence=${offer.confidence} · ${offer.parser_warnings.join(", ") || "без предупреждений"}`;
+          `${offer.source_name}: ${offer.total_price ? offer.total_price.formatted : "С†РµРЅР° РЅРµ РЅР°Р№РґРµРЅР°"}`
+          + ` В· confidence=${offer.confidence} В· ${offer.parser_warnings.join(", ") || "Р±РµР· РїСЂРµРґСѓРїСЂРµР¶РґРµРЅРёР№"}`;
         row.append(details);
         appendManualConfirmationActions(row, browserObservationTarget(offer));
         liveList.append(row);
@@ -2245,8 +2145,8 @@ def render_index_html() -> str:
         return;
       }
       row.textContent =
-        `Live observed · ${offer.total_price.formatted} · ${offer.origin} → ${offer.destination}`
-        + ` · наблюдалось ${observation.observed_at}`;
+        `Live observed В· ${offer.total_price.formatted} В· ${offer.origin} в†’ ${offer.destination}`
+        + ` В· РЅР°Р±Р»СЋРґР°Р»РѕСЃСЊ ${observation.observed_at}`;
       liveList.append(row);
     }
 
@@ -2255,35 +2155,35 @@ def render_index_html() -> str:
       appendSectionHeader(
         liveList,
         "Personal Browser Observer",
-        "Job обрабатывается worker CLI; ручной checkpoint можно продолжить или отменить."
+        "Job РѕР±СЂР°Р±Р°С‚С‹РІР°РµС‚СЃСЏ worker CLI; СЂСѓС‡РЅРѕР№ checkpoint РјРѕР¶РЅРѕ РїСЂРѕРґРѕР»Р¶РёС‚СЊ РёР»Рё РѕС‚РјРµРЅРёС‚СЊ."
       );
       const row = document.createElement("div");
       row.className = "denial-row small";
       const command = `uv run flight-hunter-run-personal-observation --job-id ${job.job_id}`;
       const waiting = job.status === "waiting_for_user";
       const flags = [
-        job.waiting_since ? `ждёт с ${job.waiting_since}` : null,
+        job.waiting_since ? `Р¶РґС‘С‚ СЃ ${job.waiting_since}` : null,
         job.operator_resume_requested_at ? "resume requested" : null,
         job.operator_abort_requested_at ? "abort requested" : null,
-      ].filter(Boolean).join(" · ");
-      row.textContent = `Job ${job.job_id} · ${job.status}${flags ? ` · ${flags}` : ""}. Команда: ${command}`;
+      ].filter(Boolean).join(" В· ");
+      row.textContent = `Job ${job.job_id} В· ${job.status}${flags ? ` В· ${flags}` : ""}. РљРѕРјР°РЅРґР°: ${command}`;
       const controls = document.createElement("div");
       controls.className = "quick-actions";
       const refresh = document.createElement("button");
       refresh.className = "secondary";
       refresh.type = "button";
-      refresh.textContent = "Обновить";
+      refresh.textContent = "РћР±РЅРѕРІРёС‚СЊ";
       refresh.addEventListener("click", () => refreshPersonalObservation(job.job_id));
       const resume = document.createElement("button");
       resume.className = "secondary";
       resume.type = "button";
-      resume.textContent = "Продолжить";
+      resume.textContent = "РџСЂРѕРґРѕР»Р¶РёС‚СЊ";
       resume.disabled = !waiting || Boolean(job.operator_resume_requested_at || job.operator_abort_requested_at);
       resume.addEventListener("click", () => controlPersonalObservation(job.job_id, "resume"));
       const abort = document.createElement("button");
       abort.className = "secondary";
       abort.type = "button";
-      abort.textContent = "Отменить";
+      abort.textContent = "РћС‚РјРµРЅРёС‚СЊ";
       abort.disabled = !waiting || Boolean(job.operator_resume_requested_at || job.operator_abort_requested_at);
       abort.addEventListener("click", () => controlPersonalObservation(job.job_id, "abort"));
       controls.append(refresh, resume, abort);
@@ -2300,8 +2200,8 @@ def render_index_html() -> str:
     function renderDealCandidates(candidates) {
       appendSectionHeader(
         denialsList,
-        "Сделки/форумы",
-        "Кандидаты требуют ручной проверки и не считаются источником истины цены."
+        "РЎРґРµР»РєРё/С„РѕСЂСѓРјС‹",
+        "РљР°РЅРґРёРґР°С‚С‹ С‚СЂРµР±СѓСЋС‚ СЂСѓС‡РЅРѕР№ РїСЂРѕРІРµСЂРєРё Рё РЅРµ СЃС‡РёС‚Р°СЋС‚СЃСЏ РёСЃС‚РѕС‡РЅРёРєРѕРј РёСЃС‚РёРЅС‹ С†РµРЅС‹."
       );
       candidates.forEach((candidate) => {
         const row = document.createElement("div");
@@ -2363,25 +2263,25 @@ def render_index_html() -> str:
 
     function choosePreset(prompt) {
       const raw = prompt.toLowerCase();
-      if (raw.includes("аэроп")) return "nearby_airports";
-      if (raw.includes("когда") || raw.includes("покуп")) return "buy_timing";
-      if (raw.includes("стык") || raw.includes("разб")) return "split_ticket";
-      if (raw.includes("скры") || raw.includes("hidden")) return "hidden_city";
-      if (raw.includes("валют") || raw.includes("страна")) return "geo_currency";
-      if (raw.includes("ошиб") || raw.includes("error")) return "error_fare_sources";
+      if (raw.includes("Р°СЌСЂРѕРї")) return "nearby_airports";
+      if (raw.includes("РєРѕРіРґР°") || raw.includes("РїРѕРєСѓРї")) return "buy_timing";
+      if (raw.includes("СЃС‚С‹Рє") || raw.includes("СЂР°Р·Р±")) return "split_ticket";
+      if (raw.includes("СЃРєСЂС‹") || raw.includes("hidden")) return "hidden_city";
+      if (raw.includes("РІР°Р»СЋС‚") || raw.includes("СЃС‚СЂР°РЅР°")) return "geo_currency";
+      if (raw.includes("РѕС€РёР±") || raw.includes("error")) return "error_fare_sources";
       return "flexible_dates";
     }
 
     function renderAgentPlan(plan) {
       if (plan.missing_slots && plan.missing_slots.length > 0) {
-        addMessage("bot", `Нужны поля: ${plan.missing_slots.join(", ")}.`);
+        addMessage("bot", `РќСѓР¶РЅС‹ РїРѕР»СЏ: ${plan.missing_slots.join(", ")}.`);
         return;
       }
       const steps = (plan.steps || []).map((step, index) =>
         `${index + 1}. ${step.title_ru}\\n${step.explanation_ru}`
       ).join("\\n\\n");
       const warnings = (plan.warnings || []).length
-        ? `\\n\\nОграничения:\\n${plan.warnings.map((item) => `- ${item}`).join("\\n")}`
+        ? `\\n\\nРћРіСЂР°РЅРёС‡РµРЅРёСЏ:\\n${plan.warnings.map((item) => `- ${item}`).join("\\n")}`
         : "";
       addMessage("bot", `${plan.title_ru}\\n\\n${steps}${warnings}`);
     }
@@ -2394,7 +2294,7 @@ def render_index_html() -> str:
           node.className = "choice-card";
           node.type = "button";
           const title = document.createElement("strong");
-          title.textContent = `${role === "origin" ? "Откуда" : "Куда"} · ${option.iata_code}`;
+          title.textContent = `${role === "origin" ? "РћС‚РєСѓРґР°" : "РљСѓРґР°"} В· ${option.iata_code}`;
           const meta = document.createElement("span");
           meta.className = "small";
           const duplicatePrefix = `${option.iata_code} - `;
@@ -2413,7 +2313,7 @@ def render_index_html() -> str:
       if (!airportChoiceList.children.length) {
         const empty = document.createElement("div");
         empty.className = "choice-card";
-        empty.textContent = "Пока вариантов нет";
+        empty.textContent = "РџРѕРєР° РІР°СЂРёР°РЅС‚РѕРІ РЅРµС‚";
         airportChoiceList.append(empty);
       }
     }
@@ -2428,16 +2328,16 @@ def render_index_html() -> str:
         const meta = document.createElement("div");
         meta.className = "small";
         const gate = action.requires_user_action
-          ? "нужен явный клик"
-          : "можно выполнить без live-вызова";
-        meta.textContent = `${gate} · ${action.policy_decision}`;
+          ? "РЅСѓР¶РµРЅ СЏРІРЅС‹Р№ РєР»РёРє"
+          : "РјРѕР¶РЅРѕ РІС‹РїРѕР»РЅРёС‚СЊ Р±РµР· live-РІС‹Р·РѕРІР°";
+        meta.textContent = `${gate} В· ${action.policy_decision}`;
         node.append(title, document.createTextNode("\\n"), meta);
         agentActionList.append(node);
       });
       if (!agentActionList.children.length) {
         const empty = document.createElement("div");
         empty.className = "action-card";
-        empty.textContent = "Агент ждёт маршрут";
+        empty.textContent = "РђРіРµРЅС‚ Р¶РґС‘С‚ РјР°СЂС€СЂСѓС‚";
         agentActionList.append(empty);
       }
     }
@@ -2450,7 +2350,7 @@ def render_index_html() -> str:
 
     async function requestAgentChat(prompt) {
       addMessage("user", prompt);
-      statusLine.textContent = "агент думает...";
+      statusLine.textContent = "Р°РіРµРЅС‚ РґСѓРјР°РµС‚...";
       const payload = buildSearchPayload();
       try {
         const response = await fetch("/api/v1/agent/chat/turn", {
@@ -2472,16 +2372,16 @@ def render_index_html() -> str:
         renderAirportChoices(body.airport_options);
         renderAgentActions(body.actions);
         syncExtractedRoute(body);
-        statusLine.textContent = "агент готов";
+        statusLine.textContent = "Р°РіРµРЅС‚ РіРѕС‚РѕРІ";
       } catch (error) {
-        addMessage("bot", `Агент не смог выполнить turn: ${error.message}`);
-        statusLine.textContent = "ошибка агента";
+        addMessage("bot", `РђРіРµРЅС‚ РЅРµ СЃРјРѕРі РІС‹РїРѕР»РЅРёС‚СЊ turn: ${error.message}`);
+        statusLine.textContent = "РѕС€РёР±РєР° Р°РіРµРЅС‚Р°";
       }
     }
 
     async function requestAgentPlan(presetId, visiblePrompt) {
       addMessage("user", visiblePrompt);
-      statusLine.textContent = "ИИ думает...";
+      statusLine.textContent = "РР РґСѓРјР°РµС‚...";
       try {
         const response = await fetch("/api/v1/agent/plan", {
           method: "POST",
@@ -2490,17 +2390,17 @@ def render_index_html() -> str:
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         renderAgentPlan(await response.json());
-        statusLine.textContent = "готово";
+        statusLine.textContent = "РіРѕС‚РѕРІРѕ";
       } catch (error) {
-        addMessage("bot", `Не смог собрать план: ${error.message}`);
-        statusLine.textContent = "ошибка";
+        addMessage("bot", `РќРµ СЃРјРѕРі СЃРѕР±СЂР°С‚СЊ РїР»Р°РЅ: ${error.message}`);
+        statusLine.textContent = "РѕС€РёР±РєР°";
       }
     }
 
     async function runSearch(event) {
       event.preventDefault();
       submitButton.disabled = true;
-      statusLine.textContent = "поиск...";
+      statusLine.textContent = "РїРѕРёСЃРє...";
       const payload = buildSearchPayload();
       lastSearchPayload = payload;
 
@@ -2512,55 +2412,17 @@ def render_index_html() -> str:
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         renderResults(await response.json());
-        statusLine.textContent = "готово";
+        statusLine.textContent = "РіРѕС‚РѕРІРѕ";
       } catch (error) {
         resultsList.replaceChildren();
-        cachedRadarList.replaceChildren();
         confirmationList.replaceChildren();
         const node = document.createElement("div");
         node.className = "error-state";
-        node.textContent = `Ошибка поиска: ${error.message}`;
+        node.textContent = `РћС€РёР±РєР° РїРѕРёСЃРєР°: ${error.message}`;
         resultsList.append(node);
-        statusLine.textContent = "ошибка";
+        statusLine.textContent = "РѕС€РёР±РєР°";
       } finally {
         submitButton.disabled = false;
-      }
-    }
-
-    async function runCachedRadar() {
-      const radarKinds = [
-        "price_range",
-        "grouped_prices",
-        "latest_prices",
-        "month_matrix",
-        "nearest_places_matrix",
-        "popular_directions",
-        "special_offers"
-      ];
-      cachedRadarButton.disabled = true;
-      statusLine.textContent = "cached radar...";
-      try {
-        const results = [];
-        for (const radarKind of radarKinds) {
-          const response = await fetch("/api/v1/searches/cached-radar", {
-            method: "POST",
-            headers: authHeaders({"Content-Type": "application/json"}),
-            body: JSON.stringify(buildCachedRadarPayload(radarKind))
-          });
-          if (!response.ok) throw new Error(await codedMessage(response));
-          results.push(await response.json());
-        }
-        renderCachedRadarResults(results);
-        statusLine.textContent = "cached radar ready";
-      } catch (error) {
-        cachedRadarList.replaceChildren();
-        const row = document.createElement("div");
-        row.className = "denial-row small";
-        row.textContent = `Cached radar: ${error.message}`;
-        cachedRadarList.append(row);
-        statusLine.textContent = "cached radar unavailable";
-      } finally {
-        cachedRadarButton.disabled = false;
       }
     }
 
@@ -2571,7 +2433,7 @@ def render_index_html() -> str:
         liveList.replaceChildren();
         const row = document.createElement("div");
         row.className = "denial-row small";
-        row.textContent = "Live: demo observer выключен или нет активного разрешения.";
+        row.textContent = "Live: demo observer РІС‹РєР»СЋС‡РµРЅ РёР»Рё РЅРµС‚ Р°РєС‚РёРІРЅРѕРіРѕ СЂР°Р·СЂРµС€РµРЅРёСЏ.";
         liveList.append(row);
         return;
       }
@@ -2622,7 +2484,7 @@ def render_index_html() -> str:
         liveList.replaceChildren();
         const row = document.createElement("div");
         row.className = "denial-row small";
-        row.textContent = "Personal observer: сначала выполните поиск.";
+        row.textContent = "Personal observer: СЃРЅР°С‡Р°Р»Р° РІС‹РїРѕР»РЅРёС‚Рµ РїРѕРёСЃРє.";
         liveList.append(row);
         return;
       }
@@ -2697,7 +2559,7 @@ def render_index_html() -> str:
         denialsList.replaceChildren();
         const row = document.createElement("div");
         row.className = "denial-row small";
-        row.textContent = "Deal discovery: сначала выполните поиск.";
+        row.textContent = "Deal discovery: СЃРЅР°С‡Р°Р»Р° РІС‹РїРѕР»РЅРёС‚Рµ РїРѕРёСЃРє.";
         denialsList.append(row);
         return;
       }
@@ -2747,7 +2609,6 @@ def render_index_html() -> str:
       loadWatches();
       loadAuditEvents();
     });
-    cachedRadarButton.addEventListener("click", runCachedRadar);
     personalObserveButton.addEventListener("click", runPersonalObservation);
     dealDiscoveryButton.addEventListener("click", runDealDiscovery);
     createWatchButton.addEventListener("click", createWatchFromSearch);

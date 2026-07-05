@@ -81,16 +81,44 @@ async def test_source_smoke_checks_crawl4ai_markdown_without_exposing_content() 
 
 
 @pytest.mark.anyio
-async def test_source_smoke_delegates_aviasales_data_missing_credentials() -> None:
+async def test_source_smoke_reports_aviasales_search_missing_credentials() -> None:
     result = await run_source_smoke(
-        settings=_settings(travelpayouts_api_token=None),
-        source="aviasales_data",
+        settings=_settings(
+            aviasales_search_enabled=True,
+            aviasales_search_signature=None,
+            aviasales_search_marker=None,
+        ),
+        source="aviasales_search",
         clock=lambda: NOW,
     )
 
     assert result.ok is False
-    assert result.code == "credentials_missing"
-    assert result.source == "aviasales_data"
+    assert result.code == "aviasales_search_credentials_missing"
+    assert result.source == "aviasales_search"
+
+
+@pytest.mark.anyio
+async def test_source_smoke_checks_aviasales_search_with_safe_summary() -> None:
+    client = RecordingAviasalesClient()
+    result = await run_source_smoke(
+        settings=_settings(
+            aviasales_search_enabled=True,
+            aviasales_search_signature="secret-signature",
+            aviasales_search_marker="secret-marker",
+        ),
+        source="aviasales_search",
+        aviasales_client_factory=lambda settings: client,
+        clock=lambda: NOW,
+    )
+    rendered = format_source_smoke_result(result)
+
+    assert result.ok is True
+    assert result.code == "ok"
+    assert result.item_count == 2
+    assert result.source == "aviasales_search"
+    assert client.terms == ["LED"]
+    assert "secret-signature" not in rendered
+    assert "secret-marker" not in rendered
 
 
 class RecordingSearchClient:
@@ -144,13 +172,22 @@ class FailingMarkdownClient:
         raise AssertionError("markdown client should not be called")
 
 
+class RecordingAviasalesClient:
+    def __init__(self) -> None:
+        self.terms: list[str] = []
+
+    def suggest_places(self, term: str, *, max_results: int = 5) -> tuple[object, ...]:
+        self.terms.append(term)
+        return (object(), object())
+
+
 def _settings(**overrides) -> AppSettings:
     base = AppSettings(
         database_url="sqlite+aiosqlite:///:memory:",
-        aviasales_data_enabled=False,
-        travelpayouts_api_token=None,
-        aviasales_data_default_market="pl",
-        aviasales_data_internal_rpm=30,
+        aviasales_search_enabled=False,
+        aviasales_search_signature=None,
+        aviasales_search_marker=None,
+        aviasales_search_internal_rpm=20,
         telegram_enabled=False,
         telegram_webhook_secret=None,
     )
