@@ -1,4 +1,4 @@
-.PHONY: help bootstrap dev dev-api test test-unit test-integration test-e2e lint typecheck migrate seed-demo quality provider-contracts security source-smoke browser-smoke parse-fixture redact-url sanitize-html backup backup-verify restore cleanup-live-observations import-airports worker worker-healthcheck compose-up compose-down compose-worker-up compose-deals-up compose-deals-config
+.PHONY: help bootstrap browser-bootstrap dev dev-api test test-unit test-integration test-e2e lint typecheck migrate seed-demo quality provider-contracts security source-smoke browser-smoke parse-fixture redact-url sanitize-html backup backup-verify restore cleanup-live-observations import-airports worker worker-healthcheck compose-up compose-down compose-worker-up compose-deals-up compose-deals-config
 
 SOURCE ?= aviasales_search
 FIXTURE_ARGS ?=
@@ -9,6 +9,7 @@ WORKER_ROLE ?=
 help:
 	@echo "Flight Hunter commands:"
 	@echo "  make bootstrap          Install dev dependencies with uv"
+	@echo "  make browser-bootstrap  Install Playwright Chromium for local E2E"
 	@echo "  make dev                Run the local demo API and web screen"
 	@echo "  make dev-api            Run the local demo API"
 	@echo "  make test               Run current automated tests"
@@ -42,6 +43,9 @@ help:
 
 bootstrap:
 	uv sync --group dev
+
+browser-bootstrap:
+	uv run flight-hunter-browser-bootstrap
 
 dev: dev-api
 

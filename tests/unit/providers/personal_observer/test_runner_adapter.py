@@ -8,7 +8,7 @@ from flight_hunter.application.personal_observations import (
     PersonalObservationCode,
     PersonalObservationRunnerError,
 )
-from flight_hunter.domain.observation import ObservationStatus
+from flight_hunter.domain.observation import ObservationErrorCode, ObservationStatus
 from flight_hunter.domain.offers import SearchIntent
 from flight_hunter.providers.personal_observer.adapter import PersonalObserverRunnerAdapter
 from flight_hunter.providers.personal_observer.runner import (
@@ -17,7 +17,7 @@ from flight_hunter.providers.personal_observer.runner import (
 )
 
 
-def test_adapter_maps_playwright_unavailable_to_retryable_source_unavailable() -> None:
+def test_adapter_maps_playwright_unavailable_to_terminal_runtime_error() -> None:
     adapter = PersonalObserverRunnerAdapter(PlaywrightUnavailableRunner())
 
     with pytest.raises(PersonalObservationRunnerError) as exc:
@@ -35,7 +35,8 @@ def test_adapter_maps_playwright_unavailable_to_retryable_source_unavailable() -
         )
 
     assert exc.value.code == PersonalObservationCode.RUNNER_FAILED
-    assert exc.value.status == ObservationStatus.SOURCE_UNAVAILABLE
+    assert exc.value.status == ObservationStatus.FAILED
+    assert exc.value.error_code == ObservationErrorCode.BROWSER_RUNTIME_UNAVAILABLE
     assert "playwright is not installed" in exc.value.message
 
 

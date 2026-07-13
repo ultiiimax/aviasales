@@ -8,7 +8,11 @@ from flight_hunter.application.personal_observations import (
     PersonalObservationRunnerError,
     PersonalObservationRunnerResult,
 )
-from flight_hunter.domain.observation import ObservationStatus, OperatorCheckpointDecision
+from flight_hunter.domain.observation import (
+    ObservationErrorCode,
+    ObservationStatus,
+    OperatorCheckpointDecision,
+)
 from flight_hunter.domain.offers import SearchIntent
 from flight_hunter.providers.personal_observer.runner import (
     PersonalObserverError,
@@ -80,10 +84,14 @@ def _runner_error(error: PersonalObserverError) -> PersonalObservationRunnerErro
             error.message,
             status=ObservationStatus.POLICY_DENIED,
         )
-    if error.code in {
-        PersonalObserverErrorCode.NAVIGATION_FAILED,
-        PersonalObserverErrorCode.PLAYWRIGHT_UNAVAILABLE,
-    }:
+    if error.code == PersonalObserverErrorCode.PLAYWRIGHT_UNAVAILABLE:
+        return PersonalObservationRunnerError(
+            PersonalObservationCode.RUNNER_FAILED,
+            error.message,
+            status=ObservationStatus.FAILED,
+            error_code=ObservationErrorCode.BROWSER_RUNTIME_UNAVAILABLE,
+        )
+    if error.code == PersonalObserverErrorCode.NAVIGATION_FAILED:
         return PersonalObservationRunnerError(
             PersonalObservationCode.RUNNER_FAILED,
             error.message,

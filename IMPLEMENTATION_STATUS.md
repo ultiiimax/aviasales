@@ -28,7 +28,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [x] Add safe local `.env` initialization and secure auth defaults.
   - [x] Stabilize Aviasales failures, partial success and exact live smoke.
   - [x] Repair Russian web UI encoding.
-  - [ ] Make browser runtime/bootstrap and local E2E explicit.
+  - [x] Make browser runtime/bootstrap and local E2E explicit.
   - [ ] Add release-check and pre-v1 upgrade tooling.
   - [ ] Package Compose/CI/release artifacts.
   - [ ] Finish documentation and full release gate.

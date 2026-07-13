@@ -19,6 +19,7 @@ flight-hunter-import-airports = "flight_hunter.ops.airport_import:main"
 flight-hunter-init-local = "flight_hunter.ops.init_local:main"
 flight-hunter-backup = "flight_hunter.ops.backup:backup_main"
 flight-hunter-backup-verify = "flight_hunter.ops.backup:verify_main"
+flight-hunter-browser-bootstrap = "flight_hunter.ops.browser_bootstrap:main"
 flight-hunter-browser-smoke = "flight_hunter.ops.browser_smoke:main"
 flight-hunter-cleanup-live-observations = "flight_hunter.ops.live_observation_cleanup:main"
 flight-hunter-observe = "flight_hunter.providers.personal_observer.cli:main"
@@ -56,6 +57,7 @@ scraping = [
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "--basetemp=.pytest-tmp"
+markers = ["browser_e2e: requires bootstrapped Playwright Chromium"]
 
 [tool.ruff]
 line-length = 100

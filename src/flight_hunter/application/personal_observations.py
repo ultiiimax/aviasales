@@ -105,11 +105,13 @@ class PersonalObservationRunnerError(RuntimeError):
         message: str,
         *,
         status: ObservationStatus = ObservationStatus.FAILED,
+        error_code: ObservationErrorCode | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status = status
+        self.error_code = error_code
 
 
 class PersonalObservationRunnerPort(Protocol):
@@ -485,7 +487,7 @@ class PersonalObservationService:
             )
         except PersonalObservationRunnerError as exc:
             attempted_at = self._clock()
-            error_code = _error_code_for_status(exc.status)
+            error_code = exc.error_code or _error_code_for_status(exc.status)
             next_retry_at = attempted_at + self._retry_delay
             if (
                 _is_retryable_status(exc.status)

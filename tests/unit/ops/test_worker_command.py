@@ -130,7 +130,7 @@ def test_worker_processes_queued_browser_observation_jobs(
     assert '"browser_jobs_succeeded": 1' in heartbeats[0].last_summary_json
 
 
-def test_worker_retries_when_playwright_runtime_is_unavailable(
+def test_worker_fails_without_retry_when_playwright_runtime_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
@@ -160,19 +160,19 @@ def test_worker_retries_when_playwright_runtime_is_unavailable(
     body = json.loads(capsys.readouterr().out)
     assert body["browser_jobs_seen"] == 1
     assert body["browser_jobs_succeeded"] == 0
-    assert body["browser_jobs_retry_scheduled"] == 1
-    assert body["browser_jobs_failed"] == 0
+    assert body["browser_jobs_retry_scheduled"] == 0
+    assert body["browser_jobs_failed"] == 1
     assert body["source_health_events_recorded"] == 1
     offers = asyncio.run(_stored_offers(database_url))
-    queued = asyncio.run(_queued_browser_jobs(database_url, now=NOW + timedelta(minutes=1)))
+    job = asyncio.run(_stored_browser_job(database_url, idempotency_key="worker-idem-0"))
     health_events = asyncio.run(_stored_health_events(database_url))
     assert offers == ()
-    assert len(queued) == 1
-    assert queued[0].status == ObservationStatus.QUEUED
-    assert queued[0].error_code == ObservationErrorCode.SOURCE_UNAVAILABLE
-    assert queued[0].next_retry_at is not None
+    assert job is not None
+    assert job.status == ObservationStatus.FAILED
+    assert job.error_code == ObservationErrorCode.BROWSER_RUNTIME_UNAVAILABLE
+    assert job.next_retry_at is None
     assert len(health_events) == 1
-    assert health_events[0].status == "retry_scheduled"
+    assert health_events[0].status == "failed"
 
 
 def test_worker_respects_personal_observer_claim_limits(
@@ -774,6 +774,25 @@ async def _queued_browser_jobs(
         )
     await engine.dispose()
     return jobs
+
+
+async def _stored_browser_job(
+    database_url: str,
+    *,
+    idempotency_key: str,
+) -> BrowserObservationJobRecord | None:
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        repository = BrowserObservationJobRepository(session)
+        job_id = await repository.get_idempotent_job_id(
+            household_id=HOUSEHOLD_ID,
+            user_id=USER_ID,
+            idempotency_key=idempotency_key,
+        )
+        job = await repository.get_job_by_id(job_id) if job_id is not None else None
+    await engine.dispose()
+    return job
 
 
 async def _stored_price_history(database_url: str) -> tuple[PriceSnapshotRecord, ...]:

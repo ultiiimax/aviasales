@@ -56,6 +56,7 @@ class ObservationStatus(StrEnum):
 
 
 class ObservationErrorCode(StrEnum):
+    BROWSER_RUNTIME_UNAVAILABLE = "browser_runtime_unavailable"
     POLICY_DENIED = "policy_denied"
     SOURCE_CHALLENGE = "source_challenge"
     SELECTOR_DRIFT = "selector_drift"

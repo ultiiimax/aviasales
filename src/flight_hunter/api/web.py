@@ -926,36 +926,6 @@ def render_index_html() -> str:
       duffel: "Duffel"
     };
 
-    function demoUserId() {
-      const storageKey = "flight_hunter_demo_user_id";
-      const existing = window.localStorage.getItem(storageKey);
-      if (existing) return existing;
-      const generated = window.crypto && window.crypto.randomUUID
-        ? window.crypto.randomUUID()
-        : ["11111111", "1111", "4111", "8111", "111111111111"].join("-");
-      window.localStorage.setItem(storageKey, generated);
-      return generated;
-    }
-
-    function demoHouseholdId() {
-      const storageKey = "flight_hunter_demo_household_id";
-      const existing = window.localStorage.getItem(storageKey);
-      if (existing) return existing;
-      const generated = window.crypto && window.crypto.randomUUID
-        ? window.crypto.randomUUID()
-        : ["22222222", "2222", "4222", "8222", "222222222222"].join("-");
-      window.localStorage.setItem(storageKey, generated);
-      return generated;
-    }
-
-    function demoHeaders(extra = {}) {
-      return {
-        "X-Flight-Hunter-Household-Id": demoHouseholdId(),
-        "X-Flight-Hunter-User-Id": demoUserId(),
-        ...extra
-      };
-    }
-
     function sessionToken() {
       return window.localStorage.getItem(sessionTokenKey);
     }
@@ -968,7 +938,7 @@ def render_index_html() -> str:
           ...extra
         };
       }
-      return demoHeaders(extra);
+      return extra;
     }
 
     function storeSession(session) {
@@ -979,8 +949,26 @@ def render_index_html() -> str:
 
     function clearSession() {
       window.localStorage.removeItem(sessionTokenKey);
-      authState.textContent = "Session: demo headers";
+      authState.textContent = "Session: не выполнен вход";
       authSignoutButton.disabled = true;
+    }
+
+    function renderSignedOutState() {
+      watchList.innerHTML = '<div class="empty-state">Войдите, чтобы видеть отслеживания.</div>';
+      auditList.innerHTML = '<div class="empty-state">Войдите, чтобы видеть аудит.</div>';
+      renderSignedOutConfirmationState();
+    }
+
+    function renderSignedOutConfirmationState() {
+      confirmationList.innerHTML = '<div class="empty-state">Войдите, чтобы видеть подтверждения.</div>';
+    }
+
+    async function loadSessionBoundData() {
+      if (!sessionToken()) {
+        renderSignedOutState();
+        return;
+      }
+      await Promise.all([loadManualConfirmations(), loadWatches(), loadAuditEvents()]);
     }
 
     async function refreshSessionState() {
@@ -1026,8 +1014,7 @@ def render_index_html() -> str:
         storeSession(await response.json());
         authForm.reset();
         statusLine.textContent = "session active";
-        await loadWatches();
-        await loadAuditEvents();
+        await loadSessionBoundData();
       } catch (error) {
         authState.textContent = `Session: ${error.message}`;
       } finally {
@@ -2131,7 +2118,11 @@ def render_index_html() -> str:
         row.textContent = `${providerLabel(providerId)}: ${reasonLabel(denial.code)}`;
         denialsList.append(row);
       });
-      loadManualConfirmations();
+      if (sessionToken()) {
+        loadManualConfirmations();
+      } else {
+        renderSignedOutConfirmationState();
+      }
     }
 
     function renderLiveObservation(observation) {
@@ -2606,8 +2597,7 @@ def render_index_html() -> str:
     authSignoutButton.addEventListener("click", () => {
       clearSession();
       statusLine.textContent = "session cleared";
-      loadWatches();
-      loadAuditEvents();
+      renderSignedOutState();
     });
     personalObserveButton.addEventListener("click", runPersonalObservation);
     dealDiscoveryButton.addEventListener("click", runDealDiscovery);
@@ -2634,12 +2624,9 @@ def render_index_html() -> str:
     renderAgentActions([]);
     loadProviders();
     loadBrowserSources();
-    loadManualConfirmations();
-    loadWatches();
     loadAdminHealth();
-    loadAuditEvents();
     loadAgentPresets();
-    refreshSessionState();
+    refreshSessionState().then(loadSessionBoundData);
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
         navigator.serviceWorker.register("/service-worker.js").catch(() => {});
