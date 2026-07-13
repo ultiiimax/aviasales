@@ -4,6 +4,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
@@ -78,6 +79,9 @@ WatchMutationStatus = Literal[
     "not_found",
     "version_conflict",
 ]
+
+# Exactly 80% is accepted; lower full snapshots are rejected before mutation.
+MIN_OURAIRPORTS_SNAPSHOT_RETENTION_RATIO = Decimal("0.80")
 
 _BROWSER_ACTIVE_STATUSES = (
     ObservationStatus.RUNNING.value,
@@ -1807,6 +1811,8 @@ class AirportReferenceRepository:
         source: str = "ourairports",
     ) -> AirportImportRun:
         require_aware_datetime(imported_at, "imported_at")
+        if source == "ourairports" and batch.observed_iata_codes is not None:
+            await self._validate_ourairports_snapshot(batch)
         missing_evidence = tuple(
             airport.iata_code
             for airport in batch.airports
@@ -1852,14 +1858,25 @@ class AirportReferenceRepository:
                 airport.iata_code for airport in batch.airports if airport.is_searchable
             }
             filtered_codes = observed_codes - searchable_codes
-            stale_condition = or_(
+            stale_ourairports_condition = or_(
                 airports_table.c.iata_code.in_(filtered_codes),
                 airports_table.c.iata_code.not_in(observed_codes),
             )
             await self._session.execute(
                 update(airports_table)
-                .where(airports_table.c.commercial_provenance == "ourairports.scheduled_service")
-                .where(stale_condition)
+                .where(
+                    or_(
+                        and_(
+                            airports_table.c.commercial_provenance
+                            == "ourairports.scheduled_service",
+                            stale_ourairports_condition,
+                        ),
+                        and_(
+                            airports_table.c.commercial_provenance == "legacy_import_filter",
+                            airports_table.c.iata_code.in_(filtered_codes),
+                        ),
+                    )
+                )
                 .values(active=False, imported_at=imported_at)
             )
 
@@ -1881,6 +1898,28 @@ class AirportReferenceRepository:
             )
         )
         return import_run
+
+    async def _validate_ourairports_snapshot(self, batch: AirportImportBatch) -> None:
+        observed_iata_codes = batch.observed_iata_codes
+        assert observed_iata_codes is not None
+        if not observed_iata_codes:
+            raise ValueError("ourairports_snapshot_has_no_valid_iata")
+        if len(observed_iata_codes) > batch.rows_seen:
+            raise ValueError("ourairports_snapshot_observed_iata_exceeds_rows_seen")
+
+        result = await self._session.execute(
+            select(airport_import_runs_table.c.rows_seen)
+            .where(airport_import_runs_table.c.source == "ourairports")
+            .order_by(airport_import_runs_table.c.imported_at.desc())
+            .limit(1)
+        )
+        previous_rows_seen = result.scalar_one_or_none()
+        if (
+            previous_rows_seen is not None
+            and Decimal(batch.rows_seen)
+            < Decimal(previous_rows_seen) * MIN_OURAIRPORTS_SNAPSHOT_RETENTION_RATIO
+        ):
+            raise ValueError("ourairports_snapshot_retention_below_0.80")
 
     async def search(self, query: str, *, limit: int = 8) -> tuple[AirportSearchMatch, ...]:
         normalized_query = _normalize_airport_query(query)

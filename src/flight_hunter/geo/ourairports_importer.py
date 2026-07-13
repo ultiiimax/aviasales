@@ -11,6 +11,18 @@ _SEARCHABLE_TYPES = {
     AirportType.MEDIUM_AIRPORT.value,
 }
 _IATA_CODE_RE = re.compile(r"^[A-Z]{3}$")
+_REQUIRED_HEADERS = frozenset(
+    {
+        "type",
+        "name",
+        "latitude_deg",
+        "longitude_deg",
+        "iso_country",
+        "municipality",
+        "scheduled_service",
+        "iata_code",
+    }
+)
 
 
 class OurAirportsAirportImporter:
@@ -22,6 +34,11 @@ class OurAirportsAirportImporter:
 
         with source_path.open("r", encoding="utf-8", newline="") as csv_file:
             reader = csv.DictReader(csv_file)
+            missing_headers = sorted(_REQUIRED_HEADERS - set(reader.fieldnames or ()))
+            if missing_headers:
+                raise ValueError(
+                    "ourairports_csv_missing_required_headers: " + ", ".join(missing_headers)
+                )
             for row in reader:
                 rows_seen += 1
                 iata_code = row.get("iata_code", "").strip().upper()
@@ -31,6 +48,8 @@ class OurAirportsAirportImporter:
                 if airport is not None:
                     airports.append(airport)
 
+        if not observed_iata_codes:
+            raise ValueError("ourairports_snapshot_has_no_valid_iata")
         airports.sort(key=lambda airport: airport.iata_code)
         return AirportImportBatch(
             source_path=str(source_path),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from flight_hunter.geo.ourairports_importer import OurAirportsAirportImporter
 
 
@@ -38,3 +40,35 @@ def test_ourairports_importer_reads_searchable_iata_airports(tmp_path) -> None:
     assert {airport.commercial_provenance for airport in batch.airports} == {
         "ourairports.scheduled_service"
     }
+
+
+def test_ourairports_importer_rejects_missing_required_headers(tmp_path) -> None:
+    csv_path = tmp_path / "airports.csv"
+    csv_path.write_text(
+        "type,name,latitude_deg,longitude_deg,iso_country,municipality,iata_code\n"
+        "large_airport,Warsaw Chopin Airport,52.1657,20.9671,PL,Warsaw,WAW",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"^ourairports_csv_missing_required_headers: scheduled_service$",
+    ):
+        OurAirportsAirportImporter().read_airports(csv_path)
+
+
+def test_ourairports_importer_rejects_rows_without_any_valid_iata(tmp_path) -> None:
+    csv_path = tmp_path / "airports.csv"
+    csv_path.write_text(
+        "\n".join(
+            (
+                "type,name,latitude_deg,longitude_deg,iso_country,municipality,"
+                "scheduled_service,iata_code",
+                "large_airport,No IATA Airport,52.0,20.0,PL,Nowhere,yes,",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"^ourairports_snapshot_has_no_valid_iata$"):
+        OurAirportsAirportImporter().read_airports(csv_path)
