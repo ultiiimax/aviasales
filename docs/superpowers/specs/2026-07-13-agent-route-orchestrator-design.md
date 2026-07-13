@@ -218,6 +218,7 @@ draft --edit-------------------------> superseded + new draft
 awaiting_approval --edit-------------> superseded + new draft
 awaiting_approval --execute----------> consumed
 awaiting_approval -------------------> expired
+consumed/superseded/expired --clone--> unchanged old row + new draft
 ```
 
 POST initially writes a draft. The plan builder automatically finalizes it to
@@ -232,6 +233,12 @@ successor remains draft and returns clarification fields; a complete successor
 becomes awaiting approval and renders a new card. Existing runs continue to
 reference their immutable consumed revision. An awaiting revision expires
 after the configured plan TTL, initially 24 hours.
+
+Rerun/expansion uses an explicit clone operation, not PATCH. It accepts any
+visible terminal revision as `source_revision_id`, leaves that source unchanged,
+writes a new draft under the same plan aggregate, refreshes catalog/capability/
+cost-model inputs, applies optional edits such as `quick → full`, and runs the
+same automatic finalize step. The new revision requires a new execute click.
 
 ### 5.3 Approval and run lifecycle
 
@@ -651,6 +658,7 @@ Proposed endpoints:
 POST   /api/v1/agent/search-plans
 GET    /api/v1/agent/search-plans/{plan_id}
 PATCH  /api/v1/agent/search-plans/{plan_id}
+POST   /api/v1/agent/search-plans/{plan_id}/revisions
 POST   /api/v1/agent/search-plans/{plan_id}/execute
 GET    /api/v1/agent/search-plans/{plan_id}/runs
 GET    /api/v1/agent/search-plans/{plan_id}/runs/{run_id}
@@ -669,6 +677,11 @@ exact hidden-city warning version when applicable. It records a single-use
 approval and queues the run atomically. Repeating the same idempotency key
 returns the original run; a different key against a consumed revision is
 rejected and requires a refreshed revision/approval.
+
+`POST .../{plan_id}/revisions` is that refresh path. It requires
+`source_revision_id`, may include typed edits, clones even a consumed/expired
+revision into a new draft, refreshes frozen volatile inputs, and never reuses an
+old approval. It is the only rerun path after a terminal run.
 
 `POST /api/v1/agent/chat/turn` remains compatible but returns a proposed plan
 reference instead of executing live searches. `/api/v1/agent/plan` and presets
@@ -793,6 +806,8 @@ household isolation failures.
 - execute idempotency prevents duplicate runs;
 - consumed approval cannot start a different run and rerun requires a new
   revision/approval;
+- cloning a consumed/expired revision creates a refreshed successor without
+  mutating the source and can be executed only after a new approval;
 - plan version mismatch rejects stale approval;
 - concurrent edit supersedes the old revision without mutating its run;
 - cancel targets an explicit run and latest-run ordering is deterministic;
