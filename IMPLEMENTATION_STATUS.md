@@ -16,7 +16,30 @@ This file is maintained by coding agents. Mark a slice done only after implement
 | Skyscanner Live | contract only | none | no | no | no | 2026-06-23 |
 | Duffel | contract only | none | no | no | no | 2026-06-23 |
 
-## Current Slice: Local v1 Release
+## Current Slice: Agent Route Orchestrator
+
+- Goal: turn the plan-only assistant into an approval-gated, durable,
+  provider-backed route-search agent for arbitrary airport/city/country/region/
+  anywhere requests and all supported flight trip shapes.
+- Design:
+  `docs/superpowers/specs/2026-07-13-agent-route-orchestrator-design.md`.
+- Execution plan:
+  `docs/superpowers/plans/2026-07-13-agent-route-orchestrator.md`.
+- Progress:
+  - [ ] Add provider-neutral intent, evidence and plan contracts.
+  - [ ] Freeze generic geographic scopes and estimate bounded provider work.
+  - [ ] Persist immutable revisions, approvals, runs and operation ledger.
+  - [ ] Expose the plan lifecycle and approval-gated web flow.
+  - [ ] Execute resumable Aviasales calendar/exact work in the worker.
+  - [ ] Compose and rank split, self-transfer, open-jaw and multi-city routes.
+  - [ ] Isolate hidden-city research behind a second acknowledgement.
+  - [ ] Add evidence-gated buy timing, anomaly and currency analysis.
+  - [ ] Pass browser, recovery, migration, security and release gates.
+
+Planning status on 2026-07-13: the user-approved design and reviewed
+implementation plan are complete; production implementation has not started.
+
+## Previous Slice: Local v1 Release
 
 - Goal: ship a reliable single-machine v1 without rebuilding the project around
   `MEGA_PROMPT.md`.
