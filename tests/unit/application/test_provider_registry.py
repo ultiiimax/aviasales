@@ -54,3 +54,22 @@ def test_default_registry_search_candidates_include_enabled_demo_provider_only()
     candidates = registry.search_candidates(provider_ids=None)
 
     assert [candidate.policy.provider_id for candidate in candidates] == ["fake"]
+
+
+def test_legacy_aviasales_policy_does_not_advertise_native_multi_city() -> None:
+    registry = ProviderRegistry.default(
+        clock=lambda: NOW,
+        settings=AppSettings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            aviasales_search_enabled=False,
+            aviasales_search_signature=None,
+            aviasales_search_marker=None,
+            aviasales_search_internal_rpm=20,
+            telegram_enabled=False,
+            telegram_webhook_secret=None,
+        ),
+    )
+
+    (candidate,) = registry.planning_candidates(("aviasales_search",))
+
+    assert candidate.policy.supports_multi_city is False

@@ -28,6 +28,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
 - Progress:
   - [x] Add provider-neutral intent, evidence and plan contracts.
   - [x] Freeze generic geographic scopes with commercial provenance.
+  - [x] Parse typed intents, freeze provider capabilities and estimate bounded plans.
   - [ ] Persist immutable revisions, approvals, runs and operation ledger.
   - [ ] Expose the plan lifecycle and approval-gated web flow.
   - [ ] Execute resumable Aviasales calendar/exact work in the worker.
@@ -46,6 +47,18 @@ Task 2 verification on 2026-07-13: 14 focused scope/import/repository/migration
 tests, 2 migration baseline/pre-v1 upgrade tests and 10 geo/airport regressions
 pass. Focused mypy and global Ruff format/check pass. The built wheel contains
 both versioned taxonomy JSON resources.
+
+Task 3 slice plan/result: add deterministic RU/EN intent parsing with a typed,
+field-limited optional model overlay; publish the verified Aviasales tri-state
+capability/cost snapshot; estimate logical operations and every worst-case HTTP
+attempt before approval; add positive bounded agent settings and keep the legacy
+multi-city boolean conservative. Completed test-first without provider calls.
+
+Task 3 verification on 2026-07-14: 53 focused parser/capability/planning/
+registry/config/env tests, 23 Task 1/2/preset regressions and all 593 unit tests
+pass. Focused mypy and global Ruff format/check pass. Rolling 90-day bounds use
+the injected plan-builder clock; quick 60, full 240 and absolute 1,000 boundaries
+are covered.
 
 Implementation status on 2026-07-13: the user-approved design and reviewed
 implementation plan are complete. Production implementation now includes the

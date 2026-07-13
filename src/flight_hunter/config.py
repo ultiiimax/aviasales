@@ -56,6 +56,18 @@ class AppSettings:
     agent_openai_enabled: bool = False
     agent_openai_model: str = "gpt-5.5"
     agent_openai_timeout_seconds: int = 8
+    agent_plan_ttl_seconds: int = 86_400
+    agent_quick_logical_limit: int = 60
+    agent_quick_calendar_limit: int = 40
+    agent_quick_exact_limit: int = 20
+    agent_full_logical_limit: int = 240
+    agent_absolute_logical_limit: int = 1_000
+    agent_quick_deadline_seconds: int = 600
+    agent_full_deadline_seconds: int = 1_800
+    agent_operation_lease_seconds: int = 120
+    agent_max_layover_seconds: int = 64_800
+    agent_provider_circuit_failure_threshold: int = 5
+    agent_provider_circuit_cooldown_seconds: int = 120
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com"
     scraping_observer_enabled: bool = False
@@ -118,6 +130,38 @@ class AppSettings:
     watch_alert_drop_threshold_percent: int = 10
     watch_alert_cooldown_seconds: int = 21_600
 
+    def __post_init__(self) -> None:
+        agent_positive_settings = {
+            "agent_plan_ttl_seconds": self.agent_plan_ttl_seconds,
+            "agent_quick_logical_limit": self.agent_quick_logical_limit,
+            "agent_quick_calendar_limit": self.agent_quick_calendar_limit,
+            "agent_quick_exact_limit": self.agent_quick_exact_limit,
+            "agent_full_logical_limit": self.agent_full_logical_limit,
+            "agent_absolute_logical_limit": self.agent_absolute_logical_limit,
+            "agent_quick_deadline_seconds": self.agent_quick_deadline_seconds,
+            "agent_full_deadline_seconds": self.agent_full_deadline_seconds,
+            "agent_operation_lease_seconds": self.agent_operation_lease_seconds,
+            "agent_max_layover_seconds": self.agent_max_layover_seconds,
+            "agent_provider_circuit_failure_threshold": (
+                self.agent_provider_circuit_failure_threshold
+            ),
+            "agent_provider_circuit_cooldown_seconds": (
+                self.agent_provider_circuit_cooldown_seconds
+            ),
+        }
+        for field_name, value in agent_positive_settings.items():
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{field_name} must be positive")
+        bounded_defaults = {
+            "agent_quick_logical_limit": self.agent_quick_logical_limit,
+            "agent_quick_calendar_limit": self.agent_quick_calendar_limit,
+            "agent_quick_exact_limit": self.agent_quick_exact_limit,
+            "agent_full_logical_limit": self.agent_full_logical_limit,
+        }
+        for field_name, value in bounded_defaults.items():
+            if value > self.agent_absolute_logical_limit:
+                raise ValueError(f"{field_name} cannot exceed the absolute logical limit")
+
     @classmethod
     def from_env(cls) -> AppSettings:
         return cls(
@@ -148,6 +192,39 @@ class AppSettings:
             agent_openai_timeout_seconds=_env_int(
                 "AGENT_OPENAI_TIMEOUT_SECONDS",
                 default=8,
+            ),
+            agent_plan_ttl_seconds=_env_int("AGENT_PLAN_TTL_SECONDS", default=86_400),
+            agent_quick_logical_limit=_env_int("AGENT_QUICK_LOGICAL_LIMIT", default=60),
+            agent_quick_calendar_limit=_env_int("AGENT_QUICK_CALENDAR_LIMIT", default=40),
+            agent_quick_exact_limit=_env_int("AGENT_QUICK_EXACT_LIMIT", default=20),
+            agent_full_logical_limit=_env_int("AGENT_FULL_LOGICAL_LIMIT", default=240),
+            agent_absolute_logical_limit=_env_int(
+                "AGENT_ABSOLUTE_LOGICAL_LIMIT",
+                default=1_000,
+            ),
+            agent_quick_deadline_seconds=_env_int(
+                "AGENT_QUICK_DEADLINE_SECONDS",
+                default=600,
+            ),
+            agent_full_deadline_seconds=_env_int(
+                "AGENT_FULL_DEADLINE_SECONDS",
+                default=1_800,
+            ),
+            agent_operation_lease_seconds=_env_int(
+                "AGENT_OPERATION_LEASE_SECONDS",
+                default=120,
+            ),
+            agent_max_layover_seconds=_env_int(
+                "AGENT_MAX_LAYOVER_SECONDS",
+                default=64_800,
+            ),
+            agent_provider_circuit_failure_threshold=_env_int(
+                "AGENT_PROVIDER_CIRCUIT_FAILURE_THRESHOLD",
+                default=5,
+            ),
+            agent_provider_circuit_cooldown_seconds=_env_int(
+                "AGENT_PROVIDER_CIRCUIT_COOLDOWN_SECONDS",
+                default=120,
             ),
             openai_api_key=_env_optional("OPENAI_API_KEY"),
             openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com"),

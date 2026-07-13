@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from flight_hunter.config import AppSettings, load_env_file
 
 
@@ -150,3 +152,52 @@ def test_settings_default_carrier_links_include_extended_confirmation_sources() 
         "etihad",
         "flydubai",
     }.issubset(settings.carrier_links_enabled)
+
+
+def test_agent_planning_settings_have_bounded_defaults() -> None:
+    settings = AppSettings.from_env()
+
+    assert settings.agent_plan_ttl_seconds == 86_400
+    assert settings.agent_quick_logical_limit == 60
+    assert settings.agent_quick_calendar_limit == 40
+    assert settings.agent_quick_exact_limit == 20
+    assert settings.agent_full_logical_limit == 240
+    assert settings.agent_absolute_logical_limit == 1_000
+    assert settings.agent_quick_deadline_seconds == 600
+    assert settings.agent_full_deadline_seconds == 1_800
+    assert settings.agent_operation_lease_seconds == 120
+    assert settings.agent_max_layover_seconds == 64_800
+    assert settings.agent_provider_circuit_failure_threshold == 5
+    assert settings.agent_provider_circuit_cooldown_seconds == 120
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "AGENT_PLAN_TTL_SECONDS",
+        "AGENT_QUICK_LOGICAL_LIMIT",
+        "AGENT_QUICK_CALENDAR_LIMIT",
+        "AGENT_QUICK_EXACT_LIMIT",
+        "AGENT_FULL_LOGICAL_LIMIT",
+        "AGENT_ABSOLUTE_LOGICAL_LIMIT",
+        "AGENT_QUICK_DEADLINE_SECONDS",
+        "AGENT_FULL_DEADLINE_SECONDS",
+        "AGENT_OPERATION_LEASE_SECONDS",
+        "AGENT_MAX_LAYOVER_SECONDS",
+        "AGENT_PROVIDER_CIRCUIT_FAILURE_THRESHOLD",
+        "AGENT_PROVIDER_CIRCUIT_COOLDOWN_SECONDS",
+    ),
+)
+def test_agent_planning_settings_reject_non_positive_values(monkeypatch, name: str) -> None:
+    monkeypatch.setenv(name, "0")
+
+    with pytest.raises(ValueError, match="must be positive"):
+        AppSettings.from_env()
+
+
+@pytest.mark.parametrize("name", ("AGENT_QUICK_LOGICAL_LIMIT", "AGENT_FULL_LOGICAL_LIMIT"))
+def test_agent_default_budget_cannot_exceed_absolute_ceiling(monkeypatch, name: str) -> None:
+    monkeypatch.setenv(name, "1001")
+
+    with pytest.raises(ValueError, match="absolute logical limit"):
+        AppSettings.from_env()
