@@ -81,6 +81,9 @@ def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
             row[1]
             for row in connection.execute("pragma table_info(deal_discovery_jobs)").fetchall()
         }
+        airport_columns = {
+            row[1] for row in connection.execute("pragma table_info(airports)").fetchall()
+        }
 
     assert {
         "watches",
@@ -199,3 +202,49 @@ def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
         "search_intent_json",
         "result_count",
     }.issubset(deal_discovery_job_columns)
+    assert {"scheduled_service", "commercial_provenance"}.issubset(airport_columns)
+
+
+def test_airport_commercial_migration_backfills_legacy_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "airport-commercial-upgrade.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path.as_posix()}")
+    command.upgrade(config, "0021_worker_drain_control")
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            insert into airports (
+                iata_code, name, municipality, country_code, latitude, longitude,
+                airport_type, active, keywords, imported_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "WAW",
+                "Warsaw Chopin Airport",
+                "Warsaw",
+                "PL",
+                52.1657,
+                20.9671,
+                "large_airport",
+                1,
+                "",
+                "2026-07-13 12:00:00+00:00",
+            ),
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "select scheduled_service, commercial_provenance from airports where iata_code = ?",
+            ("WAW",),
+        ).fetchone()
+        columns = {
+            item[1]: item for item in connection.execute("pragma table_info(airports)").fetchall()
+        }
+
+    assert row == (1, "legacy_import_filter")
+    assert columns["scheduled_service"][3] == 1
+    assert columns["commercial_provenance"][3] == 1

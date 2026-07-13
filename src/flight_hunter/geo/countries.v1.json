@@ -1,0 +1,1348 @@
+{
+  "version": "countries-v1-2026-07-13",
+  "source": {
+    "iso_3166_1": {
+      "standard": "ISO 3166-1:2020",
+      "status": "confirmed-current-2025",
+      "authority_url": "https://www.iso.org/standard/72482.html",
+      "online_register_url": "https://www.iso.org/obp/ui/#iso:pub:PUB500001:en"
+    },
+    "unicode_cldr": {
+      "version": "48.2",
+      "json_release": "48.2.0",
+      "release_date": "2026-03-17",
+      "release_url": "https://cldr.unicode.org/downloads/cldr-48",
+      "english_territories_url": "https://raw.githubusercontent.com/unicode-org/cldr-json/48.2.0/cldr-json/cldr-localenames-full/main/en/territories.json",
+      "english_territories_sha256": "158c1d575308f7e46912edbeda435c8fe2ef5dad280798231f3a432e406b1807",
+      "russian_territories_url": "https://raw.githubusercontent.com/unicode-org/cldr-json/48.2.0/cldr-json/cldr-localenames-full/main/ru/territories.json",
+      "russian_territories_sha256": "305ba1f9eecb1b0151ab081a111aaa8a5898d38c9d57bfbfa125734e508a2389",
+      "region_validity_url": "https://raw.githubusercontent.com/unicode-org/cldr/release-48-2/common/validity/region.xml",
+      "region_validity_sha256": "e751e0eedd46b52c38f3cdb72b0fab61ac8b48e052e8b28ba74b6ac26c4c8cb1"
+    },
+    "code_selection": {
+      "rule": "CLDR regular alpha-2 regions minus non-ISO reservations",
+      "excluded_non_iso_codes": [
+        "AC",
+        "CP",
+        "DG",
+        "EA",
+        "IC",
+        "TA",
+        "XK"
+      ]
+    },
+    "project_aliases_version": "country-aliases-v1-2026-07-13",
+    "imported_at": "2026-07-13",
+    "entry_count": 250,
+    "import_checksum_sha256": "f4ce7a89f2bc896faf8c8e92f05633775b83510cf59d570816efedecacbea6ba"
+  },
+  "countries": {
+    "AD": {
+      "en": "Andorra",
+      "ru": "Андорра",
+      "aliases": []
+    },
+    "AE": {
+      "en": "United Arab Emirates",
+      "ru": "ОАЭ",
+      "aliases": []
+    },
+    "AF": {
+      "en": "Afghanistan",
+      "ru": "Афганистан",
+      "aliases": []
+    },
+    "AG": {
+      "en": "Antigua & Barbuda",
+      "ru": "Антигуа и Барбуда",
+      "aliases": []
+    },
+    "AI": {
+      "en": "Anguilla",
+      "ru": "Ангилья",
+      "aliases": []
+    },
+    "AL": {
+      "en": "Albania",
+      "ru": "Албания",
+      "aliases": []
+    },
+    "AM": {
+      "en": "Armenia",
+      "ru": "Армения",
+      "aliases": []
+    },
+    "AO": {
+      "en": "Angola",
+      "ru": "Ангола",
+      "aliases": []
+    },
+    "AQ": {
+      "en": "Antarctica",
+      "ru": "Антарктида",
+      "aliases": []
+    },
+    "AR": {
+      "en": "Argentina",
+      "ru": "Аргентина",
+      "aliases": []
+    },
+    "AS": {
+      "en": "American Samoa",
+      "ru": "Американское Самоа",
+      "aliases": []
+    },
+    "AT": {
+      "en": "Austria",
+      "ru": "Австрия",
+      "aliases": []
+    },
+    "AU": {
+      "en": "Australia",
+      "ru": "Австралия",
+      "aliases": []
+    },
+    "AW": {
+      "en": "Aruba",
+      "ru": "Аруба",
+      "aliases": []
+    },
+    "AX": {
+      "en": "Åland Islands",
+      "ru": "Аландские о-ва",
+      "aliases": []
+    },
+    "AZ": {
+      "en": "Azerbaijan",
+      "ru": "Азербайджан",
+      "aliases": []
+    },
+    "BA": {
+      "en": "Bosnia & Herzegovina",
+      "ru": "Босния и Герцеговина",
+      "aliases": [
+        "Bosnia"
+      ]
+    },
+    "BB": {
+      "en": "Barbados",
+      "ru": "Барбадос",
+      "aliases": []
+    },
+    "BD": {
+      "en": "Bangladesh",
+      "ru": "Бангладеш",
+      "aliases": []
+    },
+    "BE": {
+      "en": "Belgium",
+      "ru": "Бельгия",
+      "aliases": []
+    },
+    "BF": {
+      "en": "Burkina Faso",
+      "ru": "Буркина-Фасо",
+      "aliases": []
+    },
+    "BG": {
+      "en": "Bulgaria",
+      "ru": "Болгария",
+      "aliases": []
+    },
+    "BH": {
+      "en": "Bahrain",
+      "ru": "Бахрейн",
+      "aliases": []
+    },
+    "BI": {
+      "en": "Burundi",
+      "ru": "Бурунди",
+      "aliases": []
+    },
+    "BJ": {
+      "en": "Benin",
+      "ru": "Бенин",
+      "aliases": []
+    },
+    "BL": {
+      "en": "St. Barthélemy",
+      "ru": "Сен-Бартелеми",
+      "aliases": []
+    },
+    "BM": {
+      "en": "Bermuda",
+      "ru": "Бермудские о-ва",
+      "aliases": []
+    },
+    "BN": {
+      "en": "Brunei",
+      "ru": "Бруней",
+      "aliases": []
+    },
+    "BO": {
+      "en": "Bolivia",
+      "ru": "Боливия",
+      "aliases": []
+    },
+    "BQ": {
+      "en": "Caribbean Netherlands",
+      "ru": "Бонэйр, Синт-Эстатиус и Саба",
+      "aliases": []
+    },
+    "BR": {
+      "en": "Brazil",
+      "ru": "Бразилия",
+      "aliases": []
+    },
+    "BS": {
+      "en": "Bahamas",
+      "ru": "Багамы",
+      "aliases": []
+    },
+    "BT": {
+      "en": "Bhutan",
+      "ru": "Бутан",
+      "aliases": []
+    },
+    "BV": {
+      "en": "Bouvet Island",
+      "ru": "о-в Буве",
+      "aliases": []
+    },
+    "BW": {
+      "en": "Botswana",
+      "ru": "Ботсвана",
+      "aliases": []
+    },
+    "BY": {
+      "en": "Belarus",
+      "ru": "Беларусь",
+      "aliases": []
+    },
+    "BZ": {
+      "en": "Belize",
+      "ru": "Белиз",
+      "aliases": []
+    },
+    "CA": {
+      "en": "Canada",
+      "ru": "Канада",
+      "aliases": []
+    },
+    "CC": {
+      "en": "Cocos (Keeling) Islands",
+      "ru": "Кокосовые о-ва",
+      "aliases": [
+        "Cocos Islands"
+      ]
+    },
+    "CD": {
+      "en": "Congo - Kinshasa",
+      "ru": "Конго - Киншаса",
+      "aliases": [
+        "Congo",
+        "Congo (DRC)",
+        "Конго",
+        "Конго (ДРК)"
+      ]
+    },
+    "CF": {
+      "en": "Central African Republic",
+      "ru": "Центрально-Африканская Республика",
+      "aliases": []
+    },
+    "CG": {
+      "en": "Congo - Brazzaville",
+      "ru": "Конго - Браззавиль",
+      "aliases": [
+        "Congo",
+        "Congo (Republic)",
+        "Конго",
+        "Республика Конго"
+      ]
+    },
+    "CH": {
+      "en": "Switzerland",
+      "ru": "Швейцария",
+      "aliases": []
+    },
+    "CI": {
+      "en": "Côte d’Ivoire",
+      "ru": "Кот-д’Ивуар",
+      "aliases": [
+        "Ivory Coast"
+      ]
+    },
+    "CK": {
+      "en": "Cook Islands",
+      "ru": "о-ва Кука",
+      "aliases": []
+    },
+    "CL": {
+      "en": "Chile",
+      "ru": "Чили",
+      "aliases": []
+    },
+    "CM": {
+      "en": "Cameroon",
+      "ru": "Камерун",
+      "aliases": []
+    },
+    "CN": {
+      "en": "China",
+      "ru": "Китай",
+      "aliases": []
+    },
+    "CO": {
+      "en": "Colombia",
+      "ru": "Колумбия",
+      "aliases": []
+    },
+    "CQ": {
+      "en": "Sark",
+      "ru": "Сарк",
+      "aliases": []
+    },
+    "CR": {
+      "en": "Costa Rica",
+      "ru": "Коста-Рика",
+      "aliases": []
+    },
+    "CU": {
+      "en": "Cuba",
+      "ru": "Куба",
+      "aliases": []
+    },
+    "CV": {
+      "en": "Cape Verde",
+      "ru": "Кабо-Верде",
+      "aliases": [
+        "Cabo Verde"
+      ]
+    },
+    "CW": {
+      "en": "Curaçao",
+      "ru": "Кюрасао",
+      "aliases": []
+    },
+    "CX": {
+      "en": "Christmas Island",
+      "ru": "о-в Рождества",
+      "aliases": []
+    },
+    "CY": {
+      "en": "Cyprus",
+      "ru": "Кипр",
+      "aliases": []
+    },
+    "CZ": {
+      "en": "Czechia",
+      "ru": "Чехия",
+      "aliases": [
+        "Czech Republic",
+        "Чешская Республика"
+      ]
+    },
+    "DE": {
+      "en": "Germany",
+      "ru": "Германия",
+      "aliases": []
+    },
+    "DJ": {
+      "en": "Djibouti",
+      "ru": "Джибути",
+      "aliases": []
+    },
+    "DK": {
+      "en": "Denmark",
+      "ru": "Дания",
+      "aliases": []
+    },
+    "DM": {
+      "en": "Dominica",
+      "ru": "Доминика",
+      "aliases": []
+    },
+    "DO": {
+      "en": "Dominican Republic",
+      "ru": "Доминиканская Республика",
+      "aliases": []
+    },
+    "DZ": {
+      "en": "Algeria",
+      "ru": "Алжир",
+      "aliases": []
+    },
+    "EC": {
+      "en": "Ecuador",
+      "ru": "Эквадор",
+      "aliases": []
+    },
+    "EE": {
+      "en": "Estonia",
+      "ru": "Эстония",
+      "aliases": []
+    },
+    "EG": {
+      "en": "Egypt",
+      "ru": "Египет",
+      "aliases": []
+    },
+    "EH": {
+      "en": "Western Sahara",
+      "ru": "Западная Сахара",
+      "aliases": []
+    },
+    "ER": {
+      "en": "Eritrea",
+      "ru": "Эритрея",
+      "aliases": []
+    },
+    "ES": {
+      "en": "Spain",
+      "ru": "Испания",
+      "aliases": []
+    },
+    "ET": {
+      "en": "Ethiopia",
+      "ru": "Эфиопия",
+      "aliases": []
+    },
+    "FI": {
+      "en": "Finland",
+      "ru": "Финляндия",
+      "aliases": []
+    },
+    "FJ": {
+      "en": "Fiji",
+      "ru": "Фиджи",
+      "aliases": []
+    },
+    "FK": {
+      "en": "Falkland Islands",
+      "ru": "Фолклендские о-ва",
+      "aliases": [
+        "Falkland Islands (Islas Malvinas)",
+        "Фолклендские (Мальвинские) о-ва"
+      ]
+    },
+    "FM": {
+      "en": "Micronesia",
+      "ru": "Федеративные Штаты Микронезии",
+      "aliases": []
+    },
+    "FO": {
+      "en": "Faroe Islands",
+      "ru": "Фарерские о-ва",
+      "aliases": []
+    },
+    "FR": {
+      "en": "France",
+      "ru": "Франция",
+      "aliases": []
+    },
+    "GA": {
+      "en": "Gabon",
+      "ru": "Габон",
+      "aliases": []
+    },
+    "GB": {
+      "en": "United Kingdom",
+      "ru": "Великобритания",
+      "aliases": [
+        "UK",
+        "Британия"
+      ]
+    },
+    "GD": {
+      "en": "Grenada",
+      "ru": "Гренада",
+      "aliases": []
+    },
+    "GE": {
+      "en": "Georgia",
+      "ru": "Грузия",
+      "aliases": []
+    },
+    "GF": {
+      "en": "French Guiana",
+      "ru": "Французская Гвиана",
+      "aliases": []
+    },
+    "GG": {
+      "en": "Guernsey",
+      "ru": "Гернси",
+      "aliases": []
+    },
+    "GH": {
+      "en": "Ghana",
+      "ru": "Гана",
+      "aliases": []
+    },
+    "GI": {
+      "en": "Gibraltar",
+      "ru": "Гибралтар",
+      "aliases": []
+    },
+    "GL": {
+      "en": "Greenland",
+      "ru": "Гренландия",
+      "aliases": []
+    },
+    "GM": {
+      "en": "Gambia",
+      "ru": "Гамбия",
+      "aliases": []
+    },
+    "GN": {
+      "en": "Guinea",
+      "ru": "Гвинея",
+      "aliases": []
+    },
+    "GP": {
+      "en": "Guadeloupe",
+      "ru": "Гваделупа",
+      "aliases": []
+    },
+    "GQ": {
+      "en": "Equatorial Guinea",
+      "ru": "Экваториальная Гвинея",
+      "aliases": []
+    },
+    "GR": {
+      "en": "Greece",
+      "ru": "Греция",
+      "aliases": []
+    },
+    "GS": {
+      "en": "South Georgia & South Sandwich Islands",
+      "ru": "Южная Георгия и Южные Сандвичевы о-ва",
+      "aliases": []
+    },
+    "GT": {
+      "en": "Guatemala",
+      "ru": "Гватемала",
+      "aliases": []
+    },
+    "GU": {
+      "en": "Guam",
+      "ru": "Гуам",
+      "aliases": []
+    },
+    "GW": {
+      "en": "Guinea-Bissau",
+      "ru": "Гвинея-Бисау",
+      "aliases": []
+    },
+    "GY": {
+      "en": "Guyana",
+      "ru": "Гайана",
+      "aliases": []
+    },
+    "HK": {
+      "en": "Hong Kong SAR China",
+      "ru": "Гонконг (САР)",
+      "aliases": [
+        "Hong Kong",
+        "Гонконг"
+      ]
+    },
+    "HM": {
+      "en": "Heard & McDonald Islands",
+      "ru": "о-ва Херд и Макдональд",
+      "aliases": []
+    },
+    "HN": {
+      "en": "Honduras",
+      "ru": "Гондурас",
+      "aliases": []
+    },
+    "HR": {
+      "en": "Croatia",
+      "ru": "Хорватия",
+      "aliases": []
+    },
+    "HT": {
+      "en": "Haiti",
+      "ru": "Гаити",
+      "aliases": []
+    },
+    "HU": {
+      "en": "Hungary",
+      "ru": "Венгрия",
+      "aliases": []
+    },
+    "ID": {
+      "en": "Indonesia",
+      "ru": "Индонезия",
+      "aliases": []
+    },
+    "IE": {
+      "en": "Ireland",
+      "ru": "Ирландия",
+      "aliases": []
+    },
+    "IL": {
+      "en": "Israel",
+      "ru": "Израиль",
+      "aliases": []
+    },
+    "IM": {
+      "en": "Isle of Man",
+      "ru": "о-в Мэн",
+      "aliases": []
+    },
+    "IN": {
+      "en": "India",
+      "ru": "Индия",
+      "aliases": []
+    },
+    "IO": {
+      "en": "British Indian Ocean Territory",
+      "ru": "Британская территория в Индийском океане",
+      "aliases": [
+        "Chagos Archipelago",
+        "архипелаг Чагос"
+      ]
+    },
+    "IQ": {
+      "en": "Iraq",
+      "ru": "Ирак",
+      "aliases": []
+    },
+    "IR": {
+      "en": "Iran",
+      "ru": "Иран",
+      "aliases": []
+    },
+    "IS": {
+      "en": "Iceland",
+      "ru": "Исландия",
+      "aliases": []
+    },
+    "IT": {
+      "en": "Italy",
+      "ru": "Италия",
+      "aliases": []
+    },
+    "JE": {
+      "en": "Jersey",
+      "ru": "Джерси",
+      "aliases": []
+    },
+    "JM": {
+      "en": "Jamaica",
+      "ru": "Ямайка",
+      "aliases": []
+    },
+    "JO": {
+      "en": "Jordan",
+      "ru": "Иордания",
+      "aliases": []
+    },
+    "JP": {
+      "en": "Japan",
+      "ru": "Япония",
+      "aliases": []
+    },
+    "KE": {
+      "en": "Kenya",
+      "ru": "Кения",
+      "aliases": []
+    },
+    "KG": {
+      "en": "Kyrgyzstan",
+      "ru": "Киргизия",
+      "aliases": []
+    },
+    "KH": {
+      "en": "Cambodia",
+      "ru": "Камбоджа",
+      "aliases": []
+    },
+    "KI": {
+      "en": "Kiribati",
+      "ru": "Кирибати",
+      "aliases": []
+    },
+    "KM": {
+      "en": "Comoros",
+      "ru": "Коморы",
+      "aliases": []
+    },
+    "KN": {
+      "en": "St. Kitts & Nevis",
+      "ru": "Сент-Китс и Невис",
+      "aliases": []
+    },
+    "KP": {
+      "en": "North Korea",
+      "ru": "КНДР",
+      "aliases": []
+    },
+    "KR": {
+      "en": "South Korea",
+      "ru": "Республика Корея",
+      "aliases": []
+    },
+    "KW": {
+      "en": "Kuwait",
+      "ru": "Кувейт",
+      "aliases": []
+    },
+    "KY": {
+      "en": "Cayman Islands",
+      "ru": "о-ва Кайман",
+      "aliases": []
+    },
+    "KZ": {
+      "en": "Kazakhstan",
+      "ru": "Казахстан",
+      "aliases": []
+    },
+    "LA": {
+      "en": "Laos",
+      "ru": "Лаос",
+      "aliases": []
+    },
+    "LB": {
+      "en": "Lebanon",
+      "ru": "Ливан",
+      "aliases": []
+    },
+    "LC": {
+      "en": "St. Lucia",
+      "ru": "Сент-Люсия",
+      "aliases": []
+    },
+    "LI": {
+      "en": "Liechtenstein",
+      "ru": "Лихтенштейн",
+      "aliases": []
+    },
+    "LK": {
+      "en": "Sri Lanka",
+      "ru": "Шри-Ланка",
+      "aliases": []
+    },
+    "LR": {
+      "en": "Liberia",
+      "ru": "Либерия",
+      "aliases": []
+    },
+    "LS": {
+      "en": "Lesotho",
+      "ru": "Лесото",
+      "aliases": []
+    },
+    "LT": {
+      "en": "Lithuania",
+      "ru": "Литва",
+      "aliases": []
+    },
+    "LU": {
+      "en": "Luxembourg",
+      "ru": "Люксембург",
+      "aliases": []
+    },
+    "LV": {
+      "en": "Latvia",
+      "ru": "Латвия",
+      "aliases": []
+    },
+    "LY": {
+      "en": "Libya",
+      "ru": "Ливия",
+      "aliases": []
+    },
+    "MA": {
+      "en": "Morocco",
+      "ru": "Марокко",
+      "aliases": []
+    },
+    "MC": {
+      "en": "Monaco",
+      "ru": "Монако",
+      "aliases": []
+    },
+    "MD": {
+      "en": "Moldova",
+      "ru": "Молдова",
+      "aliases": []
+    },
+    "ME": {
+      "en": "Montenegro",
+      "ru": "Черногория",
+      "aliases": []
+    },
+    "MF": {
+      "en": "St. Martin",
+      "ru": "Сен-Мартен",
+      "aliases": []
+    },
+    "MG": {
+      "en": "Madagascar",
+      "ru": "Мадагаскар",
+      "aliases": []
+    },
+    "MH": {
+      "en": "Marshall Islands",
+      "ru": "Маршалловы о-ва",
+      "aliases": []
+    },
+    "MK": {
+      "en": "North Macedonia",
+      "ru": "Северная Македония",
+      "aliases": []
+    },
+    "ML": {
+      "en": "Mali",
+      "ru": "Мали",
+      "aliases": []
+    },
+    "MM": {
+      "en": "Myanmar (Burma)",
+      "ru": "Мьянма (Бирма)",
+      "aliases": [
+        "Myanmar"
+      ]
+    },
+    "MN": {
+      "en": "Mongolia",
+      "ru": "Монголия",
+      "aliases": []
+    },
+    "MO": {
+      "en": "Macao SAR China",
+      "ru": "Макао (САР)",
+      "aliases": [
+        "Macao",
+        "Макао"
+      ]
+    },
+    "MP": {
+      "en": "Northern Mariana Islands",
+      "ru": "Северные Марианские о-ва",
+      "aliases": []
+    },
+    "MQ": {
+      "en": "Martinique",
+      "ru": "Мартиника",
+      "aliases": []
+    },
+    "MR": {
+      "en": "Mauritania",
+      "ru": "Мавритания",
+      "aliases": []
+    },
+    "MS": {
+      "en": "Montserrat",
+      "ru": "Монтсеррат",
+      "aliases": []
+    },
+    "MT": {
+      "en": "Malta",
+      "ru": "Мальта",
+      "aliases": []
+    },
+    "MU": {
+      "en": "Mauritius",
+      "ru": "Маврикий",
+      "aliases": []
+    },
+    "MV": {
+      "en": "Maldives",
+      "ru": "Мальдивы",
+      "aliases": []
+    },
+    "MW": {
+      "en": "Malawi",
+      "ru": "Малави",
+      "aliases": []
+    },
+    "MX": {
+      "en": "Mexico",
+      "ru": "Мексика",
+      "aliases": []
+    },
+    "MY": {
+      "en": "Malaysia",
+      "ru": "Малайзия",
+      "aliases": []
+    },
+    "MZ": {
+      "en": "Mozambique",
+      "ru": "Мозамбик",
+      "aliases": []
+    },
+    "NA": {
+      "en": "Namibia",
+      "ru": "Намибия",
+      "aliases": []
+    },
+    "NC": {
+      "en": "New Caledonia",
+      "ru": "Новая Каледония",
+      "aliases": []
+    },
+    "NE": {
+      "en": "Niger",
+      "ru": "Нигер",
+      "aliases": []
+    },
+    "NF": {
+      "en": "Norfolk Island",
+      "ru": "о-в Норфолк",
+      "aliases": []
+    },
+    "NG": {
+      "en": "Nigeria",
+      "ru": "Нигерия",
+      "aliases": []
+    },
+    "NI": {
+      "en": "Nicaragua",
+      "ru": "Никарагуа",
+      "aliases": []
+    },
+    "NL": {
+      "en": "Netherlands",
+      "ru": "Нидерланды",
+      "aliases": []
+    },
+    "NO": {
+      "en": "Norway",
+      "ru": "Норвегия",
+      "aliases": []
+    },
+    "NP": {
+      "en": "Nepal",
+      "ru": "Непал",
+      "aliases": []
+    },
+    "NR": {
+      "en": "Nauru",
+      "ru": "Науру",
+      "aliases": []
+    },
+    "NU": {
+      "en": "Niue",
+      "ru": "Ниуэ",
+      "aliases": []
+    },
+    "NZ": {
+      "en": "New Zealand",
+      "ru": "Новая Зеландия",
+      "aliases": [
+        "Aotearoa New Zealand",
+        "Аотеароа (Новая Зеландия)"
+      ]
+    },
+    "OM": {
+      "en": "Oman",
+      "ru": "Оман",
+      "aliases": []
+    },
+    "PA": {
+      "en": "Panama",
+      "ru": "Панама",
+      "aliases": []
+    },
+    "PE": {
+      "en": "Peru",
+      "ru": "Перу",
+      "aliases": []
+    },
+    "PF": {
+      "en": "French Polynesia",
+      "ru": "Французская Полинезия",
+      "aliases": []
+    },
+    "PG": {
+      "en": "Papua New Guinea",
+      "ru": "Папуа — Новая Гвинея",
+      "aliases": []
+    },
+    "PH": {
+      "en": "Philippines",
+      "ru": "Филиппины",
+      "aliases": []
+    },
+    "PK": {
+      "en": "Pakistan",
+      "ru": "Пакистан",
+      "aliases": []
+    },
+    "PL": {
+      "en": "Poland",
+      "ru": "Польша",
+      "aliases": []
+    },
+    "PM": {
+      "en": "St. Pierre & Miquelon",
+      "ru": "Сен-Пьер и Микелон",
+      "aliases": []
+    },
+    "PN": {
+      "en": "Pitcairn Islands",
+      "ru": "о-ва Питкэрн",
+      "aliases": [
+        "Pitcairn"
+      ]
+    },
+    "PR": {
+      "en": "Puerto Rico",
+      "ru": "Пуэрто-Рико",
+      "aliases": []
+    },
+    "PS": {
+      "en": "Palestinian Territories",
+      "ru": "Палестинские территории",
+      "aliases": [
+        "Palestine",
+        "Палестина"
+      ]
+    },
+    "PT": {
+      "en": "Portugal",
+      "ru": "Португалия",
+      "aliases": []
+    },
+    "PW": {
+      "en": "Palau",
+      "ru": "Палау",
+      "aliases": []
+    },
+    "PY": {
+      "en": "Paraguay",
+      "ru": "Парагвай",
+      "aliases": []
+    },
+    "QA": {
+      "en": "Qatar",
+      "ru": "Катар",
+      "aliases": []
+    },
+    "RE": {
+      "en": "Réunion",
+      "ru": "Реюньон",
+      "aliases": []
+    },
+    "RO": {
+      "en": "Romania",
+      "ru": "Румыния",
+      "aliases": []
+    },
+    "RS": {
+      "en": "Serbia",
+      "ru": "Сербия",
+      "aliases": []
+    },
+    "RU": {
+      "en": "Russia",
+      "ru": "Россия",
+      "aliases": []
+    },
+    "RW": {
+      "en": "Rwanda",
+      "ru": "Руанда",
+      "aliases": []
+    },
+    "SA": {
+      "en": "Saudi Arabia",
+      "ru": "Саудовская Аравия",
+      "aliases": []
+    },
+    "SB": {
+      "en": "Solomon Islands",
+      "ru": "Соломоновы о-ва",
+      "aliases": []
+    },
+    "SC": {
+      "en": "Seychelles",
+      "ru": "Сейшельские о-ва",
+      "aliases": []
+    },
+    "SD": {
+      "en": "Sudan",
+      "ru": "Судан",
+      "aliases": []
+    },
+    "SE": {
+      "en": "Sweden",
+      "ru": "Швеция",
+      "aliases": []
+    },
+    "SG": {
+      "en": "Singapore",
+      "ru": "Сингапур",
+      "aliases": []
+    },
+    "SH": {
+      "en": "St. Helena",
+      "ru": "о-в Св. Елены",
+      "aliases": []
+    },
+    "SI": {
+      "en": "Slovenia",
+      "ru": "Словения",
+      "aliases": []
+    },
+    "SJ": {
+      "en": "Svalbard & Jan Mayen",
+      "ru": "Шпицберген и Ян-Майен",
+      "aliases": []
+    },
+    "SK": {
+      "en": "Slovakia",
+      "ru": "Словакия",
+      "aliases": []
+    },
+    "SL": {
+      "en": "Sierra Leone",
+      "ru": "Сьерра-Леоне",
+      "aliases": []
+    },
+    "SM": {
+      "en": "San Marino",
+      "ru": "Сан-Марино",
+      "aliases": []
+    },
+    "SN": {
+      "en": "Senegal",
+      "ru": "Сенегал",
+      "aliases": []
+    },
+    "SO": {
+      "en": "Somalia",
+      "ru": "Сомали",
+      "aliases": []
+    },
+    "SR": {
+      "en": "Suriname",
+      "ru": "Суринам",
+      "aliases": []
+    },
+    "SS": {
+      "en": "South Sudan",
+      "ru": "Южный Судан",
+      "aliases": []
+    },
+    "ST": {
+      "en": "São Tomé & Príncipe",
+      "ru": "Сан-Томе и Принсипи",
+      "aliases": []
+    },
+    "SV": {
+      "en": "El Salvador",
+      "ru": "Сальвадор",
+      "aliases": []
+    },
+    "SX": {
+      "en": "Sint Maarten",
+      "ru": "Синт-Мартен",
+      "aliases": []
+    },
+    "SY": {
+      "en": "Syria",
+      "ru": "Сирия",
+      "aliases": []
+    },
+    "SZ": {
+      "en": "Eswatini",
+      "ru": "Эсватини",
+      "aliases": [
+        "Swaziland",
+        "Свазиленд"
+      ]
+    },
+    "TC": {
+      "en": "Turks & Caicos Islands",
+      "ru": "Тёркс и Кайкос",
+      "aliases": []
+    },
+    "TD": {
+      "en": "Chad",
+      "ru": "Чад",
+      "aliases": []
+    },
+    "TF": {
+      "en": "French Southern Territories",
+      "ru": "Французские Южные территории",
+      "aliases": []
+    },
+    "TG": {
+      "en": "Togo",
+      "ru": "Того",
+      "aliases": []
+    },
+    "TH": {
+      "en": "Thailand",
+      "ru": "Таиланд",
+      "aliases": []
+    },
+    "TJ": {
+      "en": "Tajikistan",
+      "ru": "Таджикистан",
+      "aliases": []
+    },
+    "TK": {
+      "en": "Tokelau",
+      "ru": "Токелау",
+      "aliases": []
+    },
+    "TL": {
+      "en": "Timor-Leste",
+      "ru": "Восточный Тимор",
+      "aliases": [
+        "East Timor",
+        "Тимор-Лесте"
+      ]
+    },
+    "TM": {
+      "en": "Turkmenistan",
+      "ru": "Туркменистан",
+      "aliases": []
+    },
+    "TN": {
+      "en": "Tunisia",
+      "ru": "Тунис",
+      "aliases": []
+    },
+    "TO": {
+      "en": "Tonga",
+      "ru": "Тонга",
+      "aliases": []
+    },
+    "TR": {
+      "en": "Türkiye",
+      "ru": "Турция",
+      "aliases": [
+        "Turkey"
+      ]
+    },
+    "TT": {
+      "en": "Trinidad & Tobago",
+      "ru": "Тринидад и Тобаго",
+      "aliases": []
+    },
+    "TV": {
+      "en": "Tuvalu",
+      "ru": "Тувалу",
+      "aliases": []
+    },
+    "TW": {
+      "en": "Taiwan",
+      "ru": "Тайвань",
+      "aliases": []
+    },
+    "TZ": {
+      "en": "Tanzania",
+      "ru": "Танзания",
+      "aliases": []
+    },
+    "UA": {
+      "en": "Ukraine",
+      "ru": "Украина",
+      "aliases": []
+    },
+    "UG": {
+      "en": "Uganda",
+      "ru": "Уганда",
+      "aliases": []
+    },
+    "UM": {
+      "en": "U.S. Outlying Islands",
+      "ru": "Внешние малые о-ва (США)",
+      "aliases": []
+    },
+    "US": {
+      "en": "United States",
+      "ru": "Соединенные Штаты",
+      "aliases": [
+        "US",
+        "США"
+      ]
+    },
+    "UY": {
+      "en": "Uruguay",
+      "ru": "Уругвай",
+      "aliases": []
+    },
+    "UZ": {
+      "en": "Uzbekistan",
+      "ru": "Узбекистан",
+      "aliases": []
+    },
+    "VA": {
+      "en": "Vatican City",
+      "ru": "Ватикан",
+      "aliases": []
+    },
+    "VC": {
+      "en": "St. Vincent & Grenadines",
+      "ru": "Сент-Винсент и Гренадины",
+      "aliases": []
+    },
+    "VE": {
+      "en": "Venezuela",
+      "ru": "Венесуэла",
+      "aliases": []
+    },
+    "VG": {
+      "en": "British Virgin Islands",
+      "ru": "Виргинские о-ва (Великобритания)",
+      "aliases": []
+    },
+    "VI": {
+      "en": "U.S. Virgin Islands",
+      "ru": "Виргинские о-ва (США)",
+      "aliases": []
+    },
+    "VN": {
+      "en": "Vietnam",
+      "ru": "Вьетнам",
+      "aliases": []
+    },
+    "VU": {
+      "en": "Vanuatu",
+      "ru": "Вануату",
+      "aliases": []
+    },
+    "WF": {
+      "en": "Wallis & Futuna",
+      "ru": "Уоллис и Футуна",
+      "aliases": []
+    },
+    "WS": {
+      "en": "Samoa",
+      "ru": "Самоа",
+      "aliases": []
+    },
+    "YE": {
+      "en": "Yemen",
+      "ru": "Йемен",
+      "aliases": []
+    },
+    "YT": {
+      "en": "Mayotte",
+      "ru": "Майотта",
+      "aliases": []
+    },
+    "ZA": {
+      "en": "South Africa",
+      "ru": "Южно-Африканская Республика",
+      "aliases": []
+    },
+    "ZM": {
+      "en": "Zambia",
+      "ru": "Замбия",
+      "aliases": []
+    },
+    "ZW": {
+      "en": "Zimbabwe",
+      "ru": "Зимбабве",
+      "aliases": []
+    }
+  }
+}

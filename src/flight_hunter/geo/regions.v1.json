@@ -1,0 +1,856 @@
+{
+  "version": "regions-v1-2026-07-13",
+  "source": {
+    "taxonomy": "project-owned ISO alpha-2 regions derived from UN M49 containment",
+    "unicode_cldr_version": "48.2",
+    "unicode_cldr_json_release": "48.2.0",
+    "territory_containment_url": "https://raw.githubusercontent.com/unicode-org/cldr-json/48.2.0/cldr-json/cldr-core/supplemental/territoryContainment.json",
+    "territory_containment_sha256": "9f7d2eed5278ebb7c302b7536e391708b237945c314d09a206c632c2fab45ee2",
+    "region_names_urls": [
+      "https://raw.githubusercontent.com/unicode-org/cldr-json/48.2.0/cldr-json/cldr-localenames-full/main/en/territories.json",
+      "https://raw.githubusercontent.com/unicode-org/cldr-json/48.2.0/cldr-json/cldr-localenames-full/main/ru/territories.json"
+    ],
+    "project_region_ids_version": "region-ids-v1-2026-07-13",
+    "imported_at": "2026-07-13",
+    "entry_count": 29,
+    "import_checksum_sha256": "fc733669dc7c71c41d2cdfeee62f13f401451d0338e2aabacc4954e6ce976f34"
+  },
+  "regions": {
+    "africa": {
+      "country_codes": [
+        "AO",
+        "BF",
+        "BI",
+        "BJ",
+        "BW",
+        "CD",
+        "CF",
+        "CG",
+        "CI",
+        "CM",
+        "CV",
+        "DJ",
+        "DZ",
+        "EG",
+        "EH",
+        "ER",
+        "ET",
+        "GA",
+        "GH",
+        "GM",
+        "GN",
+        "GQ",
+        "GW",
+        "IO",
+        "KE",
+        "KM",
+        "LR",
+        "LS",
+        "LY",
+        "MA",
+        "MG",
+        "ML",
+        "MR",
+        "MU",
+        "MW",
+        "MZ",
+        "NA",
+        "NE",
+        "NG",
+        "RE",
+        "RW",
+        "SC",
+        "SD",
+        "SH",
+        "SL",
+        "SN",
+        "SO",
+        "SS",
+        "ST",
+        "SZ",
+        "TD",
+        "TF",
+        "TG",
+        "TN",
+        "TZ",
+        "UG",
+        "YT",
+        "ZA",
+        "ZM",
+        "ZW"
+      ],
+      "aliases": [
+        "Africa",
+        "Африка"
+      ]
+    },
+    "northern_africa": {
+      "country_codes": [
+        "DZ",
+        "EG",
+        "EH",
+        "LY",
+        "MA",
+        "SD",
+        "TN"
+      ],
+      "aliases": [
+        "Northern Africa",
+        "Северная Африка"
+      ]
+    },
+    "sub_saharan_africa": {
+      "country_codes": [
+        "AO",
+        "BF",
+        "BI",
+        "BJ",
+        "BW",
+        "CD",
+        "CF",
+        "CG",
+        "CI",
+        "CM",
+        "CV",
+        "DJ",
+        "ER",
+        "ET",
+        "GA",
+        "GH",
+        "GM",
+        "GN",
+        "GQ",
+        "GW",
+        "IO",
+        "KE",
+        "KM",
+        "LR",
+        "LS",
+        "MG",
+        "ML",
+        "MR",
+        "MU",
+        "MW",
+        "MZ",
+        "NA",
+        "NE",
+        "NG",
+        "RE",
+        "RW",
+        "SC",
+        "SH",
+        "SL",
+        "SN",
+        "SO",
+        "SS",
+        "ST",
+        "SZ",
+        "TD",
+        "TF",
+        "TG",
+        "TZ",
+        "UG",
+        "YT",
+        "ZA",
+        "ZM",
+        "ZW"
+      ],
+      "aliases": [
+        "Sub-Saharan Africa",
+        "Тропическая Африка"
+      ]
+    },
+    "eastern_africa": {
+      "country_codes": [
+        "BI",
+        "DJ",
+        "ER",
+        "ET",
+        "IO",
+        "KE",
+        "KM",
+        "MG",
+        "MU",
+        "MW",
+        "MZ",
+        "RE",
+        "RW",
+        "SC",
+        "SO",
+        "SS",
+        "TF",
+        "TZ",
+        "UG",
+        "YT",
+        "ZM",
+        "ZW"
+      ],
+      "aliases": [
+        "Eastern Africa",
+        "Восточная Африка"
+      ]
+    },
+    "middle_africa": {
+      "country_codes": [
+        "AO",
+        "CD",
+        "CF",
+        "CG",
+        "CM",
+        "GA",
+        "GQ",
+        "ST",
+        "TD"
+      ],
+      "aliases": [
+        "Middle Africa",
+        "Центральная Африка"
+      ]
+    },
+    "southern_africa": {
+      "country_codes": [
+        "BW",
+        "LS",
+        "NA",
+        "SZ",
+        "ZA"
+      ],
+      "aliases": [
+        "Southern Africa",
+        "Южная Африка"
+      ]
+    },
+    "western_africa": {
+      "country_codes": [
+        "BF",
+        "BJ",
+        "CI",
+        "CV",
+        "GH",
+        "GM",
+        "GN",
+        "GW",
+        "LR",
+        "ML",
+        "MR",
+        "NE",
+        "NG",
+        "SH",
+        "SL",
+        "SN",
+        "TG"
+      ],
+      "aliases": [
+        "Western Africa",
+        "Западная Африка"
+      ]
+    },
+    "americas": {
+      "country_codes": [
+        "AG",
+        "AI",
+        "AR",
+        "AW",
+        "BB",
+        "BL",
+        "BM",
+        "BO",
+        "BQ",
+        "BR",
+        "BS",
+        "BV",
+        "BZ",
+        "CA",
+        "CL",
+        "CO",
+        "CR",
+        "CU",
+        "CW",
+        "DM",
+        "DO",
+        "EC",
+        "FK",
+        "GD",
+        "GF",
+        "GL",
+        "GP",
+        "GS",
+        "GT",
+        "GY",
+        "HN",
+        "HT",
+        "JM",
+        "KN",
+        "KY",
+        "LC",
+        "MF",
+        "MQ",
+        "MS",
+        "MX",
+        "NI",
+        "PA",
+        "PE",
+        "PM",
+        "PR",
+        "PY",
+        "SR",
+        "SV",
+        "SX",
+        "TC",
+        "TT",
+        "US",
+        "UY",
+        "VC",
+        "VE",
+        "VG",
+        "VI"
+      ],
+      "aliases": [
+        "Americas",
+        "Америка"
+      ]
+    },
+    "northern_america": {
+      "country_codes": [
+        "BM",
+        "CA",
+        "GL",
+        "PM",
+        "US"
+      ],
+      "aliases": [
+        "Northern America",
+        "Североамериканский регион"
+      ]
+    },
+    "latin_america_and_caribbean": {
+      "country_codes": [
+        "AG",
+        "AI",
+        "AR",
+        "AW",
+        "BB",
+        "BL",
+        "BO",
+        "BQ",
+        "BR",
+        "BS",
+        "BV",
+        "BZ",
+        "CL",
+        "CO",
+        "CR",
+        "CU",
+        "CW",
+        "DM",
+        "DO",
+        "EC",
+        "FK",
+        "GD",
+        "GF",
+        "GP",
+        "GS",
+        "GT",
+        "GY",
+        "HN",
+        "HT",
+        "JM",
+        "KN",
+        "KY",
+        "LC",
+        "MF",
+        "MQ",
+        "MS",
+        "MX",
+        "NI",
+        "PA",
+        "PE",
+        "PR",
+        "PY",
+        "SR",
+        "SV",
+        "SX",
+        "TC",
+        "TT",
+        "UY",
+        "VC",
+        "VE",
+        "VG",
+        "VI"
+      ],
+      "aliases": [
+        "Latin America",
+        "Латинская Америка"
+      ]
+    },
+    "central_america": {
+      "country_codes": [
+        "BZ",
+        "CR",
+        "GT",
+        "HN",
+        "MX",
+        "NI",
+        "PA",
+        "SV"
+      ],
+      "aliases": [
+        "Central America",
+        "Центральная Америка"
+      ]
+    },
+    "caribbean": {
+      "country_codes": [
+        "AG",
+        "AI",
+        "AW",
+        "BB",
+        "BL",
+        "BQ",
+        "BS",
+        "CU",
+        "CW",
+        "DM",
+        "DO",
+        "GD",
+        "GP",
+        "HT",
+        "JM",
+        "KN",
+        "KY",
+        "LC",
+        "MF",
+        "MQ",
+        "MS",
+        "PR",
+        "SX",
+        "TC",
+        "TT",
+        "VC",
+        "VG",
+        "VI"
+      ],
+      "aliases": [
+        "Caribbean",
+        "Карибы"
+      ]
+    },
+    "south_america": {
+      "country_codes": [
+        "AR",
+        "BO",
+        "BR",
+        "BV",
+        "CL",
+        "CO",
+        "EC",
+        "FK",
+        "GF",
+        "GS",
+        "GY",
+        "PE",
+        "PY",
+        "SR",
+        "UY",
+        "VE"
+      ],
+      "aliases": [
+        "South America",
+        "Южная Америка"
+      ]
+    },
+    "asia": {
+      "country_codes": [
+        "AE",
+        "AF",
+        "AM",
+        "AZ",
+        "BD",
+        "BH",
+        "BN",
+        "BT",
+        "CN",
+        "CY",
+        "GE",
+        "HK",
+        "ID",
+        "IL",
+        "IN",
+        "IQ",
+        "IR",
+        "JO",
+        "JP",
+        "KG",
+        "KH",
+        "KP",
+        "KR",
+        "KW",
+        "KZ",
+        "LA",
+        "LB",
+        "LK",
+        "MM",
+        "MN",
+        "MO",
+        "MV",
+        "MY",
+        "NP",
+        "OM",
+        "PH",
+        "PK",
+        "PS",
+        "QA",
+        "SA",
+        "SG",
+        "SY",
+        "TH",
+        "TJ",
+        "TL",
+        "TM",
+        "TR",
+        "TW",
+        "UZ",
+        "VN",
+        "YE"
+      ],
+      "aliases": [
+        "Asia",
+        "Азия"
+      ]
+    },
+    "central_asia": {
+      "country_codes": [
+        "KG",
+        "KZ",
+        "TJ",
+        "TM",
+        "UZ"
+      ],
+      "aliases": [
+        "Central Asia",
+        "Центральная Азия"
+      ]
+    },
+    "eastern_asia": {
+      "country_codes": [
+        "CN",
+        "HK",
+        "JP",
+        "KP",
+        "KR",
+        "MN",
+        "MO",
+        "TW"
+      ],
+      "aliases": [
+        "Eastern Asia",
+        "Восточная Азия"
+      ]
+    },
+    "south_eastern_asia": {
+      "country_codes": [
+        "BN",
+        "ID",
+        "KH",
+        "LA",
+        "MM",
+        "MY",
+        "PH",
+        "SG",
+        "TH",
+        "TL",
+        "VN"
+      ],
+      "aliases": [
+        "Southeast Asia",
+        "Юго-Восточная Азия"
+      ]
+    },
+    "southern_asia": {
+      "country_codes": [
+        "AF",
+        "BD",
+        "BT",
+        "IN",
+        "IR",
+        "LK",
+        "MV",
+        "NP",
+        "PK"
+      ],
+      "aliases": [
+        "Southern Asia",
+        "Южная Азия"
+      ]
+    },
+    "western_asia": {
+      "country_codes": [
+        "AE",
+        "AM",
+        "AZ",
+        "BH",
+        "CY",
+        "GE",
+        "IL",
+        "IQ",
+        "JO",
+        "KW",
+        "LB",
+        "OM",
+        "PS",
+        "QA",
+        "SA",
+        "SY",
+        "TR",
+        "YE"
+      ],
+      "aliases": [
+        "Western Asia",
+        "Западная Азия"
+      ]
+    },
+    "europe": {
+      "country_codes": [
+        "AD",
+        "AL",
+        "AT",
+        "AX",
+        "BA",
+        "BE",
+        "BG",
+        "BY",
+        "CH",
+        "CQ",
+        "CZ",
+        "DE",
+        "DK",
+        "EE",
+        "ES",
+        "FI",
+        "FO",
+        "FR",
+        "GB",
+        "GG",
+        "GI",
+        "GR",
+        "HR",
+        "HU",
+        "IE",
+        "IM",
+        "IS",
+        "IT",
+        "JE",
+        "LI",
+        "LT",
+        "LU",
+        "LV",
+        "MC",
+        "MD",
+        "ME",
+        "MK",
+        "MT",
+        "NL",
+        "NO",
+        "PL",
+        "PT",
+        "RO",
+        "RS",
+        "RU",
+        "SE",
+        "SI",
+        "SJ",
+        "SK",
+        "SM",
+        "UA",
+        "VA"
+      ],
+      "aliases": [
+        "Europe",
+        "Европа"
+      ]
+    },
+    "eastern_europe": {
+      "country_codes": [
+        "BG",
+        "BY",
+        "CZ",
+        "HU",
+        "MD",
+        "PL",
+        "RO",
+        "RU",
+        "SK",
+        "UA"
+      ],
+      "aliases": [
+        "Eastern Europe",
+        "Восточная Европа"
+      ]
+    },
+    "northern_europe": {
+      "country_codes": [
+        "AX",
+        "CQ",
+        "DK",
+        "EE",
+        "FI",
+        "FO",
+        "GB",
+        "GG",
+        "IE",
+        "IM",
+        "IS",
+        "JE",
+        "LT",
+        "LV",
+        "NO",
+        "SE",
+        "SJ"
+      ],
+      "aliases": [
+        "Northern Europe",
+        "Северная Европа"
+      ]
+    },
+    "southern_europe": {
+      "country_codes": [
+        "AD",
+        "AL",
+        "BA",
+        "ES",
+        "GI",
+        "GR",
+        "HR",
+        "IT",
+        "ME",
+        "MK",
+        "MT",
+        "PT",
+        "RS",
+        "SI",
+        "SM",
+        "VA"
+      ],
+      "aliases": [
+        "Southern Europe",
+        "Южная Европа"
+      ]
+    },
+    "western_europe": {
+      "country_codes": [
+        "AT",
+        "BE",
+        "CH",
+        "DE",
+        "FR",
+        "LI",
+        "LU",
+        "MC",
+        "NL"
+      ],
+      "aliases": [
+        "Western Europe",
+        "Западная Европа"
+      ]
+    },
+    "oceania": {
+      "country_codes": [
+        "AQ",
+        "AS",
+        "AU",
+        "CC",
+        "CK",
+        "CX",
+        "FJ",
+        "FM",
+        "GU",
+        "HM",
+        "KI",
+        "MH",
+        "MP",
+        "NC",
+        "NF",
+        "NR",
+        "NU",
+        "NZ",
+        "PF",
+        "PG",
+        "PN",
+        "PW",
+        "SB",
+        "TK",
+        "TO",
+        "TV",
+        "UM",
+        "VU",
+        "WF",
+        "WS"
+      ],
+      "aliases": [
+        "Oceania",
+        "Океания"
+      ]
+    },
+    "australia_and_new_zealand": {
+      "country_codes": [
+        "AU",
+        "CC",
+        "CX",
+        "HM",
+        "NF",
+        "NZ"
+      ],
+      "aliases": [
+        "Australasia",
+        "Австралазия"
+      ]
+    },
+    "melanesia": {
+      "country_codes": [
+        "FJ",
+        "NC",
+        "PG",
+        "SB",
+        "VU"
+      ],
+      "aliases": [
+        "Melanesia",
+        "Меланезия"
+      ]
+    },
+    "micronesia": {
+      "country_codes": [
+        "FM",
+        "GU",
+        "KI",
+        "MH",
+        "MP",
+        "NR",
+        "PW",
+        "UM"
+      ],
+      "aliases": [
+        "Micronesian Region",
+        "Микронезия"
+      ]
+    },
+    "polynesia": {
+      "country_codes": [
+        "AS",
+        "CK",
+        "NU",
+        "PF",
+        "PN",
+        "TK",
+        "TO",
+        "TV",
+        "WF",
+        "WS"
+      ],
+      "aliases": [
+        "Polynesia",
+        "Полинезия"
+      ]
+    }
+  }
+}

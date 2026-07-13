@@ -19,6 +19,9 @@ def test_ourairports_importer_reads_searchable_iata_airports(tmp_path) -> None:
                 "ES,ES-CT,Barcelona,yes,LEBL,LEBL,BCN,,,Barcelone",
                 "4,ZZZZ,small_airport,Tiny Field,1,2,0,EU,PL,PL-MZ,Tiny,no,ZZZZ,,TIN,,,,",
                 "5,NOIA,large_airport,No IATA Airport,1,2,0,EU,PL,PL-MZ,Nowhere,yes,NOIA,,,,,,",
+                "6,CLOS,closed,Closed Airport,1,2,0,EU,PL,PL-MZ,Closed,yes,CLOS,CLOS,CLS,,,,",
+                "7,NOSV,medium_airport,No Service Airport,1,2,0,EU,PL,PL-MZ,Idle,no,NOSV,"
+                "NOSV,NSV,,,,",
             )
         ),
         encoding="utf-8",
@@ -26,7 +29,11 @@ def test_ourairports_importer_reads_searchable_iata_airports(tmp_path) -> None:
 
     batch = OurAirportsAirportImporter().read_airports(csv_path)
 
-    assert batch.rows_seen == 5
+    assert batch.rows_seen == 7
     assert batch.rows_imported == 3
     assert [airport.iata_code for airport in batch.airports] == ["BCN", "WAW", "WMI"]
     assert batch.airports[1].keywords == ("Varsovia",)
+    assert all(airport.scheduled_service for airport in batch.airports)
+    assert {airport.commercial_provenance for airport in batch.airports} == {
+        "ourairports.scheduled_service"
+    }

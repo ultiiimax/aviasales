@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -32,6 +32,8 @@ async def test_airport_repository_imports_idempotently_and_searches_city_keyword
                     airport_type=AirportType.LARGE_AIRPORT,
                     active=True,
                     keywords=("Varsovia",),
+                    scheduled_service=True,
+                    commercial_provenance="ourairports.scheduled_service",
                 ),
                 Airport(
                     iata_code="WMI",
@@ -43,6 +45,8 @@ async def test_airport_repository_imports_idempotently_and_searches_city_keyword
                     airport_type=AirportType.MEDIUM_AIRPORT,
                     active=True,
                     keywords=("Warsaw",),
+                    scheduled_service=True,
+                    commercial_provenance="ourairports.scheduled_service",
                 ),
                 Airport(
                     iata_code="BCN",
@@ -54,6 +58,8 @@ async def test_airport_repository_imports_idempotently_and_searches_city_keyword
                     airport_type=AirportType.LARGE_AIRPORT,
                     active=True,
                     keywords=("Barcelone",),
+                    scheduled_service=True,
+                    commercial_provenance="ourairports.scheduled_service",
                 ),
             ),
         )
@@ -61,14 +67,48 @@ async def test_airport_repository_imports_idempotently_and_searches_city_keyword
         first = await repository.import_airports(batch, imported_at=NOW)
         second = await repository.import_airports(batch, imported_at=NOW)
         warsaw = await repository.search("Варшава")
+        waw = await repository.get("WAW")
+        original_snapshot = await repository.catalog_snapshot()
+        await repository.import_airports(
+            AirportImportBatch(
+                source_path="later.csv",
+                rows_seen=1,
+                rows_imported=1,
+                airports=(
+                    Airport(
+                        iata_code="CDG",
+                        name="Charles de Gaulle Airport",
+                        municipality="Paris",
+                        country_code="FR",
+                        latitude=49.0097,
+                        longitude=2.5479,
+                        airport_type=AirportType.LARGE_AIRPORT,
+                        active=True,
+                        scheduled_service=True,
+                        commercial_provenance="ourairports.scheduled_service",
+                    ),
+                ),
+            ),
+            imported_at=NOW + timedelta(seconds=1),
+        )
+        later_snapshot = await repository.catalog_snapshot()
         imported = await repository.latest_import_run()
 
     assert first.rows_imported == 3
     assert second.rows_imported == 3
     assert [match.airport.iata_code for match in warsaw] == ["WAW", "WMI"]
+    assert waw is not None
+    assert waw.scheduled_service is True
+    assert waw.commercial_provenance == "ourairports.scheduled_service"
+    assert tuple(airport.iata_code for airport in original_snapshot.airports) == (
+        "BCN",
+        "WAW",
+        "WMI",
+    )
+    assert original_snapshot.checksum != later_snapshot.checksum
     assert imported is not None
-    assert imported.rows_seen == 3
-    assert imported.rows_imported == 3
+    assert imported.rows_seen == 1
+    assert imported.rows_imported == 1
 
 
 async def _session_factory():

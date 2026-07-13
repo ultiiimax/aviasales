@@ -56,6 +56,8 @@ def _airport_from_row(row: dict[str, str]) -> Airport | None:
             airport_type=parsed_type,
             active=True,
             keywords=_keywords(row.get("keywords", "")),
+            scheduled_service=True,
+            commercial_provenance="ourairports.scheduled_service",
         )
     except ValueError:
         return None

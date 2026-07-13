@@ -27,7 +27,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
   `docs/superpowers/plans/2026-07-13-agent-route-orchestrator.md`.
 - Progress:
   - [x] Add provider-neutral intent, evidence and plan contracts.
-  - [ ] Freeze generic geographic scopes and estimate bounded provider work.
+  - [x] Freeze generic geographic scopes with commercial provenance.
   - [ ] Persist immutable revisions, approvals, runs and operation ledger.
   - [ ] Expose the plan lifecycle and approval-gated web flow.
   - [ ] Execute resumable Aviasales calendar/exact work in the worker.
@@ -36,10 +36,21 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [ ] Add evidence-gated buy timing, anomaly and currency analysis.
   - [ ] Pass browser, recovery, migration, security and release gates.
 
+Task 2 slice plan/result: add a forward-only airport provenance migration,
+package checksummed ISO/CLDR country and region taxonomies, freeze deterministic
+airport-catalog snapshots, then resolve airport/city/country/region/anywhere
+scopes behind an application repository protocol. Completed in that order with
+test-first RED/GREEN evidence.
+
+Task 2 verification on 2026-07-13: 14 focused scope/import/repository/migration
+tests, 2 migration baseline/pre-v1 upgrade tests and 10 geo/airport regressions
+pass. Focused mypy and global Ruff format/check pass. The built wheel contains
+both versioned taxonomy JSON resources.
+
 Implementation status on 2026-07-13: the user-approved design and reviewed
-implementation plan are complete. Production implementation has started with
-the verified provider-neutral intent, plan and evidence contracts; remaining
-orchestrator slices are pending.
+implementation plan are complete. Production implementation now includes the
+verified provider-neutral contracts and frozen generic geographic scopes;
+remaining orchestrator slices are pending.
 
 ## Previous Slice: Local v1 Release
 

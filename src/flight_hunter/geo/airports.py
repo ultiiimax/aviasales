@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from hashlib import sha256
 from pathlib import Path
 
 _IATA_RE = re.compile(r"^[A-Z]{3}$")
@@ -30,6 +32,8 @@ class Airport:
     airport_type: AirportType
     active: bool
     keywords: tuple[str, ...] = ()
+    scheduled_service: bool = True
+    commercial_provenance: str = "legacy_import_filter"
 
     def __post_init__(self) -> None:
         iata_code = self.iata_code.upper()
@@ -46,6 +50,11 @@ class Airport:
             raise ValueError("name is required")
         if not self.municipality:
             raise ValueError("municipality is required")
+        if type(self.scheduled_service) is not bool:
+            raise TypeError("scheduled_service must be a boolean")
+        commercial_provenance = self.commercial_provenance.strip()
+        if not commercial_provenance:
+            raise ValueError("commercial_provenance is required")
 
         object.__setattr__(self, "iata_code", iata_code)
         object.__setattr__(self, "country_code", country_code)
@@ -54,13 +63,48 @@ class Airport:
             "keywords",
             tuple(keyword.strip() for keyword in self.keywords if keyword.strip()),
         )
+        object.__setattr__(self, "commercial_provenance", commercial_provenance)
 
     @property
     def is_searchable(self) -> bool:
-        return self.active and self.airport_type in {
-            AirportType.LARGE_AIRPORT,
-            AirportType.MEDIUM_AIRPORT,
+        return (
+            self.active
+            and self.scheduled_service
+            and self.airport_type
+            in {
+                AirportType.LARGE_AIRPORT,
+                AirportType.MEDIUM_AIRPORT,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AirportCatalogSnapshot:
+    airports: tuple[Airport, ...]
+    checksum: str
+
+
+def freeze_airport_catalog(airports: tuple[Airport, ...]) -> AirportCatalogSnapshot:
+    ordered = tuple(sorted(airports, key=lambda airport: airport.iata_code))
+    if not all(isinstance(airport, Airport) for airport in ordered):
+        raise TypeError("airports must contain Airport values")
+    codes = tuple(airport.iata_code for airport in ordered)
+    if len(set(codes)) != len(codes):
+        raise ValueError("airport catalog cannot contain duplicate IATA codes")
+    payload = [
+        {
+            "iata": airport.iata_code,
+            "country": airport.country_code,
+            "type": airport.airport_type.value,
+            "scheduled_service": airport.scheduled_service,
+            "active": airport.active,
         }
+        for airport in ordered
+    ]
+    checksum = sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return AirportCatalogSnapshot(airports=ordered, checksum=checksum)
 
 
 def distance_km(origin: Airport, destination: Airport) -> int:

@@ -32,9 +32,11 @@ from flight_hunter.domain.search_results import (
 )
 from flight_hunter.geo.airports import (
     Airport,
+    AirportCatalogSnapshot,
     AirportImportBatch,
     AirportImportRun,
     AirportType,
+    freeze_airport_catalog,
 )
 from flight_hunter.notifications.alerts import AlertEvaluationState, PriceAlert
 from flight_hunter.persistence.models import (
@@ -1815,6 +1817,8 @@ class AirportReferenceRepository:
                 "longitude": airport.longitude,
                 "airport_type": airport.airport_type.value,
                 "active": airport.active,
+                "scheduled_service": airport.scheduled_service,
+                "commercial_provenance": airport.commercial_provenance,
                 "keywords": ", ".join(airport.keywords),
                 "imported_at": imported_at,
             }
@@ -1883,6 +1887,13 @@ class AirportReferenceRepository:
         )
         row = result.fetchone()
         return _airport_from_row(row._mapping) if row is not None else None
+
+    async def catalog_snapshot(self) -> AirportCatalogSnapshot:
+        result = await self._session.execute(
+            select(airports_table).order_by(airports_table.c.iata_code)
+        )
+        airports = tuple(_airport_from_row(row._mapping) for row in result.fetchall())
+        return freeze_airport_catalog(airports)
 
     async def latest_import_run(self) -> AirportImportRun | None:
         result = await self._session.execute(
@@ -3757,6 +3768,8 @@ def _airport_from_row(row: RowMapping) -> Airport:
         airport_type=AirportType(row["airport_type"]),
         active=row["active"],
         keywords=_split_keywords(row["keywords"]),
+        scheduled_service=row["scheduled_service"],
+        commercial_provenance=row["commercial_provenance"],
     )
 
 
