@@ -213,12 +213,25 @@ in immutable `AgentSearchPlanRevision` rows. A revision contains:
 Revision states are deliberately separate from execution:
 
 ```text
-draft -> awaiting_approval -> consumed | superseded | expired
+draft --finalize(valid + estimated)--> awaiting_approval
+draft --edit-------------------------> superseded + new draft
+awaiting_approval --edit-------------> superseded + new draft
+awaiting_approval --execute----------> consumed
+awaiting_approval -------------------> expired
 ```
 
-Only a `draft` revision may be patched. A patch writes a new immutable revision
-and marks the previous revision `superseded`; it never changes an existing run.
-An awaiting revision expires after the configured plan TTL, initially 24 hours.
+POST initially writes a draft. The plan builder automatically finalizes it to
+`awaiting_approval` only when required choices are resolved, scope/capability
+inputs are frozen, validation passes and both budget estimates are available.
+Only an awaiting revision renders an executable plan card.
+
+PATCH may address the current `draft` or `awaiting_approval` revision but never
+mutates it. It marks that revision superseded, writes a successor draft, applies
+the requested edit, then runs the same automatic finalize step. An incomplete
+successor remains draft and returns clarification fields; a complete successor
+becomes awaiting approval and renders a new card. Existing runs continue to
+reference their immutable consumed revision. An awaiting revision expires
+after the configured plan TTL, initially 24 hours.
 
 ### 5.3 Approval and run lifecycle
 
@@ -237,7 +250,8 @@ Run states are independent:
 
 ```text
 queued -> running -> completed | partial | failed
-                  -> cancel_requested -> cancelled
+queued  -> cancel_requested -> cancelled
+running -> cancel_requested -> cancelled
 ```
 
 Cancellation always targets an explicit `run_id`; it never means “whatever is
@@ -511,11 +525,29 @@ Uses stored price history only. Until the route/date window has sufficient
 coverage, the result is `insufficient_data` and the agent offers to create a
 watch. It does not recommend a weekday or hour from generic folklore.
 
-Comparable observations share exact airport pair, trip shape, cabin, passenger
-mix, provider/currency basis and departure-date window `±3` days. They are
-stratified by days-to-departure bands (`0–6`, `7–13`, `14–29`, `30–59`, `60+`)
-before comparing booking time, so approaching departure is not confused with a
-weekday/hour effect.
+Comparable observations share a typed `HistorySeriesKey` containing:
+
+- every ordered airport leg and trip shape;
+- departure-date window for every leg, including the return leg;
+- exact stay duration or an explicitly approved `±1 night` stay band for
+  round-trip/open-jaw;
+- cabin and complete passenger mix;
+- ticket structure/risk class;
+- equivalent baggage inclusion/count/weight state (unknown baggage is a
+  separate series);
+- normalized currency/FX basis;
+- aggregation mode.
+
+`market_minimum` mode records the minimum confirmed offer in each observation
+snapshot only among offers with that same key. `same_product` additionally keys
+provider, seller/gate and fare-family/product fingerprint. The modes are never
+mixed. Ordered multi-city dates and legs must all match their configured
+windows; materially different return dates, stays, baggage or fare products
+cannot share a series.
+
+Observations are stratified by days-to-departure bands (`0–6`, `7–13`,
+`14–29`, `30–59`, `60+`) before comparing booking time, so approaching
+departure is not confused with a weekday/hour effect.
 
 Initial evidence gates:
 
@@ -549,7 +581,10 @@ connectors, but their text is untrusted data and is not a price source.
 
 Comparison requires a stable same-flight fingerprint built from airports,
 carrier/flight numbers, local departure timestamps, cabin and ordered segments;
-provider proposal IDs alone are not identity. Every currency query is an
+provider proposal IDs alone are not identity. It also requires equivalent
+seller/gate, fare family/code, baggage allowance, ticket structure and known
+refund/change rules. An unknown or mismatched material field yields
+`not_comparable`; it cannot support a saving claim. Every currency query is an
 approved provider operation and contributes to both operation/HTTP budgets.
 
 Conversion requires a typed `FxRateObservation` with source, base/quote,
@@ -624,8 +659,11 @@ GET    /api/v1/agent/search-plans/{plan_id}/runs/latest
 GET    /api/v1/agent/search-plans/{plan_id}/runs/{run_id}/results
 ```
 
-`PATCH` accepts only the current draft revision and always returns a newly
-written revision. `execute` requires bearer session, household ownership,
+`POST`/`PATCH` return clarification fields while the successor is an incomplete
+draft and return an executable plan card after automatic finalization. `PATCH`
+accepts the current draft or awaiting revision and always writes a successor as
+defined in section 5.2. `execute` accepts only `awaiting_approval` and requires
+bearer session, household ownership,
 `revision_id`, `content_hash`, `expected_revision`, an idempotency key and the
 exact hidden-city warning version when applicable. It records a single-use
 approval and queues the run atomically. Repeating the same idempotency key
@@ -724,6 +762,8 @@ household isolation failures.
 - quick and full modes produce different deterministic budgets;
 - estimator distinguishes logical operations from start/poll/retry HTTP
   attempts and never exceeds either cap;
+- complete draft auto-finalizes, while editing an awaiting revision supersedes
+  it and produces a new immutable successor;
 - airport/city/country/region/anywhere scopes;
 - catalog/taxonomy versions and frozen scope survive later imports;
 - anywhere discovery cannot add seeds after the run scope snapshot;
@@ -742,6 +782,8 @@ household isolation failures.
   and all booking actions;
 - unknown baggage/visa/transfer values remain unknown;
 - buy-timing under any sample/date/week threshold returns `insufficient_data`;
+- history series reject mismatched return date, stay, baggage, seller or fare
+  product according to aggregation mode;
 - error fare threshold boundary is `suspected_anomaly`, never guarantee;
 - stale/missing FX or fee provenance returns `not_comparable`.
 
