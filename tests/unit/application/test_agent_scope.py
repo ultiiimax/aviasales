@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import date
+from hashlib import sha256
+from importlib.resources import files
 
 import pytest
 
@@ -27,6 +30,11 @@ class MutableAirportCatalog:
 
     async def catalog_snapshot(self) -> AirportCatalogSnapshot:
         return freeze_airport_catalog(self.airports)
+
+
+class UnreachableAirportCatalog:
+    async def catalog_snapshot(self) -> AirportCatalogSnapshot:
+        raise AssertionError("unknown COUNTRY must be rejected before reading the catalog")
 
 
 def _airport(
@@ -81,6 +89,45 @@ async def test_country_scope_freezes_all_searchable_airports_and_catalog_checksu
     assert resolved.airport_codes == ("CDG", "LYS", "NCE", "ORY")
     assert resolved.catalog_checksum == original_checksum
     assert resolved.commercial_provenance == "ourairports.scheduled_service"
+
+
+@pytest.mark.anyio
+async def test_country_scope_rejects_non_iso_catalog_country_code() -> None:
+    resolver = ScopeResolver(repository=UnreachableAirportCatalog())
+
+    resolved = await resolver.resolve_finite(
+        LocationScope(LocationScopeKind.COUNTRY, "XK"),
+        coverage=CoverageMode.FULL,
+    )
+
+    assert isinstance(resolved, GeographyClarification)
+    assert resolved.query == "XK"
+    assert resolved.kind is LocationScopeKind.COUNTRY
+    assert resolved.reason == "unknown_geography"
+    assert resolved.choices == ()
+
+
+def test_country_taxonomy_contains_exact_assigned_iso_code_set() -> None:
+    payload = json.loads(
+        files("flight_hunter.geo").joinpath("countries.v1.json").read_text(encoding="utf-8")
+    )
+    countries = payload["countries"]
+    source = payload["source"]
+    assigned_codes = set(countries)
+    non_iso_codes = {"AC", "CP", "DG", "EA", "IC", "TA", "XK"}
+    canonical = json.dumps(
+        countries,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert len(assigned_codes) == 250
+    assert "CQ" in assigned_codes
+    assert assigned_codes.isdisjoint(non_iso_codes)
+    assert source["entry_count"] == len(assigned_codes)
+    assert source["code_selection"]["excluded_non_iso_codes"] == sorted(non_iso_codes)
+    assert source["import_checksum_sha256"] == sha256(canonical).hexdigest()
 
 
 @pytest.mark.anyio

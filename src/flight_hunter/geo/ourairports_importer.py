@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 
 from flight_hunter.geo.airports import Airport, AirportImportBatch, AirportType
@@ -9,6 +10,7 @@ _SEARCHABLE_TYPES = {
     AirportType.LARGE_AIRPORT.value,
     AirportType.MEDIUM_AIRPORT.value,
 }
+_IATA_CODE_RE = re.compile(r"^[A-Z]{3}$")
 
 
 class OurAirportsAirportImporter:
@@ -16,11 +18,15 @@ class OurAirportsAirportImporter:
         source_path = Path(path)
         rows_seen = 0
         airports: list[Airport] = []
+        observed_iata_codes: set[str] = set()
 
         with source_path.open("r", encoding="utf-8", newline="") as csv_file:
             reader = csv.DictReader(csv_file)
             for row in reader:
                 rows_seen += 1
+                iata_code = row.get("iata_code", "").strip().upper()
+                if _IATA_CODE_RE.fullmatch(iata_code):
+                    observed_iata_codes.add(iata_code)
                 airport = _airport_from_row(row)
                 if airport is not None:
                     airports.append(airport)
@@ -31,6 +37,7 @@ class OurAirportsAirportImporter:
             rows_seen=rows_seen,
             rows_imported=len(airports),
             airports=tuple(airports),
+            observed_iata_codes=tuple(sorted(observed_iata_codes)),
         )
 
 

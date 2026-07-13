@@ -32,8 +32,8 @@ class Airport:
     airport_type: AirportType
     active: bool
     keywords: tuple[str, ...] = ()
-    scheduled_service: bool = True
-    commercial_provenance: str = "legacy_import_filter"
+    scheduled_service: bool | None = None
+    commercial_provenance: str | None = None
 
     def __post_init__(self) -> None:
         iata_code = self.iata_code.upper()
@@ -50,11 +50,15 @@ class Airport:
             raise ValueError("name is required")
         if not self.municipality:
             raise ValueError("municipality is required")
-        if type(self.scheduled_service) is not bool:
-            raise TypeError("scheduled_service must be a boolean")
-        commercial_provenance = self.commercial_provenance.strip()
-        if not commercial_provenance:
-            raise ValueError("commercial_provenance is required")
+        if self.scheduled_service is not None and type(self.scheduled_service) is not bool:
+            raise TypeError("scheduled_service must be a boolean or None")
+        commercial_provenance = self.commercial_provenance
+        if commercial_provenance is not None:
+            if not isinstance(commercial_provenance, str):
+                raise TypeError("commercial_provenance must be a string or None")
+            commercial_provenance = commercial_provenance.strip()
+            if not commercial_provenance:
+                raise ValueError("commercial_provenance cannot be empty")
 
         object.__setattr__(self, "iata_code", iata_code)
         object.__setattr__(self, "country_code", country_code)
@@ -69,7 +73,8 @@ class Airport:
     def is_searchable(self) -> bool:
         return (
             self.active
-            and self.scheduled_service
+            and self.scheduled_service is True
+            and self.commercial_provenance is not None
             and self.airport_type
             in {
                 AirportType.LARGE_AIRPORT,
@@ -129,6 +134,20 @@ class AirportImportBatch:
     rows_seen: int
     rows_imported: int
     airports: tuple[Airport, ...]
+    observed_iata_codes: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.observed_iata_codes is None:
+            return
+        if not all(isinstance(code, str) for code in self.observed_iata_codes):
+            raise TypeError("observed_iata_codes must contain strings")
+        observed = tuple(sorted({code.strip().upper() for code in self.observed_iata_codes}))
+        if any(not _IATA_RE.fullmatch(code) for code in observed):
+            raise ValueError("observed_iata_codes must contain valid IATA codes")
+        imported = {airport.iata_code for airport in self.airports}
+        if not imported.issubset(observed):
+            raise ValueError("imported airports must be present in observed_iata_codes")
+        object.__setattr__(self, "observed_iata_codes", observed)
 
 
 @dataclass(frozen=True, slots=True)

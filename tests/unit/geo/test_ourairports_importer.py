@@ -31,6 +31,7 @@ def test_ourairports_importer_reads_searchable_iata_airports(tmp_path) -> None:
 
     assert batch.rows_seen == 7
     assert batch.rows_imported == 3
+    assert batch.observed_iata_codes == ("BCN", "CLS", "NSV", "TIN", "WAW", "WMI")
     assert [airport.iata_code for airport in batch.airports] == ["BCN", "WAW", "WMI"]
     assert batch.airports[1].keywords == ("Varsovia",)
     assert all(airport.scheduled_service for airport in batch.airports)

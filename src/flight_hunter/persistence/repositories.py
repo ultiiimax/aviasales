@@ -1807,6 +1807,16 @@ class AirportReferenceRepository:
         source: str = "ourairports",
     ) -> AirportImportRun:
         require_aware_datetime(imported_at, "imported_at")
+        missing_evidence = tuple(
+            airport.iata_code
+            for airport in batch.airports
+            if airport.scheduled_service is None or airport.commercial_provenance is None
+        )
+        if missing_evidence:
+            raise ValueError(
+                "airport imports require explicit commercial evidence: "
+                + ", ".join(missing_evidence)
+            )
         for airport in batch.airports:
             values = {
                 "iata_code": airport.iata_code,
@@ -1835,6 +1845,23 @@ class AirportReferenceRepository:
                     .where(airports_table.c.iata_code == airport.iata_code)
                     .values(**values)
                 )
+
+        if source == "ourairports" and batch.observed_iata_codes is not None:
+            observed_codes = set(batch.observed_iata_codes)
+            searchable_codes = {
+                airport.iata_code for airport in batch.airports if airport.is_searchable
+            }
+            filtered_codes = observed_codes - searchable_codes
+            stale_condition = or_(
+                airports_table.c.iata_code.in_(filtered_codes),
+                airports_table.c.iata_code.not_in(observed_codes),
+            )
+            await self._session.execute(
+                update(airports_table)
+                .where(airports_table.c.commercial_provenance == "ourairports.scheduled_service")
+                .where(stale_condition)
+                .values(active=False, imported_at=imported_at)
+            )
 
         import_run = AirportImportRun(
             source=source,

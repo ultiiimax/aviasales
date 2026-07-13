@@ -8,6 +8,12 @@ from alembic import command
 from alembic.config import Config
 
 from flight_hunter.ops.structured_logging import LOGGER_NAME
+from flight_hunter.persistence.models import airports_table
+
+
+def test_airport_core_metadata_does_not_invent_commercial_defaults() -> None:
+    assert airports_table.c.scheduled_service.default is None
+    assert airports_table.c.commercial_provenance.default is None
 
 
 def test_alembic_upgrade_does_not_disable_application_loggers(tmp_path: Path) -> None:

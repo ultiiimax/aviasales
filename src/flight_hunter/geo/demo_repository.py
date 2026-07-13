@@ -15,6 +15,8 @@ class DemoAirportRepository:
                 longitude=20.9671,
                 airport_type=AirportType.LARGE_AIRPORT,
                 active=True,
+                scheduled_service=True,
+                commercial_provenance="demo.reference_catalog",
             ),
             Airport(
                 iata_code="WMI",
@@ -25,6 +27,8 @@ class DemoAirportRepository:
                 longitude=20.6518,
                 airport_type=AirportType.MEDIUM_AIRPORT,
                 active=True,
+                scheduled_service=True,
+                commercial_provenance="demo.reference_catalog",
             ),
             Airport(
                 iata_code="LCJ",
@@ -35,6 +39,8 @@ class DemoAirportRepository:
                 longitude=19.3981,
                 airport_type=AirportType.MEDIUM_AIRPORT,
                 active=True,
+                scheduled_service=True,
+                commercial_provenance="demo.reference_catalog",
             ),
             Airport(
                 iata_code="KRK",
@@ -45,6 +51,8 @@ class DemoAirportRepository:
                 longitude=19.7848,
                 airport_type=AirportType.LARGE_AIRPORT,
                 active=True,
+                scheduled_service=True,
+                commercial_provenance="demo.reference_catalog",
             ),
             Airport(
                 iata_code="BCN",
@@ -55,6 +63,8 @@ class DemoAirportRepository:
                 longitude=2.0785,
                 airport_type=AirportType.LARGE_AIRPORT,
                 active=True,
+                scheduled_service=True,
+                commercial_provenance="demo.reference_catalog",
             ),
             Airport(
                 iata_code="LED",
@@ -75,6 +85,8 @@ class DemoAirportRepository:
                     "спб",
                     "питер",
                 ),
+                scheduled_service=True,
+                commercial_provenance="demo.reference_catalog",
             ),
             Airport(
                 iata_code="PVG",
@@ -86,6 +98,8 @@ class DemoAirportRepository:
                 airport_type=AirportType.LARGE_AIRPORT,
                 active=True,
                 keywords=("shanghai", "шанхай", "pudong", "пудун"),
+                scheduled_service=True,
+                commercial_provenance="demo.reference_catalog",
             ),
             Airport(
                 iata_code="SHA",
@@ -97,6 +111,8 @@ class DemoAirportRepository:
                 airport_type=AirportType.LARGE_AIRPORT,
                 active=True,
                 keywords=("shanghai", "шанхай", "hongqiao", "хунцяо", "хунцяо"),
+                scheduled_service=True,
+                commercial_provenance="demo.reference_catalog",
             ),
         )
 

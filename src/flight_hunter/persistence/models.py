@@ -467,12 +467,11 @@ airports_table = Table(
     Column("longitude", Float, nullable=False),
     Column("airport_type", String(40), nullable=False, index=True),
     Column("active", Boolean, nullable=False),
-    Column("scheduled_service", Boolean, nullable=False, default=True),
+    Column("scheduled_service", Boolean, nullable=False),
     Column(
         "commercial_provenance",
         String(120),
         nullable=False,
-        default="legacy_import_filter",
     ),
     Column("keywords", String(500), nullable=False, default=""),
     Column("imported_at", DateTime(timezone=True), nullable=False),

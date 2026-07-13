@@ -17,6 +17,8 @@ from flight_hunter.geo.airports import Airport, AirportCatalogSnapshot, distance
 
 _COUNTRY_CODE_RE = re.compile(r"^[A-Z]{2}$")
 _DISCOVERY_SOURCE_IDS = ("aviasales_calendar", "aviasales_hot_offers")
+_ASSIGNED_ISO_COUNTRY_COUNT = 250
+_REJECTED_NON_ISO_COUNTRY_CODES = frozenset({"AC", "CP", "DG", "EA", "IC", "TA", "XK"})
 
 
 class CoverageMode(StrEnum):
@@ -176,6 +178,16 @@ class ScopeResolver:
             raise ValueError("anywhere requires a discovery rule")
         normalized_coverage = _validate_coverage(coverage, quick_limit)
         _validate_nearby_radius(nearby_radius_km)
+        if scope.kind is LocationScopeKind.COUNTRY:
+            assert scope.value is not None
+            if scope.value not in self._countries.countries:
+                return GeographyClarification(
+                    query=scope.value,
+                    kind=LocationScopeKind.COUNTRY,
+                    reason="unknown_geography",
+                    choices=(),
+                    taxonomy_version=self._countries.version,
+                )
 
         snapshot = await self._repository.catalog_snapshot()
         searchable = tuple(airport for airport in snapshot.airports if airport.is_searchable)
@@ -196,7 +208,15 @@ class ScopeResolver:
         if normalized_coverage is CoverageMode.QUICK:
             assert quick_limit is not None
             ordered = ordered[:quick_limit]
-        provenances = tuple(sorted({airport.commercial_provenance for airport in ordered}))
+        provenances = tuple(
+            sorted(
+                {
+                    airport.commercial_provenance
+                    for airport in ordered
+                    if airport.commercial_provenance is not None
+                }
+            )
+        )
         commercial_provenance = (
             provenances[0] if len(provenances) == 1 else f"mixed:{'+'.join(provenances)}"
         )
@@ -426,6 +446,20 @@ def _load_country_taxonomy() -> _CountryTaxonomy:
     expected_count = source.get("entry_count")
     if type(expected_count) is not int or expected_count != len(countries):
         raise ValueError("country taxonomy entry count does not match source metadata")
+    code_selection = _required_mapping(source, "code_selection")
+    excluded_non_iso_codes = set(
+        _string_tuple(
+            code_selection.get("excluded_non_iso_codes"),
+            "source.code_selection.excluded_non_iso_codes",
+        )
+    )
+    if (
+        len(countries) != _ASSIGNED_ISO_COUNTRY_COUNT
+        or "CQ" not in countries
+        or not _REJECTED_NON_ISO_COUNTRY_CODES.isdisjoint(countries)
+        or excluded_non_iso_codes != _REJECTED_NON_ISO_COUNTRY_CODES
+    ):
+        raise ValueError("country taxonomy does not contain the assigned ISO code set")
     return _CountryTaxonomy(
         version=version,
         countries=countries,
