@@ -1,15 +1,35 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import dataclass
 
-import httpx2
 from fastapi.testclient import TestClient
 
 from flight_hunter.api.app import create_app
-from flight_hunter.providers.aviasales_data.adapter import AviasalesDataAdapter
-from flight_hunter.providers.aviasales_data.client import AviasalesDataClient
+from flight_hunter.config import AppSettings
+from flight_hunter.providers.aviasales_search.client import CalendarPrice
 
-NOW = datetime(2026, 6, 29, 12, 0, tzinfo=UTC)
+
+@dataclass(frozen=True, slots=True)
+class FakeCalendarProvider:
+    prices: tuple[CalendarPrice, ...]
+
+    def calendar_prices(
+        self,
+        *,
+        origin: str,
+        destination: str,
+        depart_from: str,
+        depart_to: str,
+        one_way: bool,
+        currency: str = "rub",
+    ) -> tuple[CalendarPrice, ...]:
+        assert origin == "MOW"
+        assert destination == "IST"
+        assert depart_from == "2026-09-09"
+        assert depart_to == "2026-09-11"
+        assert one_way is False
+        assert currency == "RUB"
+        return self.prices
 
 
 def test_date_matrix_endpoint_returns_unpriced_planning_cells() -> None:
@@ -35,8 +55,20 @@ def test_date_matrix_endpoint_returns_unpriced_planning_cells() -> None:
     assert all(6 <= cell["stay_days"] <= 8 for cell in body["cells"])
 
 
-def test_date_matrix_with_route_gracefully_reports_missing_cached_provider() -> None:
-    client = TestClient(create_app())
+def test_date_matrix_with_route_gracefully_reports_missing_mobile_provider() -> None:
+    client = TestClient(
+        create_app(
+            settings=AppSettings(
+                database_url="sqlite+aiosqlite:///:memory:",
+                aviasales_search_enabled=True,
+                aviasales_search_signature=None,
+                aviasales_search_marker=None,
+                aviasales_search_internal_rpm=20,
+                telegram_enabled=False,
+                telegram_webhook_secret=None,
+            )
+        )
+    )
 
     response = client.post(
         "/api/v1/searches/date-matrix",
@@ -53,7 +85,7 @@ def test_date_matrix_with_route_gracefully_reports_missing_cached_provider() -> 
     body = response.json()
     assert body["provider_calls_required"] == 0
     assert body["priced"] is False
-    assert body["pricing_denials"] == ["aviasales_data_credentials_missing"]
+    assert body["pricing_denials"] == ["aviasales_search_credentials_missing"]
     assert all(cell["amount_minor"] is None for cell in body["cells"])
 
 
@@ -104,52 +136,20 @@ def test_date_matrix_rejects_multi_adult_inferred_totals_before_provider_lookup(
     assert all(cell["amount_minor"] is None for cell in body["cells"])
 
 
-def test_date_matrix_can_overlay_aviasales_data_week_matrix_cached_prices() -> None:
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        assert request.url.path == "/v2/prices/week-matrix"
-        assert request.headers["X-Access-Token"] == "test-token"
-        return httpx2.Response(
-            200,
-            json={
-                "success": True,
-                "data": [
-                    {
-                        "origin": "MOW",
-                        "destination": "IST",
-                        "depart_date": "2026-09-10",
-                        "return_date": "2026-09-20",
-                        "value": 18420,
-                        "found_at": "2026-06-29T08:15:00+00:00",
-                        "actual": True,
-                    },
-                    {
-                        "origin": "MOW",
-                        "destination": "IST",
-                        "depart_date": "2026-09-11",
-                        "return_date": "2026-09-21",
-                        "value": 9999,
-                        "actual": False,
-                    },
-                ],
-                "error": None,
-            },
-        )
-
-    adapter = AviasalesDataAdapter(
-        client=AviasalesDataClient(
-            token="test-token",
-            http_client=httpx2.Client(
-                transport=httpx2.MockTransport(handler),
-                base_url="https://api.travelpayouts.com",
+def test_date_matrix_can_overlay_aviasales_mobile_calendar_prices() -> None:
+    provider = FakeCalendarProvider(
+        prices=(
+            CalendarPrice(
+                origin="MOW",
+                destination="IST",
+                departure_date="2026-09-10",
+                return_date="2026-09-20",
+                price_minor_units=1_842_000,
+                currency="RUB",
             ),
-            clock=lambda: NOW,
-        ),
-        enabled=True,
-        credentials_present=True,
-        clock=lambda: NOW,
-        market="ru",
+        )
     )
-    client = TestClient(create_app(provider_instances={"aviasales_data": adapter}))
+    client = TestClient(create_app(provider_instances={"aviasales_search": provider}))
 
     response = client.post(
         "/api/v1/searches/date-matrix",
@@ -161,7 +161,7 @@ def test_date_matrix_can_overlay_aviasales_data_week_matrix_cached_prices() -> N
             "flexibility_days": 1,
             "passengers": 1,
             "currency": "RUB",
-            "provider_ids": ["aviasales_data"],
+            "provider_ids": ["aviasales_search"],
         },
     )
 
@@ -176,7 +176,6 @@ def test_date_matrix_can_overlay_aviasales_data_week_matrix_cached_prices() -> N
     assert priced_cells[0]["return_date"] == "2026-09-20"
     assert priced_cells[0]["amount_minor"] == 1_842_000
     assert priced_cells[0]["currency"] == "RUB"
-    assert priced_cells[0]["provider_id"] == "aviasales_data"
-    assert priced_cells[0]["freshness"] == "cached"
-    assert priced_cells[0]["observed_at"] == "2026-06-29T08:15:00+00:00"
-    assert priced_cells[0]["requires_live_confirmation"] is True
+    assert priced_cells[0]["provider_id"] == "aviasales_search"
+    assert priced_cells[0]["freshness"] == "live"
+    assert priced_cells[0]["requires_live_confirmation"] is False

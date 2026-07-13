@@ -1,4 +1,38 @@
-# Flight Hunter — целевая архитектура
+# Flight Hunter — архитектура
+
+## Реализовано в 1.0.0
+
+Этот раздел — фактическая и авторитетная схема локального релиза v1.0.0.
+
+- Один Python-пакет `src/flight_hunter` с границами domain, application,
+  providers, persistence, API/web и ops.
+- Два процесса: FastAPI обслуживает API и встроенный web UI, worker выполняет
+  watch/deal/Telegram/browser/maintenance lanes.
+- Хранилище локального релиза — SQLite через SQLAlchemy async. При каждом
+  соединении включены foreign keys, WAL и busy timeout; миграции ведёт Alembic.
+- В Docker Compose только API применяет миграции. Worker стартует после
+  успешного `/readyz` и пишет durable heartbeat.
+- Основной live-источник — Aviasales mobile API. DTO провайдера преобразуются
+  mapper-ом; `FakeFlightProvider` используется только как честный offline demo.
+- Аутентификация — одноразовое owner invitation и bearer session. Legacy
+  household/user headers в релизе выключены.
+- Playwright/Chromium — отдельная опциональная группа для локальных E2E и
+  personal observer; в минимальный runtime image она не входит.
+- Поддерживается один локальный компьютер. HTTP привязан к
+  `127.0.0.1:8000`; публичный reverse proxy/TLS/multi-host режим в v1.0.0 не
+  поддерживается.
+
+Точные команды запуска и эксплуатации: `README.md` и
+`docs/runbooks/local-deployment.md`.
+
+---
+
+## Долгосрочная целевая модель
+
+Остальная часть документа описывает возможное развитие. Next.js, PostgreSQL,
+PostGIS, Redis, Caddy, отдельный bot-процесс и observability stack не являются
+зависимостями локального v1.0.0 и не должны трактоваться как уже реализованный
+runtime.
 
 ## 1. Архитектурная позиция
 
@@ -106,7 +140,6 @@ flight-hunter/
 │  ├─ application/            # use cases / orchestration
 │  ├─ persistence/            # SQLAlchemy, migrations, repositories
 │  ├─ providers/              # адаптеры авиаданных
-│  │  ├─ aviasales_data/
 │  │  ├─ aviasales_search/
 │  │  ├─ skyscanner_indicative/
 │  │  ├─ skyscanner_live/
@@ -144,7 +177,7 @@ Python-пакеты могут быть размещены в `src/flight_hunter
 
 ### 4.1. Почему он обязателен
 
-Одинаковый HTTP client для разных поставщиков недостаточен. Правила Aviasales Search, Aviasales Data, Skyscanner Live и Duffel различаются. Ограничения должны предотвращаться кодом.
+Одинаковый HTTP client для разных поставщиков недостаточен. Правила Aviasales Search, Skyscanner Live и Duffel различаются. Ограничения должны предотвращаться кодом.
 
 ### 4.2. Модель политики
 

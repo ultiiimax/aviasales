@@ -27,7 +27,7 @@ USER_ID = UUID("11111111-1111-1111-1111-111111111111")
 
 
 def test_admin_worker_health_returns_durable_heartbeats_without_secrets(monkeypatch) -> None:
-    monkeypatch.setenv("TRAVELPAYOUTS_API_TOKEN", "secret-value")
+    monkeypatch.setenv("APP_SECRET_KEY", "secret-value")
     session_factory = asyncio.run(_session_factory_with_heartbeats())
     client = TestClient(create_app(watch_session_factory=session_factory))
 
@@ -59,7 +59,7 @@ def test_admin_worker_health_returns_durable_heartbeats_without_secrets(monkeypa
 def test_admin_worker_metrics_returns_prometheus_text_without_job_ids_or_summaries(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("TRAVELPAYOUTS_API_TOKEN", "secret-value")
+    monkeypatch.setenv("APP_SECRET_KEY", "secret-value")
     session_factory = asyncio.run(_session_factory_with_heartbeats())
     client = TestClient(create_app(watch_session_factory=session_factory))
 

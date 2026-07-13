@@ -163,82 +163,49 @@ def _default_contracts(settings: AppSettings) -> tuple[SourceContract, ...]:
             egress_policy=("no_external_network",),
         ),
         SourceContract(
-            source_id="aviasales_data",
-            display_name="Aviasales / Travelpayouts Data API",
+            source_id="aviasales_search",
+            display_name="Aviasales mobile API",
             stage=ImplementationStage.IMPLEMENTED,
-            adapter_module="flight_hunter.providers.aviasales_data.adapter",
-            contract_file="docs/provider-contracts/aviasales-data.md",
-            terms_url=(
-                "https://support.travelpayouts.com/hc/en-us/articles/203956163-Aviasales-Data-API"
-            ),
+            adapter_module="flight_hunter.providers.aviasales_search.adapter",
+            contract_file="docs/provider-contracts/aviasales-search.md",
+            terms_url="https://tickets-api.aviasales.ru",
             required_env=(
-                "AVIASALES_DATA_ENABLED",
-                "TRAVELPAYOUTS_API_TOKEN",
-                "TRAVELPAYOUTS_MARKER",
+                "AVIASALES_SEARCH_ENABLED",
+                "AVIASALES_SEARCH_SIGNATURE",
+                "AVIASALES_SEARCH_MARKER",
             ),
             operations=(
-                "cached_search",
-                "price_range_cached_radar",
-                "grouped_cached_radar",
-                "latest_cached_radar",
-                "week_matrix_cached_radar",
-                "month_matrix_cached_radar",
-                "nearest_places_cached_radar",
-                "popular_directions_cached_radar",
-                "special_offers_cached_radar",
-                "cached_deal_seed_discovery",
+                "live_search",
+                "lazy_purchase_url",
+                "suggest_places",
+                "hot_offers",
+                "calendar_prices",
+                "typed_graphql_blocks",
                 "safe_smoke_check",
             ),
             invariants=(
-                "cached_not_live",
-                "server_side_token_only",
-                f"internal_rate_limit_rpm={settings.aviasales_data_internal_rpm}",
-                "sanitized_rate_limit_headers",
+                "live_source",
+                "mergeable_results",
+                "background_watch_scans_allowed",
+                f"internal_rate_limit_rpm={settings.aviasales_search_internal_rpm}",
                 "no_raw_payload_persistence",
-                "single_adult_ticket_price_basis_only",
-                "cached_deal_seeds_candidate_only",
+                "no_secret_logging",
+                "purchase_url_explicit_resolve",
+                "no_signed_purchase_url_in_callbacks",
             ),
             notes=(
-                "Typed HTTP client, query planner, mapper and smoke helper are implemented for "
-                "prices_for_dates, search_by_price_range, grouped_prices, get_latest_prices, "
-                "week-matrix, month-matrix, nearest-places-matrix, get_popular_directions and "
-                "get_special_offers. Cached-radar rows can also be persisted as manual "
-                "verification DealCandidate seeds without exposing provider booking links. "
-                "Remaining Data API endpoints must stay explicit cached-radar follow-up work."
+                "Typed Aviasales mobile API adapter. Exact search is live and mergeable; purchase "
+                "URLs are resolved only by explicit booking action token. Suggest, hot offers, "
+                "calendar/explore and selected GraphQL feed blocks are typed operations, not a "
+                "generic proxy."
             ),
-            egress_policy=("https://api.travelpayouts.com", "https://www.aviasales.ru"),
-        ),
-        SourceContract(
-            source_id="aviasales_search",
-            display_name="Aviasales Flight Search API",
-            stage=ImplementationStage.POLICY_SKELETON,
-            adapter_module=None,
-            contract_file="docs/provider-contracts/aviasales-search.md",
-            terms_url=(
-                "https://support.travelpayouts.com/hc/en-us/articles/"
-                "30565016140434-Aviasales-Flight-Search-API-real-time-and-multi-city-search"
+            egress_policy=(
+                "https://tickets-api.aviasales.ru",
+                "https://suggest.aviasales.ru",
+                "https://explore-api.aviasales.ru",
+                "https://ariadne.aviasales.ru",
+                "https://www.aviasales.ru",
             ),
-            required_env=(
-                "AVIASALES_SEARCH_ENABLED",
-                "AVIASALES_SEARCH_ACCESS_APPROVED",
-                "AVIASALES_SEARCH_CONFIRMED_MAU_50000",
-                "AVIASALES_SEARCH_TOKEN",
-                "AVIASALES_SEARCH_MARKER",
-                "AVIASALES_SEARCH_REAL_HOST",
-            ),
-            operations=("user_action_live_search", "click_time_booking_action"),
-            invariants=(
-                "no_background_calls",
-                "provider_isolated_results",
-                "booking_link_click_gate",
-                "no_booking_link_preload",
-                "requires_real_user_ip",
-            ),
-            notes=(
-                "Policy and gateway tests exist, but the adapter is intentionally not wired until "
-                "approved access and current docs are re-verified."
-            ),
-            egress_policy=("not_configured_until_access_approved",),
         ),
         SourceContract(
             source_id="skyscanner_indicative",

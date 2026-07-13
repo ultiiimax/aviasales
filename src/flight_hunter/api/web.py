@@ -760,16 +760,9 @@ def render_index_html() -> str:
           <label>Валюта
             <input name="currency" value="RUB" maxlength="3" autocomplete="off" required>
           </label>
-          <label>Radar min
-            <input name="min_price_minor" type="number" min="0" step="100" value="1000000" required>
-          </label>
-          <label>Radar max
-            <input name="max_price_minor" type="number" min="0" step="100" value="2000000" required>
-          </label>
           <div class="form-actions">
             <span class="fineprint" id="passenger-total">2 пассажира · туда-обратно</span>
             <div class="quick-actions" aria-label="Ручные проверки">
-              <button class="secondary" type="button" id="cached-radar-button">Cached radar</button>
               <button class="secondary" type="button" id="personal-observe-button">Считать из браузера</button>
               <button class="secondary" type="button" id="deal-discovery-button">Найти акции</button>
               <button class="primary" type="submit" id="submit-button">Найти билеты</button>
@@ -796,7 +789,7 @@ def render_index_html() -> str:
         <section class="panel" aria-labelledby="watches-heading">
           <div class="panel-header">
             <div>
-              <h2 class="panel-title" id="watches-heading">Watches</h2>
+              <h2 class="panel-title" id="watches-heading">Отслеживания</h2>
               <div class="panel-kicker">Слежение работает по расписанию и не запускает браузер без клика.</div>
             </div>
           </div>
@@ -848,7 +841,6 @@ def render_index_html() -> str:
         <div class="result-list" id="results-list">
           <div class="empty-state">Заполни маршрут и нажми “Найти билеты”.</div>
         </div>
-        <div class="denial-list" id="cached-radar-list"></div>
         <div class="denial-list" id="confirmation-list"></div>
         <div class="denial-list" id="live-list"></div>
         <div class="denial-list" id="denials-list"></div>
@@ -859,14 +851,12 @@ def render_index_html() -> str:
   <script>
     const providersList = document.querySelector("#providers-list");
     const resultsList = document.querySelector("#results-list");
-    const cachedRadarList = document.querySelector("#cached-radar-list");
     const confirmationList = document.querySelector("#confirmation-list");
     const liveList = document.querySelector("#live-list");
     const denialsList = document.querySelector("#denials-list");
     const resultsCount = document.querySelector("#results-count");
     const statusLine = document.querySelector("#status-line");
     const submitButton = document.querySelector("#submit-button");
-    const cachedRadarButton = document.querySelector("#cached-radar-button");
     const personalObserveButton = document.querySelector("#personal-observe-button");
     const dealDiscoveryButton = document.querySelector("#deal-discovery-button");
     const createWatchButton = document.querySelector("#create-watch-button");
@@ -929,42 +919,12 @@ def render_index_html() -> str:
 
     const providerLabels = {
       fake: "Демо-источник",
-      aviasales_data: "Aviasales Data",
+      aviasales_search: "Aviasales mobile API",
       aviasales_search: "Aviasales Search",
       skyscanner_indicative: "Skyscanner Indicative",
       skyscanner_live: "Skyscanner Live",
       duffel: "Duffel"
     };
-
-    function demoUserId() {
-      const storageKey = "flight_hunter_demo_user_id";
-      const existing = window.localStorage.getItem(storageKey);
-      if (existing) return existing;
-      const generated = window.crypto && window.crypto.randomUUID
-        ? window.crypto.randomUUID()
-        : ["11111111", "1111", "4111", "8111", "111111111111"].join("-");
-      window.localStorage.setItem(storageKey, generated);
-      return generated;
-    }
-
-    function demoHouseholdId() {
-      const storageKey = "flight_hunter_demo_household_id";
-      const existing = window.localStorage.getItem(storageKey);
-      if (existing) return existing;
-      const generated = window.crypto && window.crypto.randomUUID
-        ? window.crypto.randomUUID()
-        : ["22222222", "2222", "4222", "8222", "222222222222"].join("-");
-      window.localStorage.setItem(storageKey, generated);
-      return generated;
-    }
-
-    function demoHeaders(extra = {}) {
-      return {
-        "X-Flight-Hunter-Household-Id": demoHouseholdId(),
-        "X-Flight-Hunter-User-Id": demoUserId(),
-        ...extra
-      };
-    }
 
     function sessionToken() {
       return window.localStorage.getItem(sessionTokenKey);
@@ -978,7 +938,7 @@ def render_index_html() -> str:
           ...extra
         };
       }
-      return demoHeaders(extra);
+      return extra;
     }
 
     function storeSession(session) {
@@ -989,8 +949,26 @@ def render_index_html() -> str:
 
     function clearSession() {
       window.localStorage.removeItem(sessionTokenKey);
-      authState.textContent = "Session: demo headers";
+      authState.textContent = "Session: не выполнен вход";
       authSignoutButton.disabled = true;
+    }
+
+    function renderSignedOutState() {
+      watchList.innerHTML = '<div class="empty-state">Войдите, чтобы видеть отслеживания.</div>';
+      auditList.innerHTML = '<div class="empty-state">Войдите, чтобы видеть аудит.</div>';
+      renderSignedOutConfirmationState();
+    }
+
+    function renderSignedOutConfirmationState() {
+      confirmationList.innerHTML = '<div class="empty-state">Войдите, чтобы видеть подтверждения.</div>';
+    }
+
+    async function loadSessionBoundData() {
+      if (!sessionToken()) {
+        renderSignedOutState();
+        return;
+      }
+      await Promise.all([loadManualConfirmations(), loadWatches(), loadAuditEvents()]);
     }
 
     async function refreshSessionState() {
@@ -1036,8 +1014,7 @@ def render_index_html() -> str:
         storeSession(await response.json());
         authForm.reset();
         statusLine.textContent = "session active";
-        await loadWatches();
-        await loadAuditEvents();
+        await loadSessionBoundData();
       } catch (error) {
         authState.textContent = `Session: ${error.message}`;
       } finally {
@@ -1182,31 +1159,6 @@ def render_index_html() -> str:
         trip_type: returnDate ? "round_trip" : "one_way",
         currency: text(form.get("currency")).toUpperCase()
       };
-    }
-
-    function buildCachedRadarPayload(radarKind) {
-      const form = new FormData(document.querySelector("#search-form"));
-      const payload = buildSearchPayload();
-      const radarPayload = {
-        radar_kind: radarKind,
-        origin: payload.origin,
-        destination: payload.destination,
-        departure_date: payload.departure_date,
-        return_date: payload.return_date,
-        passengers: payload.passengers,
-        adults: payload.adults,
-        children: payload.children,
-        infants: payload.infants,
-        currency: payload.currency
-      };
-      if (radarKind === "nearest_places_matrix") {
-        radarPayload.nearby_distance_km = 300;
-      }
-      if (radarKind === "price_range") {
-        radarPayload.min_price_minor = Math.max(0, numberValue(form, "min_price_minor", 1000000));
-        radarPayload.max_price_minor = Math.max(0, numberValue(form, "max_price_minor", 2000000));
-      }
-      return radarPayload;
     }
 
     function updatePassengerSummary() {
@@ -2030,70 +1982,6 @@ def render_index_html() -> str:
       }
     }
 
-    function cachedRadarTitle(kind) {
-      return {
-        price_range: "Cached price range",
-        grouped_prices: "Cached grouped prices",
-        latest_prices: "Cached latest prices",
-        month_matrix: "Cached month matrix",
-        nearest_places_matrix: "Cached nearby places",
-        popular_directions: "Cached popular directions",
-        special_offers: "Cached special offers"
-      }[kind] || kind;
-    }
-
-    function renderCachedRadarResults(results) {
-      cachedRadarList.replaceChildren();
-      const totalOffers = results.reduce((sum, item) => sum + (item.offers || []).length, 0);
-      appendSectionHeader(
-        cachedRadarList,
-        "Cached radar",
-        totalOffers > 0
-          ? "Cached hints. Confirm externally before purchase."
-          : "No cached radar prices for this route or credentials are missing."
-      );
-      results.forEach((item) => {
-        const denials = item.pricing_denials || [];
-        if (denials.length > 0) {
-          const row = document.createElement("div");
-          row.className = "denial-row small";
-          row.textContent = `${cachedRadarTitle(item.radar_kind)}: ${denials.join(", ")}`;
-          cachedRadarList.append(row);
-        }
-        (item.offers || []).forEach((offer) => {
-          const row = document.createElement("div");
-          row.className = "result-row";
-          const caveats = (offer.ranking_reasons || []).map((reason) => {
-            const label = reasonLabel(reason);
-            const tone = reason.startsWith("cached_") ? "ok" : "warn";
-            return `<span class="badge ${tone}">${label}</span>`;
-          }).join("") + riskBadges(offer);
-          row.innerHTML = `
-            <div>
-              <div class="route"></div>
-              <div class="small"></div>
-            </div>
-            <div class="price"></div>
-            <div>
-              <div class="caveats">${caveats}</div>
-              <div class="risk-detail small"></div>
-              <div class="result-actions"></div>
-            </div>
-          `;
-          row.querySelector(".route").textContent =
-            `${offer.origin} → ${offer.destination}`;
-          row.querySelector(".small").textContent =
-            `${cachedRadarTitle(item.radar_kind)} · ${offer.departure_date}`
-            + `${offer.return_date ? " — " + offer.return_date : ""}`
-            + ` · ${offer.passengers} пасс.${priceBasisLabel(offer)} · ${offer.freshness}`;
-          row.querySelector(".price").textContent = offer.total_price.formatted;
-          row.querySelector(".risk-detail").textContent = riskExplanationText(offer);
-          appendManualConfirmationActions(row.querySelector(".result-actions"), pricedOfferTarget(offer));
-          cachedRadarList.append(row);
-        });
-      });
-    }
-
     function renderResults(body) {
       const offers = body.priced_offers || body.offers || [];
       const externalLinks = body.external_links || [];
@@ -2103,7 +1991,6 @@ def render_index_html() -> str:
       lastSearchId = body.search_id || null;
       lastExternalLinks = externalLinks;
       resultsList.replaceChildren();
-      cachedRadarList.replaceChildren();
       confirmationList.replaceChildren();
       liveList.replaceChildren();
       denialsList.replaceChildren();
@@ -2122,7 +2009,7 @@ def render_index_html() -> str:
       if (offers.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "Нет mergeable-вариантов по текущему запросу.";
+        empty.textContent = "Недостаточно данных: нет вариантов по текущему запросу.";
         resultsList.append(empty);
       }
 
@@ -2231,7 +2118,11 @@ def render_index_html() -> str:
         row.textContent = `${providerLabel(providerId)}: ${reasonLabel(denial.code)}`;
         denialsList.append(row);
       });
-      loadManualConfirmations();
+      if (sessionToken()) {
+        loadManualConfirmations();
+      } else {
+        renderSignedOutConfirmationState();
+      }
     }
 
     function renderLiveObservation(observation) {
@@ -2515,7 +2406,6 @@ def render_index_html() -> str:
         statusLine.textContent = "готово";
       } catch (error) {
         resultsList.replaceChildren();
-        cachedRadarList.replaceChildren();
         confirmationList.replaceChildren();
         const node = document.createElement("div");
         node.className = "error-state";
@@ -2524,43 +2414,6 @@ def render_index_html() -> str:
         statusLine.textContent = "ошибка";
       } finally {
         submitButton.disabled = false;
-      }
-    }
-
-    async function runCachedRadar() {
-      const radarKinds = [
-        "price_range",
-        "grouped_prices",
-        "latest_prices",
-        "month_matrix",
-        "nearest_places_matrix",
-        "popular_directions",
-        "special_offers"
-      ];
-      cachedRadarButton.disabled = true;
-      statusLine.textContent = "cached radar...";
-      try {
-        const results = [];
-        for (const radarKind of radarKinds) {
-          const response = await fetch("/api/v1/searches/cached-radar", {
-            method: "POST",
-            headers: authHeaders({"Content-Type": "application/json"}),
-            body: JSON.stringify(buildCachedRadarPayload(radarKind))
-          });
-          if (!response.ok) throw new Error(await codedMessage(response));
-          results.push(await response.json());
-        }
-        renderCachedRadarResults(results);
-        statusLine.textContent = "cached radar ready";
-      } catch (error) {
-        cachedRadarList.replaceChildren();
-        const row = document.createElement("div");
-        row.className = "denial-row small";
-        row.textContent = `Cached radar: ${error.message}`;
-        cachedRadarList.append(row);
-        statusLine.textContent = "cached radar unavailable";
-      } finally {
-        cachedRadarButton.disabled = false;
       }
     }
 
@@ -2744,10 +2597,8 @@ def render_index_html() -> str:
     authSignoutButton.addEventListener("click", () => {
       clearSession();
       statusLine.textContent = "session cleared";
-      loadWatches();
-      loadAuditEvents();
+      renderSignedOutState();
     });
-    cachedRadarButton.addEventListener("click", runCachedRadar);
     personalObserveButton.addEventListener("click", runPersonalObservation);
     dealDiscoveryButton.addEventListener("click", runDealDiscovery);
     createWatchButton.addEventListener("click", createWatchFromSearch);
@@ -2773,12 +2624,9 @@ def render_index_html() -> str:
     renderAgentActions([]);
     loadProviders();
     loadBrowserSources();
-    loadManualConfirmations();
-    loadWatches();
     loadAdminHealth();
-    loadAuditEvents();
     loadAgentPresets();
-    refreshSessionState();
+    refreshSessionState().then(loadSessionBoundData);
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
         navigator.serviceWorker.register("/service-worker.js").catch(() => {});

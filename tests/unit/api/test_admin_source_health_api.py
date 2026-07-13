@@ -18,7 +18,9 @@ NOW = datetime(2026, 6, 29, 22, 30, tzinfo=UTC)
 
 
 def test_admin_source_health_reads_config_and_recent_events_without_secrets(monkeypatch) -> None:
-    monkeypatch.setenv("TRAVELPAYOUTS_API_TOKEN", "secret-value")
+    monkeypatch.setenv("AVIASALES_SEARCH_ENABLED", "true")
+    monkeypatch.setenv("AVIASALES_SEARCH_SIGNATURE", "secret-signature")
+    monkeypatch.setenv("AVIASALES_SEARCH_MARKER", "secret-marker")
     session_factory = asyncio.run(_session_factory_with_events())
     client = TestClient(create_app(watch_session_factory=session_factory))
 
@@ -40,8 +42,8 @@ def test_admin_source_health_reads_config_and_recent_events_without_secrets(monk
     assert paged_body["event_limit"] == 7
     assert len(paged_body["sources"]) == 1
     sources = {source["source_id"]: source for source in body["sources"]}
-    assert sources["aviasales_data"]["contract_known"] is True
-    assert sources["aviasales_data"]["stage"] == "implemented"
+    assert sources["aviasales_search"]["contract_known"] is True
+    assert sources["aviasales_search"]["stage"] == "implemented"
     assert sources["searxng"]["contract_known"] is True
     assert sources["searxng"]["current_status"] == "blocked"
     assert sources["searxng"]["blocked_reasons"] == ["searxng_disabled"]
@@ -59,8 +61,8 @@ def test_admin_source_health_reads_config_and_recent_events_without_secrets(monk
     assert sources["tutu"]["current_status"] == "retry_scheduled"
     assert sources["tutu"]["latest_event"]["event_type"] == "browser_observation"
     assert sources["tutu"]["latest_event"]["cooldown_until"] is not None
-    assert "secret-value" not in str(body)
-    assert "TRAVELPAYOUTS_API_TOKEN" not in str(body)
+    assert "secret-signature" not in str(body)
+    assert "secret-marker" not in str(body)
 
 
 async def _session_factory_with_events():

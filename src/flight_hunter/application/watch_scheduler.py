@@ -5,12 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from uuid import UUID
 
-from flight_hunter.domain.policy import (
-    DataKind,
-    ExecutionContext,
-    ProviderOperation,
-    ProviderPolicy,
-)
+from flight_hunter.domain.policy import ExecutionContext, ProviderOperation, ProviderPolicy
 from flight_hunter.policy.guard import ProviderPolicyGuard
 
 
@@ -139,8 +134,6 @@ class WatchSchedulerPlanner:
 
 
 def _scheduler_registration_denial(policy: ProviderPolicy) -> str | None:
-    if policy.data_kind == DataKind.LIVE:
-        return "live_provider_not_allowed_in_scheduler"
     if policy.user_action_required:
         return "user_action_required"
     if not policy.background_requests_allowed:

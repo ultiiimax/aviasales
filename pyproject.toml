@@ -1,12 +1,13 @@
 [project]
 name = "flight-hunter"
-version = "0.1.0"
+version = "1.0.0"
 description = "Self-hosted invitation-only flight search and watch system."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
   "aiosqlite>=0.21.0,<1.0.0",
   "alembic>=1.17.0,<2.0.0",
+  "curl_cffi>=0.7,<1.0.0",
   "fastapi>=0.125.0,<1.0.0",
   "httpx2>=2.4.0",
   "sqlalchemy[asyncio]>=2.0.45,<3.0.0",
@@ -15,13 +16,16 @@ dependencies = [
 
 [project.scripts]
 flight-hunter-import-airports = "flight_hunter.ops.airport_import:main"
+flight-hunter-init-local = "flight_hunter.ops.init_local:main"
 flight-hunter-backup = "flight_hunter.ops.backup:backup_main"
 flight-hunter-backup-verify = "flight_hunter.ops.backup:verify_main"
+flight-hunter-browser-bootstrap = "flight_hunter.ops.browser_bootstrap:main"
 flight-hunter-browser-smoke = "flight_hunter.ops.browser_smoke:main"
 flight-hunter-cleanup-live-observations = "flight_hunter.ops.live_observation_cleanup:main"
 flight-hunter-observe = "flight_hunter.providers.personal_observer.cli:main"
 flight-hunter-parse-fixture = "flight_hunter.providers.personal_observer.parse_fixture_cli:main"
 flight-hunter-redact-url = "flight_hunter.ops.redact_url:main"
+flight-hunter-release-check = "flight_hunter.ops.release_check:main"
 flight-hunter-run-personal-observation = "flight_hunter.providers.personal_observer.worker_cli:main"
 flight-hunter-sanitize-html = "flight_hunter.ops.sanitize_html:main"
 flight-hunter-security-scan = "flight_hunter.ops.security_scan:main"
@@ -30,7 +34,6 @@ flight-hunter-source-smoke = "flight_hunter.ops.source_smoke:main"
 flight-hunter-worker = "flight_hunter.ops.worker:main"
 flight-hunter-worker-healthcheck = "flight_hunter.ops.worker_healthcheck:main"
 flight-hunter-restore = "flight_hunter.ops.backup:restore_main"
-travelpayouts-smoke = "flight_hunter.providers.aviasales_data.smoke:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -55,6 +58,7 @@ scraping = [
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "--basetemp=.pytest-tmp"
+markers = ["browser_e2e: requires bootstrapped Playwright Chromium"]
 
 [tool.ruff]
 line-length = 100

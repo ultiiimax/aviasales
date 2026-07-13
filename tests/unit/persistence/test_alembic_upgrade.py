@@ -1,10 +1,25 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+
+from flight_hunter.ops.structured_logging import LOGGER_NAME
+
+
+def test_alembic_upgrade_does_not_disable_application_loggers(tmp_path: Path) -> None:
+    db_path = tmp_path / "logger-safe.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path.as_posix()}")
+    logger = logging.getLogger(LOGGER_NAME)
+    logger.disabled = False
+
+    command.upgrade(config, "head")
+
+    assert not logger.disabled
 
 
 def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:

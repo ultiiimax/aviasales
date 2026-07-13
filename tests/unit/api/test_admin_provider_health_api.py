@@ -6,8 +6,9 @@ from flight_hunter.api.app import create_app
 
 
 def test_admin_provider_health_returns_provider_status_without_secrets(monkeypatch) -> None:
-    monkeypatch.setenv("TRAVELPAYOUTS_API_TOKEN", "secret-value")
-    monkeypatch.setenv("AVIASALES_DATA_ENABLED", "true")
+    monkeypatch.setenv("AVIASALES_SEARCH_ENABLED", "true")
+    monkeypatch.setenv("AVIASALES_SEARCH_SIGNATURE", "secret-signature")
+    monkeypatch.setenv("AVIASALES_SEARCH_MARKER", "secret-marker")
     client = TestClient(create_app())
 
     response = client.get("/api/v1/admin/providers/health")
@@ -16,7 +17,7 @@ def test_admin_provider_health_returns_provider_status_without_secrets(monkeypat
     body = response.json()
     assert body["checked_at"]
     providers = {provider["provider_id"]: provider for provider in body["providers"]}
-    assert providers["aviasales_data"]["credentials_present"] is True
-    assert providers["aviasales_data"]["secret_present"] is True
-    assert "secret-value" not in str(body)
-    assert "TRAVELPAYOUTS_API_TOKEN" not in str(body)
+    assert providers["aviasales_search"]["credentials_present"] is True
+    assert providers["aviasales_search"]["secret_present"] is True
+    assert "secret-signature" not in str(body)
+    assert "secret-marker" not in str(body)

@@ -18,7 +18,7 @@ from flight_hunter.application.personal_observations import (
     PersonalObservationService,
 )
 from flight_hunter.domain.money import Money
-from flight_hunter.domain.observation import ObservationStatus
+from flight_hunter.domain.observation import ObservationErrorCode, ObservationStatus
 from flight_hunter.domain.offers import Freshness, SearchIntent
 from flight_hunter.domain.search_results import BrowserObservedOffer, Confidence
 from flight_hunter.persistence.models import mapper_registry
@@ -93,6 +93,25 @@ class TimeoutRunner:
             PersonalObservationCode.RUNNER_FAILED,
             "browser timed out",
             status=ObservationStatus.TIMED_OUT,
+        )
+
+
+class PlaywrightUnavailableRunner:
+    def observe(
+        self,
+        *,
+        source_id: str,
+        intent: SearchIntent,
+        user_action: bool,
+        fixture_html_path: Path | None = None,
+        progress_callback=None,
+        checkpoint_callback=None,
+    ) -> PersonalObservationRunnerResult:
+        raise PersonalObservationRunnerError(
+            PersonalObservationCode.RUNNER_FAILED,
+            "playwright browser runtime is unavailable",
+            status=ObservationStatus.FAILED,
+            error_code=ObservationErrorCode.BROWSER_RUNTIME_UNAVAILABLE,
         )
 
 
@@ -572,6 +591,48 @@ async def test_personal_observation_transient_failure_schedules_retry() -> None:
     assert job.next_retry_at == NOW + timedelta(seconds=30)
     assert queued_now == ()
     assert [queued_job.id for queued_job in queued_later] == [created.job_id]
+
+
+@pytest.mark.anyio
+async def test_missing_browser_runtime_fails_without_retry() -> None:
+    session_factory = await _session_factory()
+    async with session_factory() as session:
+        service = _service(
+            session,
+            runner=PlaywrightUnavailableRunner(),
+            enabled=True,
+            max_attempts=3,
+            retry_delay=timedelta(seconds=30),
+        )
+        grant = await service.issue_grant(
+            user_id=USER_ID,
+            source_id="tutu",
+            search_intent=_intent(),
+            source=GrantSource.WEB_CLICK,
+        )
+        created = await service.create_job(
+            household_id=HOUSEHOLD_ID,
+            user_id=USER_ID,
+            source_id="tutu",
+            search_id="sha256:search",
+            search_intent=_intent(),
+            grant_token=grant.grant_token or "",
+            idempotency_key="idem-browser-runtime",
+        )
+        assert created.job_id is not None
+
+        run = await service.run_job(job_id=created.job_id)
+        await session.commit()
+
+    async with session_factory() as session:
+        job = await BrowserObservationJobRepository(session).get_job_by_id(created.job_id)
+
+    assert run.accepted is False
+    assert run.retry_scheduled is False
+    assert job is not None
+    assert job.status == ObservationStatus.FAILED
+    assert job.error_code == ObservationErrorCode.BROWSER_RUNTIME_UNAVAILABLE
+    assert job.next_retry_at is None
 
 
 @pytest.mark.anyio

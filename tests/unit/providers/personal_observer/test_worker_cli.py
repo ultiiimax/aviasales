@@ -25,7 +25,7 @@ from flight_hunter.providers.personal_observer.worker_cli import main
 FIXTURE = Path("tests/fixtures/browser/tutu/search_result_source_specific.html")
 HOUSEHOLD_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 USER_ID = UUID("11111111-1111-1111-1111-111111111111")
-NOW = datetime(2026, 6, 29, 19, 0, tzinfo=UTC)
+NOW = datetime.now(UTC)
 
 
 def test_worker_cli_runs_queued_fixture_job_and_persists_offer(

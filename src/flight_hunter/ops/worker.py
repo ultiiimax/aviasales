@@ -30,6 +30,7 @@ from flight_hunter.deals import DealDiscoveryService
 from flight_hunter.deals.crawl4ai_client import Crawl4AiMarkdownClient
 from flight_hunter.deals.searxng_client import SearxngClient
 from flight_hunter.notifications.alerts import AlertEvaluator
+from flight_hunter.persistence.database import create_database_engine
 from flight_hunter.persistence.repositories import (
     AlertDedupeRepository,
     BrowserObservationJobRecord,
@@ -49,8 +50,8 @@ from flight_hunter.persistence.repositories import (
     WorkerControlRepository,
     WorkerHeartbeatRepository,
 )
-from flight_hunter.providers.aviasales_data.adapter import AviasalesDataAdapter
-from flight_hunter.providers.aviasales_data.client import AviasalesDataClient
+from flight_hunter.providers.aviasales_search.adapter import AviasalesSearchAdapter
+from flight_hunter.providers.aviasales_search.client import AviasalesSearchClient
 from flight_hunter.providers.fake import FakeFlightProvider
 from flight_hunter.providers.personal_observer import (
     PersonalObserverConfig,
@@ -304,14 +305,14 @@ async def run_once(
     cleanup_expired_live_observations: bool = True,
     process_watch_scans: bool = True,
 ) -> WorkerRunSummary:
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
     roles = _effective_worker_roles(
         worker_roles,
         process_watch_scans=process_watch_scans,
         cleanup_expired_live_observations=cleanup_expired_live_observations,
     )
-    engine = create_async_engine(database_url)
+    engine = create_database_engine(database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         heartbeat_repository = WorkerHeartbeatRepository(session)
@@ -961,9 +962,9 @@ async def _record_worker_stopped(
     role: str = "flight_hunter_worker",
     summary: WorkerRunSummary,
 ) -> None:
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    engine = create_async_engine(database_url)
+    engine = create_database_engine(database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         repository = WorkerHeartbeatRepository(session)
@@ -1029,15 +1030,17 @@ def _health_message(decision: PersonalObservationRunDecision, *, status: str) ->
 
 def _watch_scan_providers(
     settings: AppSettings,
-) -> dict[str, AviasalesDataAdapter | FakeFlightProvider]:
-    if settings.aviasales_data_enabled and settings.travelpayouts_api_token is not None:
+) -> dict[str, AviasalesSearchAdapter | FakeFlightProvider]:
+    if settings.aviasales_search_enabled and settings.aviasales_search_credentials_present:
         return {
-            "aviasales_data": AviasalesDataAdapter(
-                client=AviasalesDataClient(token=settings.travelpayouts_api_token),
-                enabled=settings.aviasales_data_enabled,
-                credentials_present=settings.aviasales_data_credentials_present,
-                market=settings.aviasales_data_default_market,
-                internal_rpm=settings.aviasales_data_internal_rpm,
+            "aviasales_search": AviasalesSearchAdapter(
+                client=AviasalesSearchClient(
+                    signature=settings.aviasales_search_signature or "",
+                    marker=settings.aviasales_search_marker or "",
+                ),
+                enabled=settings.aviasales_search_enabled,
+                credentials_present=settings.aviasales_search_credentials_present,
+                internal_rpm=settings.aviasales_search_internal_rpm,
             )
         }
     return {"fake": FakeFlightProvider()}

@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from flight_hunter.application.watch_service import CreateWatchCommand, WatchService
 from flight_hunter.config import AppSettings, load_env_file
+from flight_hunter.persistence.database import create_database_engine
 from flight_hunter.persistence.repositories import HouseholdWatchRepository
 
 DEMO_HOUSEHOLD_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -52,7 +53,7 @@ def main() -> None:
 
 
 async def seed_demo(*, database_url: str) -> SeedDemoResult:
-    engine = create_async_engine(database_url)
+    engine = create_database_engine(database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         repository = HouseholdWatchRepository(session)

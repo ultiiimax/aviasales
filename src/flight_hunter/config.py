@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import UUID
 
 DEFAULT_CARRIER_LINKS = (
     "aeroflot",
@@ -29,15 +31,16 @@ DEFAULT_CARRIER_LINKS = (
 @dataclass(frozen=True, slots=True)
 class AppSettings:
     database_url: str
-    aviasales_data_enabled: bool
-    travelpayouts_api_token: str | None
-    aviasales_data_default_market: str
-    aviasales_data_internal_rpm: int
+    aviasales_search_enabled: bool
+    aviasales_search_signature: str | None
+    aviasales_search_marker: str | None
+    aviasales_search_internal_rpm: int
     telegram_enabled: bool
     telegram_webhook_secret: str | None
+    app_secret_key: str | None = None
     auth_bootstrap_token: str | None = None
     auth_session_ttl_seconds: int = 2_592_000
-    auth_allow_legacy_headers: bool = True
+    auth_allow_legacy_headers: bool = False
     telegram_bot_token: str | None = None
     telegram_quiet_hours_start: str | None = "23:00"
     telegram_quiet_hours_end: str | None = "08:00"
@@ -122,12 +125,13 @@ class AppSettings:
                 "DATABASE_URL",
                 "sqlite+aiosqlite:///./flight_hunter_dev.db",
             ),
+            app_secret_key=_env_optional("APP_SECRET_KEY"),
             auth_bootstrap_token=_env_optional("AUTH_BOOTSTRAP_TOKEN"),
             auth_session_ttl_seconds=_env_int(
                 "AUTH_SESSION_TTL_SECONDS",
                 default=2_592_000,
             ),
-            auth_allow_legacy_headers=_env_bool("AUTH_ALLOW_LEGACY_HEADERS", default=True),
+            auth_allow_legacy_headers=_env_bool("AUTH_ALLOW_LEGACY_HEADERS", default=False),
             live_refresh_min_gap_seconds=_env_int("LIVE_REFRESH_MIN_GAP_SECONDS", default=600),
             agent_mode_enabled=_env_bool("AGENT_MODE_ENABLED", default=True),
             agent_provider=os.getenv("AGENT_PROVIDER", "deterministic_presets"),
@@ -147,10 +151,10 @@ class AppSettings:
             ),
             openai_api_key=_env_optional("OPENAI_API_KEY"),
             openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com"),
-            aviasales_data_enabled=_env_bool("AVIASALES_DATA_ENABLED", default=False),
-            travelpayouts_api_token=_env_optional("TRAVELPAYOUTS_API_TOKEN"),
-            aviasales_data_default_market=os.getenv("AVIASALES_DATA_DEFAULT_MARKET", "pl"),
-            aviasales_data_internal_rpm=_env_int("AVIASALES_DATA_INTERNAL_RPM", default=30),
+            aviasales_search_enabled=_env_bool("AVIASALES_SEARCH_ENABLED", default=False),
+            aviasales_search_signature=_env_optional("AVIASALES_SEARCH_SIGNATURE"),
+            aviasales_search_marker=_env_optional("AVIASALES_SEARCH_MARKER"),
+            aviasales_search_internal_rpm=_env_int("AVIASALES_SEARCH_INTERNAL_RPM", default=20),
             telegram_enabled=_env_bool("TELEGRAM_ENABLED", default=False),
             telegram_webhook_secret=_env_optional("TELEGRAM_WEBHOOK_SECRET"),
             telegram_bot_token=_env_optional("TELEGRAM_BOT_TOKEN"),
@@ -297,8 +301,25 @@ class AppSettings:
         )
 
     @property
-    def aviasales_data_credentials_present(self) -> bool:
-        return self.travelpayouts_api_token is not None
+    def aviasales_search_credentials_present(self) -> bool:
+        return (
+            self.aviasales_search_signature is not None and self.aviasales_search_marker is not None
+        )
+
+    @property
+    def aviasales_search_credentials_valid(self) -> bool:
+        if not self.aviasales_search_credentials_present:
+            return False
+        signature = self.aviasales_search_signature or ""
+        marker = self.aviasales_search_marker or ""
+        try:
+            parsed_signature = UUID(signature)
+        except ValueError:
+            return False
+        return (
+            str(parsed_signature) == signature.lower()
+            and re.fullmatch(r"mobile_app\.[0-9a-f]{32}", marker) is not None
+        )
 
     @property
     def ru_clickout_enabled_source_ids(self) -> tuple[str, ...]:

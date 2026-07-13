@@ -12,9 +12,11 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from flight_hunter import __version__
 from flight_hunter.agent.chat import (
     AgentAction,
     AgentAuditEvent,
@@ -37,6 +39,12 @@ from flight_hunter.application.airport_service import (
     AirportAutocompleteMatch,
     AirportService,
     NearbyAirport,
+)
+from flight_hunter.application.booking_actions import (
+    BookingActionTokenError,
+    decode_booking_ref,
+    sign_booking_action_token,
+    verify_booking_action_token,
 )
 from flight_hunter.application.date_matrix import (
     DateMatrix,
@@ -87,10 +95,6 @@ from flight_hunter.browser.html_extractor import (
 )
 from flight_hunter.config import AppSettings, load_env_file
 from flight_hunter.deals import DealDiscoveryService
-from flight_hunter.deals.aviasales_data_seeds import (
-    aviasales_cached_deal_seed_id,
-    build_aviasales_cached_deal_seeds,
-)
 from flight_hunter.deals.crawl4ai_client import Crawl4AiClientError, Crawl4AiMarkdownClient
 from flight_hunter.deals.searxng_client import SearxngClient, SearxngClientError
 from flight_hunter.deals.url_policy import DealUrlPolicy, DealUrlPolicyError
@@ -101,7 +105,13 @@ from flight_hunter.domain.manual_confirmation import (
 )
 from flight_hunter.domain.money import Money
 from flight_hunter.domain.observation import BrowserSource, LiveObservation, ObservationStatus
-from flight_hunter.domain.offers import FlightOffer, PriceBasis, SearchIntent
+from flight_hunter.domain.offers import (
+    FlightOffer,
+    FlightSegmentSummary,
+    Freshness,
+    PriceBasis,
+    SearchIntent,
+)
 from flight_hunter.domain.policy import ExecutionContext
 from flight_hunter.domain.ranking import offer_ranking_key
 from flight_hunter.domain.search_results import (
@@ -120,6 +130,7 @@ from flight_hunter.notifications.telegram import (
 )
 from flight_hunter.ops.application_metrics import render_application_metrics
 from flight_hunter.ops.structured_logging import log_event
+from flight_hunter.persistence.database import create_database_engine, current_alembic_head
 from flight_hunter.persistence.repositories import (
     AgentAuditRepository,
     AirportReferenceRepository,
@@ -153,8 +164,15 @@ from flight_hunter.persistence.repositories import (
     WorkerHeartbeatRepository,
     WorkerQueueHealthRepository,
 )
-from flight_hunter.providers.aviasales_data.adapter import AviasalesDataAdapter
-from flight_hunter.providers.aviasales_data.client import AviasalesDataClient, AviasalesDataError
+from flight_hunter.providers.aviasales_search.adapter import AviasalesSearchAdapter
+from flight_hunter.providers.aviasales_search.client import (
+    AviasalesSearchAuthFailed,
+    AviasalesSearchBlocked,
+    AviasalesSearchClient,
+    AviasalesSearchError,
+    AviasalesSearchRateLimited,
+    AviasalesSearchSchemaError,
+)
 from flight_hunter.providers.personal_observer import (
     PersonalObserverConfig,
     PersonalObserverRunner,
@@ -197,6 +215,11 @@ class HealthResponse(BaseModel):
     app: str
     status: str
     external_credentials_required: bool
+
+
+class ReadyResponse(BaseModel):
+    status: str
+    database: str
 
 
 class BootstrapInvitationRequestBody(BaseModel):
@@ -579,6 +602,16 @@ class MoneyResponse(BaseModel):
     formatted: str
 
 
+class FlightSegmentSummaryResponse(BaseModel):
+    airline_code: str
+    airline_name: str | None
+    flight_number: str | None
+    origin: str
+    destination: str
+    depart_at: str
+    arrive_at: str
+
+
 class OfferRiskResponse(BaseModel):
     level: str
     flags: list[str]
@@ -599,8 +632,66 @@ class OfferResponse(BaseModel):
     freshness: str
     requires_live_confirmation: bool
     baggage_summary: str | None
+    seller_name: str | None
+    segments: list[FlightSegmentSummaryResponse]
+    booking_action_available: bool
+    booking_action_token: str | None
     ranking_reasons: list[str]
     risk: OfferRiskResponse
+
+
+class BookingResolveRequestBody(BaseModel):
+    token: str = Field(min_length=1, max_length=4096)
+
+
+class BookingResolveResponse(BaseModel):
+    status: str
+    url: str | None
+
+
+class AviasalesSuggestItemResponse(BaseModel):
+    code: str
+    name: str
+    place_type: str
+    country_code: str | None
+
+
+class AviasalesSuggestResponse(BaseModel):
+    places: list[AviasalesSuggestItemResponse]
+
+
+class AviasalesHotOfferResponse(BaseModel):
+    origin: str
+    destination: str
+    departure_date: str | None
+    return_date: str | None
+    amount_minor: int | None
+    currency: str | None
+
+
+class AviasalesHotOffersResponse(BaseModel):
+    offers: list[AviasalesHotOfferResponse]
+
+
+class AviasalesCalendarPriceResponse(BaseModel):
+    origin: str
+    destination: str
+    departure_date: str
+    return_date: str | None
+    amount_minor: int
+    currency: str
+
+
+class AviasalesCalendarResponse(BaseModel):
+    prices: list[AviasalesCalendarPriceResponse]
+
+
+class AviasalesGraphqlBlockResponse(BaseModel):
+    typename: str
+
+
+class AviasalesGraphqlBlocksResponse(BaseModel):
+    blocks: list[AviasalesGraphqlBlockResponse]
 
 
 class ExternalSearchLinkResponse(BaseModel):
@@ -1014,60 +1105,6 @@ class DateMatrixResponse(BaseModel):
     pricing_denials: list[str] = Field(default_factory=list)
 
 
-class CachedRadarRequestBody(BaseModel):
-    radar_kind: str = Field(
-        pattern=(
-            "^(month_matrix|nearest_places_matrix|price_range|grouped_prices|"
-            "latest_prices|popular_directions|special_offers)$"
-        )
-    )
-    origin: str = Field(min_length=3, max_length=3)
-    destination: str = Field(min_length=3, max_length=3)
-    departure_date: date
-    return_date: date | None = None
-    passengers: int = Field(default=1, ge=1)
-    adults: int | None = Field(default=None, ge=1)
-    children: int = Field(default=0, ge=0)
-    infants: int = Field(default=0, ge=0)
-    currency: str = Field(default="RUB", min_length=3, max_length=3)
-    provider_ids: list[str] | None = None
-    nearby_distance_km: int = Field(default=300, ge=1, le=1000)
-    min_price_minor: int | None = Field(default=None, ge=0)
-    max_price_minor: int | None = Field(default=None, ge=0)
-    search_id: str | None = Field(default=None, min_length=1, max_length=160)
-    save_deal_candidates: bool = False
-
-    @model_validator(mode="after")
-    def validate_passenger_mix_and_price_range(self) -> CachedRadarRequestBody:
-        adults = self.adults if self.adults is not None else self.passengers
-        if adults + self.children + self.infants != self.passengers:
-            raise ValueError("passengers must match adults + children + infants")
-        price_range_fields = (self.min_price_minor, self.max_price_minor)
-        if self.radar_kind == "price_range":
-            if self.min_price_minor is None or self.max_price_minor is None:
-                raise ValueError("price_range requires min_price_minor and max_price_minor")
-            if self.max_price_minor < self.min_price_minor:
-                raise ValueError("max_price_minor must be greater than or equal to min_price_minor")
-            if self.min_price_minor % 100 != 0 or self.max_price_minor % 100 != 0:
-                raise ValueError("price_range values must be whole major currency units")
-        elif any(value is not None for value in price_range_fields):
-            raise ValueError("price range fields are only allowed for price_range radar")
-        if self.save_deal_candidates and self.search_id is None:
-            raise ValueError("save_deal_candidates requires search_id")
-        return self
-
-
-class CachedRadarResponse(BaseModel):
-    radar_kind: str
-    offers: list[OfferResponse]
-    deal_candidates: list[DealCandidateResponse] = Field(default_factory=list)
-    deal_candidates_saved: int = 0
-    provider_calls_required: int
-    priced: bool
-    pricing_denials: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-
-
 class TelegramWebhookResponse(BaseModel):
     code: str
     status: str
@@ -1166,11 +1203,11 @@ def create_app(
     settings: AppSettings | None = None,
     agent_intent_adapter: AgentIntentAdapter | None = None,
     deal_discovery_service: DealDiscoveryService | None = None,
-    provider_instances: dict[str, AviasalesDataAdapter] | None = None,
+    provider_instances: dict[str, AviasalesSearchAdapter] | None = None,
 ) -> FastAPI:
     load_env_file()
     settings = settings or AppSettings.from_env()
-    app = FastAPI(title="Flight Hunter", version="0.1.0")
+    app = FastAPI(title="Flight Hunter", version=__version__)
     registry = ProviderRegistry.default(clock=lambda: datetime.now(UTC), settings=settings)
     provider_instances = (
         provider_instances if provider_instances is not None else _provider_instances(settings)
@@ -1229,6 +1266,36 @@ def create_app(
             status="ok",
             external_credentials_required=False,
         )
+
+    @app.get("/readyz", response_model=ReadyResponse)
+    async def readyz() -> ReadyResponse | JSONResponse:
+        try:
+            async with session_factory() as session:
+                await session.execute(text("SELECT 1"))
+        except SQLAlchemyError:
+            return _coded_error_response(
+                status_code=503,
+                code="database_unavailable",
+                message="database is unavailable",
+            )
+        try:
+            async with session_factory() as session:
+                revision = (
+                    await session.execute(text("SELECT version_num FROM alembic_version"))
+                ).scalar_one()
+        except SQLAlchemyError:
+            return _coded_error_response(
+                status_code=503,
+                code="migration_pending",
+                message="database migration is pending",
+            )
+        if revision != current_alembic_head():
+            return _coded_error_response(
+                status_code=503,
+                code="migration_pending",
+                message="database migration is pending",
+            )
+        return ReadyResponse(status="ready", database="ok")
 
     @app.get("/api/v1/metrics", response_class=PlainTextResponse)
     def application_metrics() -> PlainTextResponse:
@@ -2269,7 +2336,7 @@ def create_app(
             deal_candidate_count=len(result.deal_candidates),
             duration_ms=_duration_ms(started_at),
         )
-        return _search_response(result)
+        return _search_response(result, booking_secret=settings.app_secret_key)
 
     @app.post(
         "/api/v1/live-observation-grants",
@@ -2860,8 +2927,9 @@ def create_app(
                 max_stay_days=body.max_stay_days,
             )
         )
-        offers, denials, provider_calls = _date_matrix_cached_offers(
+        offers, denials, provider_calls = _date_matrix_mobile_calendar_offers(
             body,
+            settings=settings,
             provider_instances=provider_instances,
         )
         return _date_matrix_response(
@@ -2871,74 +2939,174 @@ def create_app(
             provider_calls_required=provider_calls,
         )
 
-    @app.post("/api/v1/searches/cached-radar", response_model=CachedRadarResponse)
-    async def cached_radar(
-        body: CachedRadarRequestBody,
-        authorization_header: str | None = Header(default=None, alias="Authorization"),
-        household_header: str | None = Header(
-            default=None,
-            alias="X-Flight-Hunter-Household-Id",
-        ),
-        user_header: str | None = Header(
-            default=None,
-            alias="X-Flight-Hunter-User-Id",
-        ),
-    ) -> CachedRadarResponse | JSONResponse:
-        offers, denials, provider_calls = _cached_radar_offers(
-            body,
-            provider_instances=provider_instances,
+    @app.get("/api/v1/aviasales/suggest", response_model=AviasalesSuggestResponse)
+    def aviasales_suggest(
+        q: str = Query(min_length=1, max_length=80),
+        locale: str = Query(default="ru", min_length=2, max_length=8),
+        max_results: int = Query(default=5, ge=1, le=20),
+    ) -> AviasalesSuggestResponse | JSONResponse:
+        provider, error = _aviasales_search_provider_or_error(settings, provider_instances)
+        if error is not None:
+            return error
+        assert provider is not None
+        try:
+            places = provider.suggest_places(q, locale=locale, max_results=max_results)
+        except AviasalesSearchError as exc:
+            return _aviasales_error_response(exc)
+        return AviasalesSuggestResponse(
+            places=[
+                AviasalesSuggestItemResponse(
+                    code=place.code,
+                    name=place.name,
+                    place_type=place.place_type,
+                    country_code=place.country_code,
+                )
+                for place in places
+            ]
         )
-        deal_candidates: tuple[DealCandidate, ...] = ()
-        deal_candidates_saved = 0
-        if body.save_deal_candidates and offers:
-            async with session_factory() as session:
-                auth_context = await _auth_context_from_headers(
-                    session,
-                    settings=settings,
-                    authorization_header=authorization_header,
-                    household_header=household_header,
-                    user_header=user_header,
+
+    @app.get("/api/v1/aviasales/hot-offers", response_model=AviasalesHotOffersResponse)
+    def aviasales_hot_offers(
+        origin: str = Query(min_length=3, max_length=3),
+        origin_type: str = Query(default="city", min_length=3, max_length=16),
+        market: str = Query(default="RU", min_length=2, max_length=8),
+        currency: str = Query(default="rub", min_length=3, max_length=3),
+        one_way: bool = True,
+    ) -> AviasalesHotOffersResponse | JSONResponse:
+        provider, error = _aviasales_search_provider_or_error(settings, provider_instances)
+        if error is not None:
+            return error
+        assert provider is not None
+        try:
+            offers = provider.hot_offers(
+                origin=origin,
+                origin_type=origin_type,
+                market=market,
+                currency=currency,
+                one_way=one_way,
+            )
+        except AviasalesSearchError as exc:
+            return _aviasales_error_response(exc)
+        return AviasalesHotOffersResponse(
+            offers=[
+                AviasalesHotOfferResponse(
+                    origin=offer.origin,
+                    destination=offer.destination,
+                    departure_date=offer.departure_date,
+                    return_date=offer.return_date,
+                    amount_minor=offer.price_minor_units,
+                    currency=offer.currency,
                 )
-                if auth_context is None:
-                    return _auth_context_missing_response()
-                household_id, user_id = auth_context
-                expires_at = datetime.now(UTC) + timedelta(
-                    seconds=max(1, settings.deal_candidate_ttl_seconds),
-                )
-                seeds = build_aviasales_cached_deal_seeds(
-                    tuple(sorted(offers, key=offer_ranking_key)),
-                    radar_kind=body.radar_kind,
-                    expires_at=expires_at,
-                )
-                repository = DealCandidateRepository(session)
-                for seed in seeds:
-                    if await repository.add_candidate_once(
-                        NewDealCandidate(
-                            id=aviasales_cached_deal_seed_id(
-                                household_id=household_id,
-                                user_id=user_id,
-                                search_id=body.search_id or "",
-                                seed=seed,
-                            ),
-                            household_id=household_id,
-                            user_id=user_id,
-                            search_id=body.search_id or "",
-                            candidate=seed.candidate,
-                            expires_at=expires_at,
-                            raw_ref=seed.raw_ref,
-                        )
-                    ):
-                        deal_candidates_saved += 1
-                await session.commit()
-                deal_candidates = tuple(seed.candidate for seed in seeds)
-        return _cached_radar_response(
-            body,
-            offers=offers,
-            deal_candidates=deal_candidates,
-            deal_candidates_saved=deal_candidates_saved,
-            pricing_denials=denials,
-            provider_calls_required=provider_calls,
+                for offer in offers
+            ]
         )
+
+    @app.get("/api/v1/aviasales/calendar", response_model=AviasalesCalendarResponse)
+    def aviasales_calendar(
+        depart_from: date,
+        depart_to: date,
+        origin: str = Query(min_length=3, max_length=3),
+        destination: str = Query(min_length=3, max_length=3),
+        one_way: bool = True,
+        currency: str = Query(default="rub", min_length=3, max_length=3),
+    ) -> AviasalesCalendarResponse | JSONResponse:
+        provider, error = _aviasales_search_provider_or_error(settings, provider_instances)
+        if error is not None:
+            return error
+        assert provider is not None
+        try:
+            prices = provider.calendar_prices(
+                origin=origin,
+                destination=destination,
+                depart_from=depart_from.isoformat(),
+                depart_to=depart_to.isoformat(),
+                one_way=one_way,
+                currency=currency,
+            )
+        except AviasalesSearchError as exc:
+            return _aviasales_error_response(exc)
+        return AviasalesCalendarResponse(
+            prices=[
+                AviasalesCalendarPriceResponse(
+                    origin=price.origin,
+                    destination=price.destination,
+                    departure_date=price.departure_date,
+                    return_date=price.return_date,
+                    amount_minor=price.price_minor_units,
+                    currency=price.currency,
+                )
+                for price in prices
+            ]
+        )
+
+    @app.get(
+        "/api/v1/aviasales/graphql/main-page-blocks",
+        response_model=AviasalesGraphqlBlocksResponse,
+    )
+    def aviasales_main_page_blocks(
+        origin: str = Query(default="MOW", min_length=3, max_length=3),
+        origin_type: str = Query(default="CITY", min_length=3, max_length=16),
+        market: str = Query(default="RU", min_length=2, max_length=8),
+        currency: str = Query(default="rub", min_length=3, max_length=3),
+        language: str = Query(default="ru", min_length=2, max_length=8),
+        one_way: bool = True,
+    ) -> AviasalesGraphqlBlocksResponse | JSONResponse:
+        provider, error = _aviasales_search_provider_or_error(settings, provider_instances)
+        if error is not None:
+            return error
+        assert provider is not None
+        try:
+            blocks = provider.main_page_blocks(
+                origin=origin,
+                origin_type=origin_type,
+                market=market,
+                currency=currency,
+                language=language,
+                one_way=one_way,
+            )
+        except AviasalesSearchError as exc:
+            return _aviasales_error_response(exc)
+        return AviasalesGraphqlBlocksResponse(
+            blocks=[AviasalesGraphqlBlockResponse(typename=block.typename) for block in blocks]
+        )
+
+    @app.post("/api/v1/booking-actions/resolve", response_model=BookingResolveResponse)
+    def resolve_booking_action(
+        body: BookingResolveRequestBody,
+    ) -> BookingResolveResponse | JSONResponse:
+        if not settings.app_secret_key:
+            raise HTTPException(status_code=503, detail="booking_action_secret_missing")
+        try:
+            payload = verify_booking_action_token(
+                body.token,
+                secret_key=settings.app_secret_key,
+                now=datetime.now(UTC),
+            )
+            ref = decode_booking_ref(payload.ref)
+        except BookingActionTokenError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if (
+            payload.provider_id != "aviasales_search"
+            or ref.get("provider_id") != payload.provider_id
+        ):
+            raise HTTPException(status_code=400, detail="booking_action_provider_mismatch")
+        provider, error = _aviasales_search_provider_or_error(settings, provider_instances)
+        if error is not None:
+            return error
+        assert provider is not None
+        try:
+            url = provider.resolve_purchase_url(
+                search_id=_required_ref_str(ref, "search_id"),
+                proposal_id=_required_ref_str(ref, "proposal_id"),
+                results_url=_required_ref_str(ref, "results_url"),
+                request_fingerprint="booking-action:" + payload.provider_id,
+                context=ExecutionContext.WEB_USER_ACTION,
+            )
+        except AviasalesSearchError as exc:
+            return _aviasales_error_response(exc)
+        except BookingActionTokenError as exc:
+            raise HTTPException(status_code=502, detail="booking_action_unavailable") from exc
+        return BookingResolveResponse(status="resolved" if url else "unavailable", url=url)
 
     @app.post("/api/v1/watches", response_model=WatchResponse, status_code=201)
     async def create_watch(
@@ -3415,23 +3583,90 @@ def create_app(
 
 
 def _watch_session_factory(database_url: str) -> async_sessionmaker[AsyncSession]:
-    engine = create_async_engine(database_url)
+    engine = create_database_engine(database_url)
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
-def _provider_instances(settings: AppSettings) -> dict[str, AviasalesDataAdapter]:
-    if settings.travelpayouts_api_token is None:
+def _provider_instances(settings: AppSettings) -> dict[str, AviasalesSearchAdapter]:
+    if not settings.aviasales_search_credentials_valid:
         return {}
     return {
-        "aviasales_data": AviasalesDataAdapter(
-            client=AviasalesDataClient(token=settings.travelpayouts_api_token),
-            enabled=settings.aviasales_data_enabled,
-            credentials_present=settings.aviasales_data_credentials_present,
-            market=settings.aviasales_data_default_market,
-            internal_rpm=settings.aviasales_data_internal_rpm,
+        "aviasales_search": AviasalesSearchAdapter(
+            client=AviasalesSearchClient(
+                signature=settings.aviasales_search_signature or "",
+                marker=settings.aviasales_search_marker or "",
+            ),
+            enabled=settings.aviasales_search_enabled,
+            credentials_present=settings.aviasales_search_credentials_present,
+            internal_rpm=settings.aviasales_search_internal_rpm,
             clock=lambda: datetime.now(UTC),
         )
     }
+
+
+def _aviasales_search_provider_or_error(
+    settings: AppSettings,
+    provider_instances: dict[str, AviasalesSearchAdapter],
+) -> tuple[AviasalesSearchAdapter | None, JSONResponse | None]:
+    if not settings.aviasales_search_enabled:
+        return None, _coded_error_response(
+            status_code=503,
+            code="aviasales_search_disabled",
+            message="provider is disabled",
+        )
+    provider = provider_instances.get("aviasales_search")
+    if provider is not None:
+        return provider, None
+    code = _aviasales_configuration_error_code(settings)
+    return None, _coded_error_response(
+        status_code=503,
+        code=code,
+        message="provider is not configured",
+    )
+
+
+def _aviasales_configuration_error_code(settings: AppSettings) -> str:
+    if not settings.aviasales_search_enabled:
+        return "aviasales_search_disabled"
+    if not settings.aviasales_search_credentials_present:
+        return "aviasales_search_credentials_missing"
+    if not settings.aviasales_search_credentials_valid:
+        return "aviasales_search_credentials_invalid"
+    return "aviasales_search_unavailable"
+
+
+def _aviasales_error_response(exc: AviasalesSearchError) -> JSONResponse:
+    if isinstance(exc, AviasalesSearchRateLimited):
+        headers = (
+            {"Retry-After": str(exc.retry_after_seconds)}
+            if exc.retry_after_seconds is not None
+            else {}
+        )
+        return JSONResponse(
+            status_code=429,
+            content={
+                "code": exc.code,
+                "message": "provider rate limited",
+            },
+            headers=headers,
+        )
+    code = {
+        AviasalesSearchAuthFailed: "aviasales_search_auth_failed",
+        AviasalesSearchBlocked: "aviasales_search_blocked",
+        AviasalesSearchSchemaError: "aviasales_search_schema_error",
+    }.get(type(exc), "aviasales_search_unavailable")
+    return _coded_error_response(
+        status_code=502,
+        code=code,
+        message="provider unavailable",
+    )
+
+
+def _required_ref_str(ref: dict[str, object], key: str) -> str:
+    value = ref.get(key)
+    if not isinstance(value, str) or not value:
+        raise BookingActionTokenError("booking_action_ref_malformed")
+    return value
 
 
 def _agent_intent_adapter(settings: AppSettings) -> AgentIntentAdapter | None:
@@ -4092,11 +4327,12 @@ def _agent_audit_event_response(event: AgentAuditEvent) -> AgentAuditEventRespon
     )
 
 
-def _search_response(result: SearchResult) -> SearchResponse:
+def _search_response(result: SearchResult, *, booking_secret: str | None = None) -> SearchResponse:
     priced_offers = [
         _offer_response(
             offer,
             ranking_reasons=result.ranking_reasons.get(offer_ranking_key(offer), ()),
+            booking_secret=booking_secret,
         )
         for offer in result.priced_offers
     ]
@@ -4105,7 +4341,8 @@ def _search_response(result: SearchResult) -> SearchResponse:
         offers=priced_offers,
         priced_offers=priced_offers,
         provider_isolated_offers=[
-            _offer_response(offer, ranking_reasons=()) for offer in result.provider_isolated_offers
+            _offer_response(offer, ranking_reasons=(), booking_secret=booking_secret)
+            for offer in result.provider_isolated_offers
         ],
         browser_observed_offers=[
             _browser_observed_offer_response(offer) for offer in result.browser_observed_offers
@@ -4286,8 +4523,14 @@ def _personal_observation_instruction(job: BrowserObservationJobRecord) -> str |
     }.get(job.status)
 
 
-def _offer_response(offer: FlightOffer, *, ranking_reasons: tuple[str, ...]) -> OfferResponse:
+def _offer_response(
+    offer: FlightOffer,
+    *,
+    ranking_reasons: tuple[str, ...],
+    booking_secret: str | None = None,
+) -> OfferResponse:
     risk = assess_offer_risk(offer)
+    booking_token = _booking_action_token(offer, booking_secret=booking_secret)
     return OfferResponse(
         provider_id=offer.provider_id,
         provider_offer_id=offer.provider_offer_id,
@@ -4302,8 +4545,35 @@ def _offer_response(offer: FlightOffer, *, ranking_reasons: tuple[str, ...]) -> 
         freshness=offer.freshness.value,
         requires_live_confirmation=offer.requires_live_confirmation,
         baggage_summary=offer.baggage_summary,
+        seller_name=offer.seller_name,
+        segments=[_flight_segment_summary_response(segment) for segment in offer.segments],
+        booking_action_available=booking_token is not None,
+        booking_action_token=booking_token,
         ranking_reasons=list(ranking_reasons),
         risk=_offer_risk_response(risk),
+    )
+
+
+def _booking_action_token(offer: FlightOffer, *, booking_secret: str | None) -> str | None:
+    if not booking_secret or not offer.booking_action_ref:
+        return None
+    return sign_booking_action_token(
+        secret_key=booking_secret,
+        provider_id=offer.provider_id,
+        ref=offer.booking_action_ref,
+        now=datetime.now(UTC),
+    )
+
+
+def _flight_segment_summary_response(segment: FlightSegmentSummary) -> FlightSegmentSummaryResponse:
+    return FlightSegmentSummaryResponse(
+        airline_code=segment.airline_code,
+        airline_name=segment.airline_name,
+        flight_number=segment.flight_number,
+        origin=segment.origin,
+        destination=segment.destination,
+        depart_at=segment.depart_at,
+        arrive_at=segment.arrive_at,
     )
 
 
@@ -4486,190 +4756,56 @@ def _nearby_airport_response(nearby: NearbyAirport) -> NearbyAirportResponse:
     )
 
 
-def _cached_radar_offers(
-    body: CachedRadarRequestBody,
-    *,
-    provider_instances: dict[str, AviasalesDataAdapter],
-) -> tuple[tuple[FlightOffer, ...], list[str], int]:
-    if body.provider_ids is not None and "aviasales_data" not in body.provider_ids:
-        return (), ["aviasales_data_not_requested"], 0
-    if body.passengers != 1 or body.children > 0 or body.infants > 0:
-        return (), ["passenger_mix_not_supported"], 0
-    provider = provider_instances.get("aviasales_data")
-    if provider is None:
-        return (), ["aviasales_data_credentials_missing"], 0
-
-    intent = _cached_radar_search_intent(body)
-    request_fingerprint = _cached_radar_fingerprint(body)
-    try:
-        if body.radar_kind == "month_matrix":
-            offers = provider.month_matrix(
-                intent,
-                request_fingerprint=request_fingerprint,
-                context=ExecutionContext.API_REQUEST,
-            )
-        elif body.radar_kind == "nearest_places_matrix":
-            offers = provider.nearest_places_matrix(
-                intent,
-                request_fingerprint=request_fingerprint,
-                context=ExecutionContext.API_REQUEST,
-                distance_km=body.nearby_distance_km,
-            )
-        elif body.radar_kind == "price_range":
-            value_min, value_max = _cached_radar_price_range_major_units(body)
-            offers = provider.search_by_price_range(
-                intent,
-                request_fingerprint=request_fingerprint,
-                context=ExecutionContext.API_REQUEST,
-                value_min=value_min,
-                value_max=value_max,
-                locale="ru",
-            )
-        elif body.radar_kind == "grouped_prices":
-            offers = provider.grouped_prices(
-                intent,
-                request_fingerprint=request_fingerprint,
-                context=ExecutionContext.API_REQUEST,
-            )
-        elif body.radar_kind == "latest_prices":
-            offers = provider.latest_prices(
-                intent,
-                request_fingerprint=request_fingerprint,
-                context=ExecutionContext.API_REQUEST,
-            )
-        elif body.radar_kind == "popular_directions":
-            offers = provider.popular_directions(
-                intent,
-                request_fingerprint=request_fingerprint,
-                context=ExecutionContext.API_REQUEST,
-                locale="ru",
-            )
-        else:
-            offers = provider.special_offers(
-                intent,
-                request_fingerprint=request_fingerprint,
-                context=ExecutionContext.API_REQUEST,
-                locale="ru",
-            )
-    except AviasalesDataError:
-        return (), ["aviasales_data_unavailable"], 1
-
-    if not offers:
-        return (), ["aviasales_data_empty"], 1
-    return offers, [], 1
-
-
-def _cached_radar_response(
-    body: CachedRadarRequestBody,
-    *,
-    offers: tuple[FlightOffer, ...],
-    deal_candidates: tuple[DealCandidate, ...] = (),
-    deal_candidates_saved: int = 0,
-    pricing_denials: list[str],
-    provider_calls_required: int,
-) -> CachedRadarResponse:
-    ranked = sorted(offers, key=offer_ranking_key)
-    warnings = ["cached_prices_require_external_confirmation"] if ranked else []
-    return CachedRadarResponse(
-        radar_kind=body.radar_kind,
-        offers=[
-            _offer_response(
-                offer,
-                ranking_reasons=_cached_radar_ranking_reasons(body.radar_kind),
-            )
-            for offer in ranked
-        ],
-        deal_candidates=[_deal_candidate_response(candidate) for candidate in deal_candidates],
-        deal_candidates_saved=deal_candidates_saved,
-        provider_calls_required=provider_calls_required,
-        priced=bool(ranked),
-        pricing_denials=pricing_denials,
-        warnings=warnings,
-    )
-
-
-def _cached_radar_search_intent(body: CachedRadarRequestBody) -> SearchIntent:
-    return SearchIntent(
-        origin=body.origin,
-        destination=body.destination,
-        departure_date=body.departure_date.isoformat(),
-        return_date=body.return_date.isoformat() if body.return_date is not None else None,
-        passengers=body.passengers,
-        adults=body.adults,
-        children=body.children,
-        infants=body.infants,
-        currency=body.currency,
-    )
-
-
-def _cached_radar_fingerprint(body: CachedRadarRequestBody) -> str:
-    return (
-        "cached-radar:"
-        f"{body.radar_kind}:{body.origin}:{body.destination}:"
-        f"{body.departure_date}:{body.return_date}:"
-        f"{body.passengers}:{body.currency}:{body.nearby_distance_km}:"
-        f"{body.min_price_minor}:{body.max_price_minor}"
-    )
-
-
-def _cached_radar_price_range_major_units(body: CachedRadarRequestBody) -> tuple[int, int]:
-    if body.min_price_minor is None or body.max_price_minor is None:
-        raise ValueError("price_range requires min_price_minor and max_price_minor")
-    return body.min_price_minor // 100, body.max_price_minor // 100
-
-
-def _cached_radar_ranking_reasons(radar_kind: str) -> tuple[str, ...]:
-    reason = {
-        "month_matrix": "cached_month_matrix",
-        "nearest_places_matrix": "cached_nearest_places_matrix",
-        "price_range": "cached_price_range",
-        "grouped_prices": "cached_grouped_prices",
-        "latest_prices": "cached_latest_prices",
-        "popular_directions": "cached_popular_directions",
-        "special_offers": "cached_special_offers",
-    }.get(radar_kind, "cached_radar")
-    return (reason, "requires_live_confirmation", "baggage_unknown")
-
-
-def _date_matrix_cached_offers(
+def _date_matrix_mobile_calendar_offers(
     body: DateMatrixRequestBody,
     *,
-    provider_instances: dict[str, AviasalesDataAdapter],
+    settings: AppSettings,
+    provider_instances: dict[str, AviasalesSearchAdapter],
 ) -> tuple[tuple[FlightOffer, ...], list[str], int]:
     if body.origin is None or body.destination is None:
         return (), ["route_required_for_pricing"], 0
-    if body.provider_ids is not None and "aviasales_data" not in body.provider_ids:
-        return (), ["aviasales_data_not_requested"], 0
+    if body.provider_ids is not None and "aviasales_search" not in body.provider_ids:
+        return (), ["aviasales_search_not_requested"], 0
     if body.passengers != 1 or body.children > 0 or body.infants > 0:
         return (), ["passenger_mix_not_supported"], 0
-    provider = provider_instances.get("aviasales_data")
+    provider = provider_instances.get("aviasales_search")
     if provider is None:
-        return (), ["aviasales_data_credentials_missing"], 0
+        return (), [_aviasales_configuration_error_code(settings)], 0
     try:
-        offers = provider.week_matrix(
-            SearchIntent(
-                origin=body.origin,
-                destination=body.destination,
-                departure_date=body.departure_date.isoformat(),
-                return_date=body.return_date.isoformat() if body.return_date is not None else None,
-                passengers=body.passengers,
-                adults=body.adults,
-                children=body.children,
-                infants=body.infants,
-                currency=body.currency,
-            ),
-            request_fingerprint=(
-                "date-matrix:"
-                f"{body.origin}:{body.destination}:"
-                f"{body.departure_date}:{body.return_date}:"
-                f"{body.passengers}:{body.currency}"
-            ),
-            context=ExecutionContext.API_REQUEST,
+        prices = provider.calendar_prices(
+            origin=body.origin,
+            destination=body.destination,
+            depart_from=(body.departure_date - timedelta(days=body.flexibility_days)).isoformat(),
+            depart_to=(body.departure_date + timedelta(days=body.flexibility_days)).isoformat(),
+            one_way=body.return_date is None,
+            currency=body.currency,
         )
-    except AviasalesDataError:
-        return (), ["aviasales_data_unavailable"], 1
+    except AviasalesSearchError as exc:
+        return (), [exc.code], 1
+    offers = tuple(
+        FlightOffer(
+            provider_id="aviasales_search",
+            provider_offer_id=(
+                "aviasales_calendar:"
+                f"{price.origin}:{price.destination}:{price.departure_date}:"
+                f"{price.return_date or ''}:{price.price_minor_units}:{price.currency}"
+            ),
+            origin=price.origin,
+            destination=price.destination,
+            departure_date=price.departure_date,
+            return_date=price.return_date,
+            total_price=Money(price.price_minor_units, price.currency),
+            passengers=body.passengers,
+            observed_at=datetime.now(UTC),
+            freshness=Freshness.LIVE,
+            requires_live_confirmation=False,
+            baggage_summary=None,
+            price_basis=PriceBasis.TOTAL_FOR_PASSENGERS,
+        )
+        for price in prices
+    )
     if not offers:
-        return (), ["aviasales_data_empty"], 1
+        return (), ["aviasales_search_empty"], 1
     return offers, [], 1
 
 

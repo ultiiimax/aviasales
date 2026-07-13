@@ -13,6 +13,7 @@ def test_makefile_exposes_required_operational_targets() -> None:
 
     assert {
         "bootstrap",
+        "browser-bootstrap",
         "dev",
         "test",
         "test-unit",
@@ -24,8 +25,8 @@ def test_makefile_exposes_required_operational_targets() -> None:
         "seed-demo",
         "provider-contracts",
         "security",
+        "release-check",
         "source-smoke",
-        "travelpayouts-smoke",
         "browser-smoke",
         "parse-fixture",
         "redact-url",

@@ -123,7 +123,7 @@ async def test_patch_watch_uses_version_and_preserves_household_isolation() -> N
             "destination": "nrt",
             "return_date": None,
             "enabled": False,
-            "allowed_provider_ids": ["fake", "aviasales_data"],
+            "allowed_provider_ids": ["fake", "aviasales_search"],
         },
     )
     stale = client.patch(
@@ -141,7 +141,7 @@ async def test_patch_watch_uses_version_and_preserves_household_isolation() -> N
     assert updated.json()["destination"] == "NRT"
     assert updated.json()["return_date"] is None
     assert updated.json()["enabled"] is False
-    assert updated.json()["allowed_provider_ids"] == ["fake", "aviasales_data"]
+    assert updated.json()["allowed_provider_ids"] == ["fake", "aviasales_search"]
     assert updated.json()["version"] == 2
     assert stale.status_code == 409
     assert stale.json() == {

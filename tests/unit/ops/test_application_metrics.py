@@ -12,15 +12,15 @@ def test_application_metrics_record_safe_observability_events() -> None:
 
     log_event(
         "provider_call",
-        provider="aviasales_data",
-        endpoint="prices_for_dates",
+        provider="aviasales_search",
+        endpoint="poll_results",
         status_code=200,
         duration_ms=12,
     )
     log_event(
         "provider_call",
-        provider="aviasales_data",
-        endpoint="prices_for_dates",
+        provider="aviasales_search",
+        endpoint="poll_results",
         status_code=429,
         duration_ms=8,
     )
@@ -53,16 +53,16 @@ def test_application_metrics_record_safe_observability_events() -> None:
     text = render_application_metrics()
 
     assert (
-        'flight_hunter_provider_requests_total{endpoint="prices_for_dates",'
-        'provider="aviasales_data",status="200"} 1'
+        'flight_hunter_provider_requests_total{endpoint="poll_results",'
+        'provider="aviasales_search",status="200"} 1'
     ) in text
     assert (
-        'flight_hunter_provider_requests_total{endpoint="prices_for_dates",'
-        'provider="aviasales_data",status="429"} 1'
+        'flight_hunter_provider_requests_total{endpoint="poll_results",'
+        'provider="aviasales_search",status="429"} 1'
     ) in text
     assert (
-        'flight_hunter_provider_errors_total{endpoint="prices_for_dates",'
-        'error="http_429",provider="aviasales_data"} 1'
+        'flight_hunter_provider_errors_total{endpoint="poll_results",'
+        'error="http_429",provider="aviasales_search"} 1'
     ) in text
     assert 'flight_hunter_browser_observation_jobs_total{source="tutu"} 1' in text
     assert (

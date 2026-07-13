@@ -7,10 +7,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from flight_hunter.application.worker_health import WorkerHealthAlert, WorkerHealthService
 from flight_hunter.config import AppSettings, load_env_file
+from flight_hunter.persistence.database import create_database_engine
 from flight_hunter.persistence.repositories import (
     WorkerControlRepository,
     WorkerHeartbeatRepository,
@@ -57,7 +58,7 @@ async def run_healthcheck(
     clock: Callable[[], datetime] | None = None,
 ) -> WorkerHealthcheckResult:
     now = clock() if clock is not None else datetime.now(UTC)
-    engine = create_async_engine(database_url)
+    engine = create_database_engine(database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:

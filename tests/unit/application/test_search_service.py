@@ -115,15 +115,15 @@ def test_search_enrichment_keeps_deal_candidates_out_of_priced_offers() -> None:
     assert "deal_candidates_require_manual_verification" in enriched.warnings
 
 
-def test_search_service_calls_enabled_aviasales_data_provider_through_plan() -> None:
+def test_search_service_calls_enabled_aviasales_search_provider_through_plan() -> None:
     registry = ProviderRegistry.default(
         clock=lambda: NOW,
         settings=AppSettings(
             database_url="sqlite+aiosqlite:///:memory:",
-            aviasales_data_enabled=True,
-            travelpayouts_api_token="secret-value",
-            aviasales_data_default_market="pl",
-            aviasales_data_internal_rpm=30,
+            aviasales_search_enabled=True,
+            aviasales_search_signature="secret-signature",
+            aviasales_search_marker="secret-marker",
+            aviasales_search_internal_rpm=20,
             telegram_enabled=False,
             telegram_webhook_secret=None,
         ),
@@ -132,7 +132,7 @@ def test_search_service_calls_enabled_aviasales_data_provider_through_plan() -> 
     service = DemoSearchService(
         registry=registry,
         clock=lambda: NOW,
-        providers={"aviasales_data": aviasales_provider},
+        providers={"aviasales_search": aviasales_provider},
     )
 
     result = service.search(
@@ -143,15 +143,14 @@ def test_search_service_calls_enabled_aviasales_data_provider_through_plan() -> 
             return_date=None,
             passengers=1,
             currency="PLN",
-            provider_ids=("aviasales_data",),
+            provider_ids=("aviasales_search",),
         )
     )
 
     assert aviasales_provider.calls == 1
-    assert [offer.provider_id for offer in result.mergeable_offers] == ["aviasales_data"]
-    assert result.ranking_reasons["aviasales_data:offer-1"] == (
-        "cached_price",
-        "requires_live_confirmation",
+    assert [offer.provider_id for offer in result.mergeable_offers] == ["aviasales_search"]
+    assert result.ranking_reasons["aviasales_search:offer-1"] == (
+        "live_price",
         "baggage_unknown",
     )
 
@@ -244,7 +243,7 @@ class StubOfferProvider:
         self.calls += 1
         return (
             FlightOffer(
-                provider_id="aviasales_data",
+                provider_id="aviasales_search",
                 provider_offer_id="offer-1",
                 origin=intent.origin,
                 destination=intent.destination,
@@ -253,8 +252,8 @@ class StubOfferProvider:
                 total_price=Money(51200, intent.currency),
                 passengers=intent.passengers,
                 observed_at=NOW,
-                freshness=Freshness.CACHED,
-                requires_live_confirmation=True,
+                freshness=Freshness.LIVE,
+                requires_live_confirmation=False,
                 baggage_summary=None,
             ),
         )

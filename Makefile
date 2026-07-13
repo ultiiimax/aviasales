@@ -1,6 +1,6 @@
-.PHONY: help bootstrap dev dev-api test test-unit test-integration test-e2e lint typecheck migrate seed-demo quality provider-contracts security travelpayouts-smoke source-smoke browser-smoke parse-fixture redact-url sanitize-html backup backup-verify restore cleanup-live-observations import-airports worker worker-healthcheck compose-up compose-down compose-worker-up compose-deals-up compose-deals-config
+.PHONY: help bootstrap browser-bootstrap dev dev-api test test-unit test-integration test-e2e lint typecheck migrate seed-demo quality release-check provider-contracts security source-smoke browser-smoke parse-fixture redact-url sanitize-html backup backup-verify restore cleanup-live-observations import-airports worker worker-healthcheck compose-up compose-down compose-worker-up compose-deals-up compose-deals-config
 
-SOURCE ?= searxng
+SOURCE ?= aviasales_search
 FIXTURE_ARGS ?=
 SANITIZE_ARGS ?=
 REDACT_URL ?=
@@ -9,6 +9,7 @@ WORKER_ROLE ?=
 help:
 	@echo "Flight Hunter commands:"
 	@echo "  make bootstrap          Install dev dependencies with uv"
+	@echo "  make browser-bootstrap  Install Playwright Chromium for local E2E"
 	@echo "  make dev                Run the local demo API and web screen"
 	@echo "  make dev-api            Run the local demo API"
 	@echo "  make test               Run current automated tests"
@@ -20,10 +21,10 @@ help:
 	@echo "  make migrate            Apply Alembic migrations"
 	@echo "  make seed-demo          Seed deterministic local demo data"
 	@echo "  make quality            Run test, lint, and typecheck"
+	@echo "  make release-check      Run deterministic local v1 gates (RELEASE_ARGS optional)"
 	@echo "  make provider-contracts Run current policy contract tests"
 	@echo "  make security           Run local secret scanner"
-	@echo "  make travelpayouts-smoke Run one sanitized Aviasales Data API smoke check"
-	@echo "  make source-smoke SOURCE=searxng Run one sanitized source smoke check"
+	@echo "  make source-smoke SOURCE=aviasales_search Run one sanitized source smoke check"
 	@echo "  make browser-smoke      Run local Playwright Chromium smoke check"
 	@echo "  make parse-fixture FIXTURE_ARGS='...' Parse sanitized observer fixture"
 	@echo "  make redact-url REDACT_URL='...' Redact credentials/query secrets from a URL"
@@ -43,6 +44,9 @@ help:
 
 bootstrap:
 	uv sync --group dev
+
+browser-bootstrap:
+	uv run flight-hunter-browser-bootstrap
 
 dev: dev-api
 
@@ -75,14 +79,14 @@ seed-demo: migrate
 
 quality: test lint typecheck security
 
+release-check:
+	uv run flight-hunter-release-check $(RELEASE_ARGS)
+
 provider-contracts:
 	uv run pytest tests/unit/policy
 
 security:
 	uv run flight-hunter-security-scan
-
-travelpayouts-smoke:
-	uv run travelpayouts-smoke
 
 source-smoke:
 	uv run flight-hunter-source-smoke --source "$(SOURCE)"
@@ -124,7 +128,7 @@ compose-up:
 	docker compose up --build
 
 compose-worker-up:
-	docker compose --profile worker up --build
+	docker compose up --build api worker
 
 compose-deals-up:
 	docker compose --profile deal-discovery up --build

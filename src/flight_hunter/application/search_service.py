@@ -10,6 +10,7 @@ from flight_hunter.application.provider_registry import ProviderRegistry
 from flight_hunter.application.search_planner import SearchPlanner
 from flight_hunter.domain.offers import FlightOffer, SearchIntent
 from flight_hunter.domain.policy import ExecutionContext, MergeScope
+from flight_hunter.domain.provider_errors import ProviderOperationError
 from flight_hunter.domain.ranking import OfferRanker, offer_ranking_key
 from flight_hunter.domain.search_results import (
     BrowserObservedOffer,
@@ -123,11 +124,19 @@ class DemoSearchService:
             provider = self._providers.get(step.provider_id)
             if provider is None:
                 continue
-            offers = provider.search(
-                intent,
-                request_fingerprint=request_fingerprint,
-                context=ExecutionContext.WEB_USER_ACTION,
-            )
+            try:
+                offers = provider.search(
+                    intent,
+                    request_fingerprint=request_fingerprint,
+                    context=ExecutionContext.WEB_USER_ACTION,
+                )
+            except ProviderOperationError as exc:
+                denied[step.provider_id] = ProviderDenial(
+                    provider_id=step.provider_id,
+                    code=exc.code,
+                    message="provider request failed",
+                )
+                continue
             if step.merge_scope == MergeScope.MERGEABLE:
                 mergeable.extend(offers)
             elif step.merge_scope == MergeScope.PROVIDER_ISOLATED:

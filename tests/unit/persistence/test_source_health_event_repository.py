@@ -34,7 +34,7 @@ async def test_source_health_event_repository_records_append_only_events() -> No
         await repository.add_event(
             NewSourceHealthEvent(
                 id=UUID(int=2),
-                source_id="aviasales_data",
+                source_id="aviasales_search",
                 event_type="provider_contract",
                 status="ok",
                 message="contract fixture passed",
@@ -48,7 +48,7 @@ async def test_source_health_event_repository_records_append_only_events() -> No
         all_events = await repository.list_recent()
         tutu_events = await repository.list_recent(source_id="tutu")
 
-    assert [event.source_id for event in all_events] == ["aviasales_data", "tutu"]
+    assert [event.source_id for event in all_events] == ["aviasales_search", "tutu"]
     assert len(tutu_events) == 1
     assert tutu_events[0].status == "retry_scheduled"
     assert tutu_events[0].cooldown_until == NOW + timedelta(minutes=1)
