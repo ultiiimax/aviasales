@@ -50,7 +50,7 @@ from flight_hunter.providers.personal_observer.runner import (
 FIXTURE = Path("tests/fixtures/browser/tutu/search_result_source_specific.html")
 HOUSEHOLD_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 USER_ID = UUID("11111111-1111-1111-1111-111111111111")
-NOW = datetime(2026, 7, 6, 21, 0, tzinfo=UTC)
+NOW = datetime.now(UTC)
 
 
 def test_worker_processes_queued_browser_observation_jobs(
@@ -164,7 +164,7 @@ def test_worker_retries_when_playwright_runtime_is_unavailable(
     assert body["browser_jobs_failed"] == 0
     assert body["source_health_events_recorded"] == 1
     offers = asyncio.run(_stored_offers(database_url))
-    queued = asyncio.run(_queued_browser_jobs(database_url, now=NOW))
+    queued = asyncio.run(_queued_browser_jobs(database_url, now=NOW + timedelta(minutes=1)))
     health_events = asyncio.run(_stored_health_events(database_url))
     assert offers == ()
     assert len(queued) == 1
