@@ -29,7 +29,8 @@ by provider/reference/history data.
 - one-way, round-trip, open-jaw and multi-city trips;
 - exact dates, `±N` flexible dates, explicit ranges and rolling 90-day search;
 - quick shortlist and user-selected full-scope scan;
-- direct and protected-connection tickets returned by Aviasales;
+- direct and multi-segment single-ticket results returned by Aviasales, with
+  protection status `unknown` unless explicit provider evidence exists;
 - split-ticket and self-transfer composition from confirmed segment offers;
 - nearby origin and destination airports;
 - hidden-city research behind a second explicit approval;
@@ -99,7 +100,7 @@ Trip: round-trip
 Dates: 2026-09-01..2026-11-29
 Passengers: 1 adult
 Coverage: quick shortlist
-Strategies: direct, protected, split, self-transfer
+Strategies: direct, through-ticket, split, self-transfer
 Hidden-city: disabled
 Estimate: 42 calendar + 18 exact calls
 Provider limit: 20 rpm
@@ -124,7 +125,7 @@ The UI renders durable phases:
 1. resolving geographic scopes;
 2. calendar shortlist;
 3. exact live verification;
-4. protected-ticket extraction;
+4. through-ticket extraction and protection classification;
 5. split/self-transfer composition;
 6. optional hidden-city research;
 7. ranking and report generation.
@@ -180,7 +181,7 @@ class DateMode(StrEnum):
 
 class RouteStrategy(StrEnum):
     DIRECT = "direct"
-    PROTECTED_CONNECTION = "protected_connection"
+    THROUGH_TICKET = "through_ticket"
     SPLIT_TICKET = "split_ticket"
     SELF_TRANSFER = "self_transfer"
     HIDDEN_CITY = "hidden_city"
@@ -191,42 +192,106 @@ leg has origin/destination `LocationScope` and a `DateConstraint`. Multi-city
 and open-jaw are represented as explicit ordered legs instead of special
 provider DTO fields.
 
-### 5.2 Search plan
+### 5.2 Plan aggregate and immutable revisions
 
-`AgentSearchPlan` contains:
+`AgentSearchPlan` is a stable household-owned aggregate ID. Its content lives
+in immutable `AgentSearchPlanRevision` rows. A revision contains:
 
-- UUID, household/user ownership and version;
+- monotonically increasing revision number and canonical content hash;
 - normalized intent and unresolved choices;
-- expanded airport scopes or expansion rules;
+- frozen airport scope or a bounded frozen discovery rule;
+- airport-catalog checksum, region-taxonomy version and provider-capability
+  snapshot;
 - coverage mode: `quick` or `full`;
 - enabled strategies and risk gates;
 - ranking profile;
-- request budget and deadline;
-- estimated calendar/exact calls;
-- current status and timestamps;
-- prompt/parser version and deterministic plan-builder version.
+- logical-operation, HTTP-attempt and deadline budgets;
+- estimated calendar/exact operations and worst-case HTTP attempts;
+- prompt/parser and deterministic plan-builder versions;
+- `created_at`, `expires_at` and `superseded_at`.
 
-Plan states:
+Revision states are deliberately separate from execution:
 
 ```text
-draft
-  -> awaiting_approval
-  -> queued
-  -> running
-  -> completed | partial | failed | cancelled | expired
+draft -> awaiting_approval -> consumed | superseded | expired
 ```
 
-Editing a plan creates a new version. Approval applies only to the exact
-version displayed to the user.
+Only a `draft` revision may be patched. A patch writes a new immutable revision
+and marks the previous revision `superseded`; it never changes an existing run.
+An awaiting revision expires after the configured plan TTL, initially 24 hours.
 
-### 5.3 Run and stage records
+### 5.3 Approval and run lifecycle
 
-`AgentPlanRun` stores idempotency key, attempts, deadline, status, counters,
-next retry and terminal code. `AgentPlanStage` stores one row per phase with
-status, attempt counts, provider-call counts and sanitized error summary.
+The execute click atomically writes a `PlanExecutionApproval` and one
+`AgentPlanRun`. The approval records revision ID/hash, user/session, approval
+timestamp, approved budgets/strategies, risk-warning versions and the run ID
+that consumed it. It cannot be reused.
+
+`POST .../execute` requires the exact revision ID, content hash, expected
+revision number and an idempotency key. If the current revision changed,
+expired, was consumed, or belongs to another household, execution is rejected.
+A rerun always requires a newly displayed estimate and a new execute click; it
+creates a new revision when volatile capability/catalog inputs changed.
+
+Run states are independent:
+
+```text
+queued -> running -> completed | partial | failed
+                  -> cancel_requested -> cancelled
+```
+
+Cancellation always targets an explicit `run_id`; it never means “whatever is
+latest.” Only one non-terminal run per plan is allowed. The convenience
+`runs/latest` endpoint means the greatest `(created_at, run_id)` visible to the
+household, while all mutation endpoints require an explicit run ID.
+
+### 5.4 Per-operation execution ledger
+
+Fan-out work is durable at operation granularity, not only phase granularity.
+`AgentRunOperation` stores:
+
+- run/stage/provider IDs;
+- deterministic operation fingerprint and typed operation kind;
+- sanitized immutable input and private server-only continuation state;
+- `pending | leased | retry_wait | succeeded | failed | skipped` status;
+- lease owner/expiry, attempts and `next_retry_at`;
+- reserved and consumed HTTP-attempt units;
+- result evidence reference or stable error code.
+
+`(run_id, operation_fingerprint)` is unique. The worker claims operations with
+a lease, records an attempt reservation before network I/O and recovers expired
+leases. Aviasales exact search is decomposed into durable start and poll work;
+the opaque search continuation is persisted server-side and never sent to the
+client/model/logs. A crash in the narrow window after a read-only upstream call
+may repeat that call, so execution is at-least-once, but budget reservation,
+candidate fingerprint dedupe and append-only observations make retries safe.
+
+`AgentPlanStage` is an aggregate progress view derived from operations, not the
+unit of resumability.
+
+### 5.5 Evidence and capability types
+
+Indicative and confirmed values are different types:
+
+- `DiscoverySignal`: calendar/hot-offer evidence used only for shortlist;
+- `ConfirmedOfferEvidence`: a ticket-bearing exact-search result;
+- `ComposedRouteCandidate`: uses only confirmed component evidence;
+- `ProviderCapabilitySnapshot`: versioned support and semantics used by a plan.
+
+The ranker accepts only `ConfirmedOfferEvidence` and confirmed composed
+candidates. `DiscoverySignal` cannot implement that input protocol and is
+stored separately, so calendar amounts cannot enter final ranking by accident.
+The current date-matrix code that wraps calendar values as `FlightOffer` must be
+refactored before the orchestrator ranker is connected.
+
+Capability values are `supported | unsupported | unknown`, not booleans that
+default to false certainty. Protection is likewise
+`explicitly_protected | self_transfer | unknown`. A multi-segment ticket in the
+current Aviasales response has no verified PNR/protection field and therefore
+uses `unknown`, never an invented “protected” label.
 
 Candidate observations are append-only. Re-ranking creates a new ranking
-snapshot without rewriting raw normalized evidence.
+snapshot without rewriting normalized evidence.
 
 ## 6. Geographic expansion
 
@@ -239,13 +304,35 @@ Location scopes resolve through a provider-neutral airport catalog:
 - anywhere → destinations discoverable from calendar/hot-offer/reference
   sources, followed by exact verification.
 
-The catalog records provenance and commercial relevance. A quick scan orders
-airports by route coverage, commercial relevance, nearby distance and calendar
-evidence. A full scan includes every commercial airport in the approved scope,
-subject to the displayed hard budget.
+Country expansion uses ISO 3166 alpha-2 values from a specific imported airport
+catalog revision. Region expansion uses a versioned project-owned taxonomy
+mapping region IDs to ISO country codes; RU/EN aliases are data in that same
+version, not model knowledge. The airport catalog must be extended with
+documented commercial-relevance provenance before that value affects ordering.
+
+A quick scan orders airports by route coverage, commercial relevance, nearby
+distance and discovery evidence. A full scan freezes every searchable
+commercial airport in the approved scope into the plan revision.
+
+Country/city/airport expansion is completed and frozen before approval. The
+revision stores codes plus catalog/taxonomy checksums, so a later airport import
+cannot change an approved surface.
+
+`anywhere` is a bounded discovery rule because destinations are not known until
+provider work starts. Its revision freezes origin scopes, date bounds, allowed
+and excluded countries/regions, discovery source IDs, maximum destination
+seeds and exact-verification budget. The run persists the first discovery
+output as an immutable `RunScopeSnapshot`; later stages cannot silently add
+destinations. The estimate uses the frozen maximum seed count.
 
 Origin scopes use the same mechanism, so `Москва и аэропорты рядом → Южная
 Европа` is not a special case.
+
+Every result includes a coverage report: frozen input scope, destinations/dates
+attempted, succeeded, failed, skipped, and the explicit reason for anything not
+searched. “Full” means the entire frozen local scope completed; if a hard
+budget prevents that, the plan must be revised before execution rather than
+quietly returning a truncated result.
 
 ## 7. Search algorithm
 
@@ -253,19 +340,41 @@ Origin scopes use the same mechanism, so `Москва и аэропорты р�
 
 Resolve scopes, remove impossible/closed/non-commercial airports, deduplicate
 city and airport aliases, calculate the Cartesian search surface and estimate
-calls before approval.
+work before approval.
+
+Budget units are explicit:
+
+- `provider_operation`: one logical calendar query, exact-search workflow,
+  suggest/discovery query or booking-free comparison;
+- `http_attempt`: one actual upstream HTTP request, including start, every poll
+  round and every retry;
+- `exact_search`: one logical ticket search for one frozen provider request;
+- `calendar_search`: one logical calendar query.
+
+The provider adapter publishes a versioned cost model with maximum start
+attempts, poll rounds, attempts per poll and retry policy. `PlanEstimator`
+calculates both expected operations and worst-case HTTP attempts. RPM is
+enforced against actual HTTP attempts, not logical searches. Every retry and
+poll consumes the run's HTTP-attempt budget.
 
 Initial configurable defaults:
 
-| Mode | Calendar calls | Exact calls | Deadline |
-|---|---:|---:|---:|
-| quick | up to 40 | up to 20 | 10 minutes |
-| full | scope-dependent, hard cap 240 total calls | plan-derived | 30 minutes |
+| Mode | Calendar operations | Exact operations | Logical-operation default | Deadline |
+|---|---:|---:|---:|---:|
+| quick | up to 40 | up to 20 | 60 | 10 minutes |
+| full | frozen-scope estimate | frozen-scope estimate | up to 240 | 30 minutes |
 
-Provider-specific RPM and circuit-breaker policies override these ceilings.
-The plan is rejected as `budget_too_large` rather than silently truncating an
-approved full scan. The user may approve a smaller scope or explicit larger
-budget later.
+The revision also stores the derived worst-case HTTP-attempt cap. Provider RPM,
+retry and circuit-breaker policies can only reduce work; they cannot override a
+run budget upward. Reservations are atomic and a request is not started when
+the remaining budget cannot cover its next HTTP attempt.
+
+`240` is the initial default full-scan logical-operation limit, not an absolute
+system claim. The application has a separate configured absolute ceiling,
+initially 1,000 logical operations and its derived HTTP cap. Increasing a plan
+above 240 creates a new revision and requires a new approval; exceeding the
+system ceiling is rejected. A full scan that does not fit its approved budget
+is `budget_too_large` before execution, never silently truncated.
 
 ### 7.2 Phase B — calendar shortlist
 
@@ -279,8 +388,10 @@ Exact-date requests skip this phase when no scope discovery is required.
 ### 7.3 Phase C — exact live search
 
 The Aviasales adapter performs exact searches for approved pairs. Provider
-responses supply direct flights and protected itineraries with connection
-segments. Mapping stays inside the provider boundary.
+responses supply direct flights and multi-segment single-ticket results.
+Mapping stays inside the provider boundary. Because the verified response has
+no explicit PNR/protection field, connection protection remains `unknown`
+unless a future contract supplies direct evidence.
 
 Only exact ticket-bearing results can become confirmed priced candidates.
 Calendar-only rows remain indicative and visibly unconfirmed.
@@ -289,7 +400,7 @@ Calendar-only rows remain indicative and visibly unconfirmed.
 
 Candidate hubs come from:
 
-- connection airports observed in protected results;
+- connection airports observed in through-ticket results;
 - the local route/airport catalog;
 - high-coverage commercial hubs inside the approved geographic search graph.
 
@@ -312,9 +423,20 @@ as non-comparable rather than converted by the model.
 
 ### 7.5 Phase E — open-jaw and multi-city
 
-Native provider multi-direction search is used when supported. The composer may
-also combine confirmed per-leg offers. It keeps journey order, passenger mix,
-currency evidence, connection constraints and ticket boundaries explicit.
+The current verified Aviasales adapter supports one-way and round-trip only.
+Open-jaw and multi-city therefore use confirmed per-leg exact searches and the
+composer. Native multi-direction search may be enabled only after a new
+sanitized fixture, contract test and live smoke prove its schema, and the
+capability snapshot records `supported`. `unknown` is treated as unsupported.
+
+Provider request locations distinguish airport codes from provider-supported
+city codes with typed `ProviderLocation(kind, code)`. The adapter controls
+`is_origin_airport` / `is_destination_airport`; the planner never guesses these
+flags. When city semantics are not contract-proven, scope expansion fans out to
+frozen airport codes.
+
+The composer keeps journey order, passenger mix, currency evidence, connection
+constraints and ticket boundaries explicit.
 
 The number of legs and candidate combinations is part of the approved budget.
 Beam search keeps the best bounded candidates after every leg using stable
@@ -330,10 +452,23 @@ Research searches candidate onward destinations and accepts a result only when
 the user's desired airport is an intermediate segment. These candidates:
 
 - are stored and ranked separately;
-- never generate a purchase action automatically;
+- are built only from a separately searched one-way ticket; current
+  round-trip/native-multi-ticket products are ineligible;
+- may use only the final overall plan leg, with no later journey leg depending
+  on completion of the skipped ticket segment;
+- require the desired airport to occur before at least one skipped segment and
+  forbid any intended later segment on the same ticket;
+- are excluded when checked baggage is known to be included/required;
+- are marked `research_only_not_actionable` when baggage is unknown;
+- always set `booking_action_available=false` in this release;
 - warn that checked baggage may continue to the ticketed destination;
 - warn that later/return segments may be cancelled;
 - are not described as safe or recommended.
+
+The second approval stores the exact hidden-city warning version. Hidden-city
+operations are not generated for open-jaw/multi-city intermediate legs, are not
+watchable, and cannot be promoted into normal, split or self-transfer results.
+Supporting broader cases requires a new design revision, not a relaxed warning.
 
 ## 8. Ranking and factual reporting
 
@@ -376,32 +511,68 @@ Uses stored price history only. Until the route/date window has sufficient
 coverage, the result is `insufficient_data` and the agent offers to create a
 watch. It does not recommend a weekday or hour from generic folklore.
 
-Any later statistical recommendation must publish sample count, history span,
-confidence and calculation version.
+Comparable observations share exact airport pair, trip shape, cabin, passenger
+mix, provider/currency basis and departure-date window `±3` days. They are
+stratified by days-to-departure bands (`0–6`, `7–13`, `14–29`, `30–59`, `60+`)
+before comparing booking time, so approaching departure is not confused with a
+weekday/hour effect.
+
+Initial evidence gates:
+
+- general current-price percentile: at least 40 confirmed observations over at
+  least 21 days and 14 distinct observation dates;
+- weekday or four-hour booking-time bucket: at least 8 observations in every
+  compared bucket, spread across at least 4 distinct weeks, with matching
+  days-to-departure bands;
+- recommendation difference: at least 5% between robust bucket medians;
+- `buy_now` evidence: current confirmed price at or below the historical 20th
+  percentile; wording remains “historically low,” never a prediction.
+
+If any gate fails, that claim is omitted and the output is
+`insufficient_data`. Every result publishes sample count, distinct dates/weeks,
+history span, percentile/median, timezone and calculation version.
 
 ### 9.4 Error fare
 
-A fare is labelled `suspected_anomaly`, never guaranteed error fare. Detection
-requires a sufficient comparable sample and a deterministic deviation rule.
+A fare is labelled `suspected_anomaly`, never guaranteed error fare. Comparable
+samples use the same key as buy-timing and exact confirmed evidence only. The
+initial detector requires at least 20 observations across at least 7 distinct
+dates. It flags a fare only when it is no more than 60% of the rolling median
+and its robust MAD z-score is at most `-3`; when MAD is zero, both a non-zero
+range and the 60% ratio rule are still required. Thresholds and detector
+version are returned with the finding.
+
 External forums/bots/channels may be researched through configured web-search
 connectors, but their text is untrusted data and is not a price source.
 
 ### 9.5 Country site and currency
 
-Comparison requires a stable same-flight identity, observed amounts in each
-currency, deterministic timestamped FX and configured card-fee assumptions.
-Without those inputs the UI shows side-by-side amounts and
-`not_comparable`. The agent never bypasses geo/access controls and never buys.
+Comparison requires a stable same-flight fingerprint built from airports,
+carrier/flight numbers, local departure timestamps, cabin and ordered segments;
+provider proposal IDs alone are not identity. Every currency query is an
+approved provider operation and contributes to both operation/HTTP budgets.
+
+Conversion requires a typed `FxRateObservation` with source, base/quote,
+observed timestamp and rate, no older than 24 hours by default. Card fees come
+from an explicit user/configured assumption with provenance and effective date.
+Without fresh FX or fee assumptions, the UI shows side-by-side amounts and
+`not_comparable`; no saving is claimed. Until an FX provider/config is actually
+enabled, the stable result is `fx_provider_unavailable`. The agent never
+bypasses geo/access controls and never buys.
 
 ## 10. Application components
 
 - `IntentParser`: deterministic parser plus optional typed model overlay.
 - `AgentPlanBuilder`: validates intent and creates provider-neutral plans.
 - `ScopeResolver`: expands airport/city/country/region/anywhere.
-- `PlanEstimator`: computes call counts, budgets and deadline estimate.
+- `PlanEstimator`: computes logical operations, worst-case HTTP attempts and
+  deadline estimate from a versioned provider cost model.
 - `PlanApprovalService`: validates ownership, plan version and risk gates.
 - `PlanExecutor`: durable orchestration state machine.
+- `OperationScheduler`: materializes, leases and resumes per-operation fan-out.
 - `ProviderSearchGateway`: policy-checked exact/calendar provider port.
+- `ProviderCapabilityRegistry`: produces the frozen tri-state capability/cost
+  snapshot used by a revision.
 - `RouteComposer`: split/self-transfer/open-jaw/multi-city candidates.
 - `HiddenCityResearchService`: isolated high-risk expansion.
 - `CandidateRanker`: deterministic ranking snapshots.
@@ -414,16 +585,28 @@ Delivery adapters remain thin. Provider DTOs do not enter these contracts.
 Add forward-only migrations for:
 
 - `agent_search_plans`;
-- `agent_search_plan_versions` or immutable version rows;
+- `agent_search_plan_revisions` (immutable, unique plan/revision and hash);
+- `agent_plan_execution_approvals` (single-use, bound to revision and run);
 - `agent_plan_runs`;
 - `agent_plan_stages`;
-- `agent_candidate_observations`;
+- `agent_run_operations` (unique run/fingerprint, lease and attempt budget);
+- `agent_run_scope_snapshots`;
+- `agent_discovery_signals` (indicative-only);
+- `agent_confirmed_offer_evidence`;
+- `agent_composed_route_candidates`;
 - `agent_ranking_snapshots`.
 
-Every query includes household scope. Runs have unique idempotency constraints.
-Stage claims use the existing worker lock/retry conventions. Candidate evidence
-is append-only and may reference normalized existing offers instead of copying
-secret provider refs.
+Every query includes household scope. Runs have unique `(household_id,
+idempotency_key)` and one-active-run-per-plan constraints. Approval has a unique
+`run_id` and cannot be reused. Operation claims use the existing worker
+lock/retry conventions with lease expiry and unique fingerprints.
+
+Discovery and confirmed evidence use distinct tables and repository return
+types. Ranking snapshots may reference only confirmed-offer/composed-candidate
+IDs; a database/application invariant rejects discovery-signal IDs. Candidate
+evidence is append-only and may reference normalized existing offers instead of
+copying secret provider refs. Private upstream continuations are encrypted or
+server-only and never returned by repositories used in delivery/model context.
 
 ## 12. API contracts
 
@@ -434,14 +617,20 @@ POST   /api/v1/agent/search-plans
 GET    /api/v1/agent/search-plans/{plan_id}
 PATCH  /api/v1/agent/search-plans/{plan_id}
 POST   /api/v1/agent/search-plans/{plan_id}/execute
-POST   /api/v1/agent/search-plans/{plan_id}/cancel
+GET    /api/v1/agent/search-plans/{plan_id}/runs
+GET    /api/v1/agent/search-plans/{plan_id}/runs/{run_id}
+POST   /api/v1/agent/search-plans/{plan_id}/runs/{run_id}/cancel
 GET    /api/v1/agent/search-plans/{plan_id}/runs/latest
-GET    /api/v1/agent/search-plans/{plan_id}/results
+GET    /api/v1/agent/search-plans/{plan_id}/runs/{run_id}/results
 ```
 
-`execute` requires bearer session, household ownership, `expected_version`, an
-idempotency key and explicit hidden-city acknowledgement when applicable. It
-records approval and queues the run atomically.
+`PATCH` accepts only the current draft revision and always returns a newly
+written revision. `execute` requires bearer session, household ownership,
+`revision_id`, `content_hash`, `expected_revision`, an idempotency key and the
+exact hidden-city warning version when applicable. It records a single-use
+approval and queues the run atomically. Repeating the same idempotency key
+returns the original run; a different key against a consumed revision is
+rejected and requires a refreshed revision/approval.
 
 `POST /api/v1/agent/chat/turn` remains compatible but returns a proposed plan
 reference instead of executing live searches. `/api/v1/agent/plan` and presets
@@ -451,8 +640,11 @@ API errors use stable codes such as:
 
 - `agent_plan_incomplete`;
 - `agent_plan_stale`;
+- `agent_plan_consumed`;
+- `agent_plan_expired`;
 - `agent_plan_budget_too_large`;
 - `agent_plan_approval_required`;
+- `agent_provider_capability_unknown`;
 - `agent_hidden_city_ack_required`;
 - `agent_run_already_active`;
 - `agent_run_deadline_exceeded`;
@@ -464,14 +656,19 @@ API errors use stable codes such as:
 Every run has:
 
 - idempotency key;
-- deadline and provider-call budget;
+- deadline, logical-operation budget and worst-case HTTP-attempt budget;
 - durable attempts and next retry;
-- distributed/SQLite-safe claim lock;
+- per-operation SQLite-safe lease and unique fingerprint;
 - graceful cancellation;
 - per-stage partial success;
 - bounded retry respecting `Retry-After` and circuit breakers;
 - restart recovery;
 - sanitized trace events.
+
+An HTTP-attempt unit is reserved before every start/poll/retry. Unused
+reservation is reconciled after a completed attempt, while a process crash
+leaves it consumed so restart cannot exceed the approved cap. Stage/run
+counters are derived from the operation ledger.
 
 403/auth/schema errors are terminal for the affected provider operation. 429
 uses `Retry-After`. Network/5xx retries are bounded. A failed scope/date pair is
@@ -525,25 +722,40 @@ household isolation failures.
 
 - country scope expands to its commercial airports;
 - quick and full modes produce different deterministic budgets;
+- estimator distinguishes logical operations from start/poll/retry HTTP
+  attempts and never exceeds either cap;
 - airport/city/country/region/anywhere scopes;
+- catalog/taxonomy versions and frozen scope survive later imports;
+- anywhere discovery cannot add seeds after the run scope snapshot;
 - exact/flexible/range/90-day constraints;
 - one-way/round-trip/open-jaw/multi-city plans;
-- provider-protected connections map without DTO leakage;
+- single-ticket connections map with protection `unknown` when the provider has
+  no explicit evidence;
+- unsupported/unknown native multi-city capability uses per-leg composition;
+- discovery signals cannot satisfy the confirmed-ranker input contract;
 - split price is accepted only with every segment confirmed;
 - infeasible or overlapping self-transfers are rejected;
 - airport-change buffer and unknown ground cost are visible;
 - mixed-currency routes require deterministic FX;
 - hidden-city is isolated and approval-gated;
+- hidden-city rejects round-trip/native-multi tickets, known checked baggage
+  and all booking actions;
 - unknown baggage/visa/transfer values remain unknown;
-- buy-timing without history returns `insufficient_data`;
-- error fare is `suspected_anomaly`, never guarantee.
+- buy-timing under any sample/date/week threshold returns `insufficient_data`;
+- error fare threshold boundary is `suspected_anomaly`, never guarantee;
+- stale/missing FX or fee provenance returns `not_comparable`.
 
 ### 16.2 Persistence and worker
 
 - household A cannot read/run/cancel household B's plan;
 - execute idempotency prevents duplicate runs;
+- consumed approval cannot start a different run and rerun requires a new
+  revision/approval;
 - plan version mismatch rejects stale approval;
-- stage retries do not duplicate candidates;
+- concurrent edit supersedes the old revision without mutating its run;
+- cancel targets an explicit run and latest-run ordering is deterministic;
+- per-operation lease/retry does not duplicate candidates or lose budget;
+- start/poll continuation resumes without exposing provider refs;
 - worker restart resumes the next durable phase;
 - cancellation stops new provider calls;
 - partial results survive provider 403/429/timeout;
@@ -577,8 +789,8 @@ URLs in output.
    airports and a visible larger budget.
 4. `Куда угодно из СПб`: uses discovery/calendar evidence, then exact-verifies
    the best destinations.
-5. Open-jaw and multi-city: preserves all legs and returns protected and split
-   variants separately.
+5. Open-jaw and multi-city: preserves all legs and returns through-ticket,
+   unknown-protection and split variants separately.
 6. Provider rate limit: waits according to policy or finishes partial without
    losing confirmed candidates.
 7. No price history: states `Недостаточно данных` and offers a watch.
