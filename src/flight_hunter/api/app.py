@@ -12,8 +12,9 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from flight_hunter.agent.chat import (
     AgentAction,
@@ -128,6 +129,7 @@ from flight_hunter.notifications.telegram import (
 )
 from flight_hunter.ops.application_metrics import render_application_metrics
 from flight_hunter.ops.structured_logging import log_event
+from flight_hunter.persistence.database import create_database_engine, current_alembic_head
 from flight_hunter.persistence.repositories import (
     AgentAuditRepository,
     AirportReferenceRepository,
@@ -208,6 +210,11 @@ class HealthResponse(BaseModel):
     app: str
     status: str
     external_credentials_required: bool
+
+
+class ReadyResponse(BaseModel):
+    status: str
+    database: str
 
 
 class BootstrapInvitationRequestBody(BaseModel):
@@ -1254,6 +1261,36 @@ def create_app(
             status="ok",
             external_credentials_required=False,
         )
+
+    @app.get("/readyz", response_model=ReadyResponse)
+    async def readyz() -> ReadyResponse | JSONResponse:
+        try:
+            async with session_factory() as session:
+                await session.execute(text("SELECT 1"))
+        except SQLAlchemyError:
+            return _coded_error_response(
+                status_code=503,
+                code="database_unavailable",
+                message="database is unavailable",
+            )
+        try:
+            async with session_factory() as session:
+                revision = (
+                    await session.execute(text("SELECT version_num FROM alembic_version"))
+                ).scalar_one()
+        except SQLAlchemyError:
+            return _coded_error_response(
+                status_code=503,
+                code="migration_pending",
+                message="database migration is pending",
+            )
+        if revision != current_alembic_head():
+            return _coded_error_response(
+                status_code=503,
+                code="migration_pending",
+                message="database migration is pending",
+            )
+        return ReadyResponse(status="ready", database="ok")
 
     @app.get("/api/v1/metrics", response_class=PlainTextResponse)
     def application_metrics() -> PlainTextResponse:
@@ -3521,7 +3558,7 @@ def create_app(
 
 
 def _watch_session_factory(database_url: str) -> async_sessionmaker[AsyncSession]:
-    engine = create_async_engine(database_url)
+    engine = create_database_engine(database_url)
     return async_sessionmaker(engine, expire_on_commit=False)
 
 

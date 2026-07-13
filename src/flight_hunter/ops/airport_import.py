@@ -5,10 +5,11 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from flight_hunter.config import AppSettings, load_env_file
 from flight_hunter.geo.ourairports_importer import OurAirportsAirportImporter
+from flight_hunter.persistence.database import create_database_engine
 from flight_hunter.persistence.models import mapper_registry
 from flight_hunter.persistence.repositories import AirportReferenceRepository
 
@@ -22,7 +23,7 @@ async def run_import(*, airports_csv: Path, database_url: str) -> dict[str, obje
         }
 
     batch = OurAirportsAirportImporter().read_airports(airports_csv)
-    engine = create_async_engine(database_url)
+    engine = create_database_engine(database_url)
     async with engine.begin() as connection:
         await connection.run_sync(mapper_registry.metadata.create_all)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

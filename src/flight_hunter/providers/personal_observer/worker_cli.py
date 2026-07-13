@@ -58,9 +58,11 @@ async def _run_job(
     settings: AppSettings,
     fixture_html_path: Path | None,
 ) -> dict[str, object]:
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    engine = create_async_engine(database_url)
+    from flight_hunter.persistence.database import create_database_engine
+
+    engine = create_database_engine(database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         runner = PersonalObserverRunnerAdapter(

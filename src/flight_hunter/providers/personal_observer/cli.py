@@ -141,9 +141,11 @@ async def _persist_result(
     search_id: str,
     ttl_seconds: int,
 ) -> int:
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    engine = create_async_engine(database_url)
+    from flight_hunter.persistence.database import create_database_engine
+
+    engine = create_database_engine(database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         repository = BrowserObservedOfferRepository(session)

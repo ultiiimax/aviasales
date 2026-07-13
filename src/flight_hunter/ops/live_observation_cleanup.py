@@ -10,10 +10,11 @@ from pathlib import Path
 
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from flight_hunter.application.live_observation_cleanup import LiveObservationCleanupService
 from flight_hunter.config import AppSettings, load_env_file
+from flight_hunter.persistence.database import create_database_engine
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +39,7 @@ async def cleanup_live_observation_state(
         return _empty_result(code="database_missing", dry_run=dry_run)
 
     now = clock or (lambda: datetime.now(UTC))
-    engine = create_async_engine(database_url)
+    engine = create_database_engine(database_url)
     try:
         session_factory = async_sessionmaker(
             engine,

@@ -4,15 +4,16 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import Connection, pool
-from sqlalchemy.ext.asyncio import AsyncEngine, async_engine_from_config
+from sqlalchemy import Connection
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from flight_hunter.persistence.database import create_database_engine
 from flight_hunter.persistence.models import metadata
 
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = metadata
 
@@ -44,11 +45,7 @@ async def run_async_migrations(connectable: AsyncEngine) -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    connectable = create_database_engine(config.get_main_option("sqlalchemy.url"))
 
     asyncio.run(run_async_migrations(connectable))
 
