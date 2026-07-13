@@ -128,7 +128,7 @@ compose-up:
 	docker compose up --build
 
 compose-worker-up:
-	docker compose --profile worker up --build
+	docker compose up --build api worker
 
 compose-deals-up:
 	docker compose --profile deal-discovery up --build

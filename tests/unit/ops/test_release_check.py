@@ -101,7 +101,7 @@ def test_browser_stage_is_skipped_unless_requested() -> None:
 
 def test_compose_stage_uses_process_only_safe_environment() -> None:
     runner = RecordingRunner(
-        [CompletedProcess(("docker", "compose", "config"), 0, stdout="ok\n", stderr="")]
+        [CompletedProcess(("docker", "compose", "config", "--quiet"), 0, stdout="", stderr="")]
     )
 
     results = run_release_check(
@@ -114,7 +114,7 @@ def test_compose_stage_uses_process_only_safe_environment() -> None:
 
     assert results[0].status == "passed"
     command, environment = runner.calls[0]
-    assert command == ("docker", "compose", "config")
+    assert command == ("docker", "compose", "config", "--quiet")
     assert environment is not None
     assert environment["PATH"] == "test-path"
     assert environment["APP_SECRET_KEY"] != "unsafe-inherited"

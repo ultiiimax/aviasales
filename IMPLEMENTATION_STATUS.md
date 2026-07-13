@@ -30,8 +30,14 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [x] Repair Russian web UI encoding.
   - [x] Make browser runtime/bootstrap and local E2E explicit.
   - [x] Add release-check and pre-v1 upgrade tooling.
-  - [ ] Package Compose/CI/release artifacts.
+  - [x] Package Compose/CI/release artifacts.
   - [ ] Finish documentation and full release gate.
+
+Packaging verification on 2026-07-13: version `1.0.0`, secure loopback Compose
+configuration and Linux/Windows/browser/image CI contracts pass locally. Docker
+image execution remains unverified on this machine because Docker Desktop's Linux
+engine pipe is unavailable; the release gate reports `docker_unavailable` instead
+of treating it as success.
 
 ## Previous Slice: Aviasales Mobile API Hard Cut
 

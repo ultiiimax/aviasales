@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from flight_hunter import __version__
 from flight_hunter.agent.chat import (
     AgentAction,
     AgentAuditEvent,
@@ -1206,7 +1207,7 @@ def create_app(
 ) -> FastAPI:
     load_env_file()
     settings = settings or AppSettings.from_env()
-    app = FastAPI(title="Flight Hunter", version="0.1.0")
+    app = FastAPI(title="Flight Hunter", version=__version__)
     registry = ProviderRegistry.default(clock=lambda: datetime.now(UTC), settings=settings)
     provider_instances = (
         provider_instances if provider_instances is not None else _provider_instances(settings)

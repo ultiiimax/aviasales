@@ -29,6 +29,10 @@ NOW = datetime(2026, 6, 29, 16, 30, tzinfo=UTC)
 TUTU_SOURCE_FIXTURE = Path("tests/fixtures/browser/tutu/search_result_source_specific.html")
 
 
+def test_openapi_reports_local_v1_version() -> None:
+    assert create_app().openapi()["info"]["version"] == "1.0.0"
+
+
 def test_health_endpoint_reports_ready_without_external_credentials() -> None:
     client = TestClient(create_app())
 

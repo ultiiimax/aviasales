@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up uv and Python 3.13
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.9.26
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --frozen --group dev
+      - run: uv run flight-hunter-release-check
+
+  quality-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/Документы/Flight Hunter
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: Документы/Flight Hunter
+      - name: Set up uv and Python 3.13
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.9.26
+          python-version: "3.13"
+          enable-cache: true
+          working-directory: Документы/Flight Hunter
+      - run: uv sync --frozen --group dev
+      - run: uv run flight-hunter-release-check
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up uv and Python 3.13
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.9.26
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --frozen --group dev --group scraping
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run flight-hunter-browser-smoke
+      - run: uv run pytest tests/e2e -q -m browser_e2e --strict-markers
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up uv and Python 3.13
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.9.26
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --frozen --group dev
+      - run: uv run flight-hunter-init-local
+      - run: docker compose config --quiet
+      - run: docker compose build api worker

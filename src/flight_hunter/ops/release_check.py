@@ -48,7 +48,7 @@ STAGE_COMMANDS: dict[str, tuple[str, ...]] = {
         "-q",
     ),
     "security": ("uv", "run", "flight-hunter-security-scan"),
-    "compose": ("docker", "compose", "config"),
+    "compose": ("docker", "compose", "config", "--quiet"),
     "health": (
         "uv",
         "run",
