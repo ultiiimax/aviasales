@@ -26,7 +26,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
 - Execution plan:
   `docs/superpowers/plans/2026-07-13-agent-route-orchestrator.md`.
 - Progress:
-  - [ ] Add provider-neutral intent, evidence and plan contracts.
+  - [x] Add provider-neutral intent, evidence and plan contracts.
   - [ ] Freeze generic geographic scopes and estimate bounded provider work.
   - [ ] Persist immutable revisions, approvals, runs and operation ledger.
   - [ ] Expose the plan lifecycle and approval-gated web flow.
@@ -36,8 +36,10 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [ ] Add evidence-gated buy timing, anomaly and currency analysis.
   - [ ] Pass browser, recovery, migration, security and release gates.
 
-Planning status on 2026-07-13: the user-approved design and reviewed
-implementation plan are complete; production implementation has not started.
+Implementation status on 2026-07-13: the user-approved design and reviewed
+implementation plan are complete. Production implementation has started with
+the verified provider-neutral intent, plan and evidence contracts; remaining
+orchestrator slices are pending.
 
 ## Previous Slice: Local v1 Release
 

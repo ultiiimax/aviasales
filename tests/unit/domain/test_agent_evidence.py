@@ -73,9 +73,7 @@ def _confirmed_offer() -> ConfirmedOfferEvidence:
 def _composed_candidate() -> ComposedRouteCandidate:
     return ComposedRouteCandidate(
         id=UUID("00000000-0000-0000-0000-000000000003"),
-        component_evidence_ids=[  # type: ignore[arg-type]
-            UUID("00000000-0000-0000-0000-000000000002")
-        ],
+        components=[_confirmed_offer()],  # type: ignore[arg-type]
         total_amount=Money(1_330_000, "RUB"),
         passengers=2,
         observed_at=OBSERVED_AT,
@@ -103,6 +101,22 @@ def test_discovery_signal_is_not_confirmed_rank_input() -> None:
         require_confirmed_rank_input(signal)  # type: ignore[arg-type]
 
 
+def test_discovery_signal_id_cannot_be_wrapped_as_composed_rank_input() -> None:
+    signal = _discovery_signal()
+
+    with pytest.raises(TypeError, match="components must contain ConfirmedOfferEvidence"):
+        ComposedRouteCandidate(
+            id=UUID("00000000-0000-0000-0000-000000000004"),
+            components=(signal,),  # type: ignore[arg-type]
+            total_amount=Money(1_230_000, "RUB"),
+            passengers=1,
+            observed_at=OBSERVED_AT,
+            segment_ids=("calendar-signal",),
+            segments=(_segment(),),
+            protection_status=ProtectionStatus.UNKNOWN,
+        )
+
+
 def test_confirmed_and_composed_records_are_the_only_confirmed_rank_inputs() -> None:
     offer = _confirmed_offer()
     candidate = _composed_candidate()
@@ -113,6 +127,7 @@ def test_confirmed_and_composed_records_are_the_only_confirmed_rank_inputs() -> 
     assert require_confirmed_rank_input(candidate) is candidate
     assert offer.segment_ids == ("segment-1",)
     assert offer.segments == (_segment(),)
+    assert candidate.components == (offer,)
     assert candidate.component_evidence_ids == (offer.id,)
     assert candidate.segment_ids == ("segment-1",)
 
@@ -153,3 +168,6 @@ def test_confirmed_segment_ids_are_ordered_immutable_and_match_segments() -> Non
             segment_ids=("segment-1", "segment-1"),
             segments=(_segment(), _segment()),
         )
+    with pytest.raises(ValueError, match="components must be unique"):
+        offer = _confirmed_offer()
+        replace(_composed_candidate(), components=(offer, offer))

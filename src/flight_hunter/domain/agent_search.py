@@ -104,8 +104,8 @@ class DateConstraint:
                 raise ValueError("end_date cannot be before start_date")
             if self.flex_days != 0:
                 raise ValueError(f"{mode.value} date cannot also have flex_days")
-            if mode is DateMode.ROLLING_90_DAYS and (self.end_date - self.start_date).days != 90:
-                raise ValueError("rolling_90_days must span exactly 90 days")
+            if mode is DateMode.ROLLING_90_DAYS and (self.end_date - self.start_date).days != 89:
+                raise ValueError("rolling_90_days must contain exactly 90 inclusive dates")
         object.__setattr__(self, "mode", mode)
 
 

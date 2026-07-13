@@ -56,13 +56,30 @@ def test_all_date_modes_preserve_their_bounds() -> None:
         DateConstraint(
             DateMode.ROLLING_90_DAYS,
             date(2026, 7, 13),
-            date(2026, 10, 11),
+            date(2026, 10, 10),
         ),
     )
 
     assert tuple(constraint.mode for constraint in constraints) == tuple(DateMode)
     assert constraints[1].flex_days == 3
     assert constraints[2].end_date == date(2026, 9, 30)
+
+
+def test_rolling_90_days_counts_both_boundary_dates() -> None:
+    constraint = DateConstraint(
+        DateMode.ROLLING_90_DAYS,
+        date(2026, 9, 1),
+        date(2026, 11, 29),
+    )
+
+    assert constraint.end_date is not None
+    assert (constraint.end_date - constraint.start_date).days == 89
+    with pytest.raises(ValueError, match="90 inclusive dates"):
+        DateConstraint(
+            DateMode.ROLLING_90_DAYS,
+            date(2026, 9, 1),
+            date(2026, 11, 30),
+        )
 
 
 def test_all_trip_shapes_and_route_strategies_are_closed_domain_enums() -> None:

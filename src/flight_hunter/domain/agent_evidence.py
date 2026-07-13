@@ -110,7 +110,7 @@ class ConfirmedOfferEvidence:
 @dataclass(frozen=True, slots=True)
 class ComposedRouteCandidate:
     id: UUID
-    component_evidence_ids: tuple[UUID, ...]
+    components: tuple[ConfirmedOfferEvidence, ...]
     total_amount: Money
     passengers: int
     observed_at: datetime
@@ -121,13 +121,14 @@ class ComposedRouteCandidate:
     def __post_init__(self) -> None:
         if not isinstance(self.id, UUID):
             raise TypeError("id must be UUID")
-        component_ids = tuple(self.component_evidence_ids)
-        if not component_ids:
-            raise ValueError("component_evidence_ids cannot be empty")
-        if not all(isinstance(component_id, UUID) for component_id in component_ids):
-            raise TypeError("component_evidence_ids must contain UUID values")
+        components = tuple(self.components)
+        if not components:
+            raise ValueError("components cannot be empty")
+        if not all(isinstance(component, ConfirmedOfferEvidence) for component in components):
+            raise TypeError("components must contain ConfirmedOfferEvidence values")
+        component_ids = tuple(component.id for component in components)
         if len(set(component_ids)) != len(component_ids):
-            raise ValueError("component_evidence_ids must be unique")
+            raise ValueError("components must be unique")
         _require_money(self.total_amount, "total_amount")
         _require_passengers(self.passengers)
         _require_aware_datetime(self.observed_at)
@@ -135,7 +136,7 @@ class ComposedRouteCandidate:
         segments = _normalized_segments(self.segments)
         if len(segment_ids) != len(segments):
             raise ValueError("segment_ids must match segments")
-        object.__setattr__(self, "component_evidence_ids", component_ids)
+        object.__setattr__(self, "components", components)
         object.__setattr__(self, "segment_ids", segment_ids)
         object.__setattr__(self, "segments", segments)
         object.__setattr__(
@@ -147,6 +148,10 @@ class ComposedRouteCandidate:
     @property
     def confirmation_state(self) -> ConfirmationState:
         return ConfirmationState.CONFIRMED
+
+    @property
+    def component_evidence_ids(self) -> tuple[UUID, ...]:
+        return tuple(component.id for component in self.components)
 
 
 def require_confirmed_rank_input(
