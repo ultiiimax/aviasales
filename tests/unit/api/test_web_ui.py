@@ -7,6 +7,23 @@ from fastapi.testclient import TestClient
 from flight_hunter.api.app import create_app
 
 
+def test_web_ui_contains_readable_russian_without_mojibake() -> None:
+    response = TestClient(create_app()).get("/")
+
+    assert response.status_code == 200
+    assert response.encoding.lower() == "utf-8"
+    for text in ("Найти билеты", "Отслеживания", "Источник", "Недостаточно данных"):
+        assert text in response.text
+    for marker in (
+        "\u0420\u045c",
+        "\u0420\u040e",
+        "\u0432\u0402",
+        "\u0440\u045f",
+        "\u0420\u00a0\u0420",
+    ):
+        assert marker not in response.text
+
+
 def test_root_serves_search_screen_without_cached_radar_or_secrets() -> None:
     client = TestClient(create_app())
 
