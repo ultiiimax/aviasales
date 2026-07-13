@@ -1,8 +1,8 @@
 # Backup and Restore Runbook
 
-Date: 2026-06-29
+Date: 2026-07-13
 
-## Local SQLite Demo
+## Local SQLite v1
 
 Create a backup:
 
@@ -45,9 +45,41 @@ database unchanged.
 7. Run `uv run pytest tests/integration -ra` or the deployment smoke checks.
 8. Confirm `/healthz` and authenticated household routes work.
 
-## Production PostgreSQL
+Also confirm `/readyz` returns current migration head and
+`flight-hunter-worker-healthcheck --role flight_hunter_worker` returns `ok` after
+the worker is restarted.
 
-The SQLite commands are for local/demo deployments. Production PostgreSQL/PostGIS needs a separate
+## Docker Compose Volume
+
+Create and verify an online backup while the stack is running:
+
+```powershell
+docker compose exec api uv run flight-hunter-backup --database /data/flight_hunter.db --backup-dir /data/backups
+docker compose exec api uv run flight-hunter-backup-verify /data/backups/flight_hunter_YYYYMMDDTHHMMSSZ.db
+```
+
+Copy both artifacts off the named volume:
+
+```powershell
+docker compose cp api:/data/backups/flight_hunter_YYYYMMDDTHHMMSSZ.db .\backups\
+docker compose cp api:/data/backups/flight_hunter_YYYYMMDDTHHMMSSZ.db.manifest.json .\backups\
+```
+
+Restore only with both services stopped:
+
+```powershell
+docker compose stop worker api
+docker compose run --rm --no-deps api uv run flight-hunter-backup-verify /data/backups/flight_hunter_YYYYMMDDTHHMMSSZ.db
+docker compose run --rm --no-deps api uv run flight-hunter-restore /data/backups/flight_hunter_YYYYMMDDTHHMMSSZ.db --database /data/flight_hunter.db
+docker compose up -d
+```
+
+Do not use `docker compose down --volumes` unless permanent deletion of the
+database and in-volume backups is intended.
+
+## Unsupported public/PostgreSQL deployment
+
+The supported v1 deployment is local SQLite. A future public PostgreSQL/PostGIS deployment needs a separate
 encrypted backup job:
 
 - run `pg_dump` or managed-provider snapshots on a schedule;

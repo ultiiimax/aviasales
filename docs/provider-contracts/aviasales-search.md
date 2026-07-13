@@ -9,6 +9,15 @@ hobby project, not a partner integration). The mobile API endpoints below are
 used directly — no authorization, no partner token, no official ToS gating. See
 `AGENTS.md` for the project's stance on this.
 
+Local provenance inspected for this release:
+
+- `C:\Users\kiwun\Документы\api finder\aviasales_search.py`;
+- `C:\Users\kiwun\Документы\api finder\aviasales_client.py`;
+- `C:\Users\kiwun\Документы\api finder\aviasales_work` (APK/decompiled worktree).
+
+Credential values from these materials are intentionally not copied into this
+contract, logs, fixtures or smoke output.
+
 Implementation status: **implemented** as a live adapter at
 `src/flight_hunter/providers/aviasales_search/` with fixture-based contract tests.
 Live calls are made with `curl_cffi` Chrome TLS impersonation to pass CloudFront
@@ -26,7 +35,8 @@ WAF. No live calls run in CI.
 | `https://explore-api.aviasales.ru/api/v6/calendar.json` | GET | Price calendar | `marker` query |
 | `https://ariadne.aviasales.ru/api/gql` | POST | GraphQL feed/blocks (`MainPageBlocksV1`, `DirectionPageBlocksV2`, `WeekendPricesListV1`, `AIFlexibleCalendarResultsV4`) | — |
 
-Reference: `api finder/aviasales_api/README.md` (decompiled APK protocol notes).
+Reference: the local provenance paths above and sanitized provider fixtures in
+`tests/fixtures/providers/aviasales_search/`.
 
 ## Request schema — `/search/v2/start`
 
@@ -34,7 +44,7 @@ Headers:
 ```
 User-Agent: Aviasales/7.24.0 (Android; 14; Pixel_8) okhttp/5.3.2
 X-Client-Type: mobile
-X-Signature: 856890a7-59b2-4043-9bc7-e478bb4e6405   (hardcoded in APK)
+X-Signature: <redacted mobile client signature>
 Referer: https://www.aviasales.ru/
 Accept: application/json
 ```

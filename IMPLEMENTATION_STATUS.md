@@ -31,7 +31,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [x] Make browser runtime/bootstrap and local E2E explicit.
   - [x] Add release-check and pre-v1 upgrade tooling.
   - [x] Package Compose/CI/release artifacts.
-  - [ ] Finish documentation and full release gate.
+  - [x] Finish documentation and full release gate.
 
 Packaging verification on 2026-07-13: version `1.0.0`, secure loopback Compose
 configuration and Linux/Windows/browser/image CI contracts pass locally. Docker
@@ -60,26 +60,29 @@ of treating it as success.
 12. Source contracts and price source catalog now expose `aviasales_search`.
 13. Unit tests cover factory/registry, scheduler policy, search service, booking token signing/expiry/tamper rejection, typed client operations, mapper seller/segments/baggage/ref and API resolve flow.
 
-## Verification
+## Local v1 Verification — 2026-07-13
 
-Completed in this slice:
+Fresh release evidence:
 
 ```text
-uv run pytest tests/unit/providers/aviasales_search -q -> 27 passed
-uv run pytest --disable-warnings -q -> 466 passed, 2 warnings
-uv run pytest tests/integration -q --disable-warnings -> 1 passed
-uv run pytest tests/unit/policy -q -> 3 passed
-uv run ruff format --check . -> 237 files already formatted
-uv run ruff check . -> all checks passed
-uv run mypy -> no issues in 99 source files
-uv run alembic upgrade head -> ok
-uv run flight-hunter-security-scan -> ok, 0 findings
-uv run flight-hunter-source-smoke --source aviasales_search -> ok with local dummy env, summary-only
-uv run flight-hunter-browser-smoke -> ok
-docker compose config -> ok
-docker compose --profile worker config -> ok
-rg removed-provider literals across active files -> no matches
+uv run flight-hunter-release-check --include-browser
+  tests             -> passed: 513 passed, 7 deselected, 4 warnings
+  format            -> passed: 254 files already formatted
+  lint              -> passed
+  types             -> passed: 104 source files
+  migrations        -> passed: 2 tests
+  upgrade_migrations-> passed: 1 pre-v1 data-preservation test
+  security          -> passed: 0 findings
+  compose           -> passed: secure config --quiet
+  health            -> passed: 3 checks
+  browser           -> passed: Chromium smoke + 7 E2E
+
+sanitized Aviasales contract smoke -> ok, 1 item
+sanitized exact MOW-LED smoke       -> ok, 50 offers, aviasales_search/live
+docker image build                 -> not run: docker_unavailable
 ```
 
-Notes: `make` is not installed in the local PowerShell environment used for this
-handoff, so the equivalent `uv`/`docker compose` commands above were run directly.
+The Docker Desktop Linux engine pipe was unavailable on this machine. The gate
+reported `docker_unavailable`; no successful local image build is claimed. The
+Dockerfile/Compose contracts and CI image job exist, while the fully verified
+runtime path for this release is direct local Python/SQLite on loopback.

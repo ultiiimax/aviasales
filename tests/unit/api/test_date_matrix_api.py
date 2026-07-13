@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from fastapi.testclient import TestClient
 
 from flight_hunter.api.app import create_app
+from flight_hunter.config import AppSettings
 from flight_hunter.providers.aviasales_search.client import CalendarPrice
 
 
@@ -55,7 +56,19 @@ def test_date_matrix_endpoint_returns_unpriced_planning_cells() -> None:
 
 
 def test_date_matrix_with_route_gracefully_reports_missing_mobile_provider() -> None:
-    client = TestClient(create_app())
+    client = TestClient(
+        create_app(
+            settings=AppSettings(
+                database_url="sqlite+aiosqlite:///:memory:",
+                aviasales_search_enabled=True,
+                aviasales_search_signature=None,
+                aviasales_search_marker=None,
+                aviasales_search_internal_rpm=20,
+                telegram_enabled=False,
+                telegram_webhook_secret=None,
+            )
+        )
+    )
 
     response = client.post(
         "/api/v1/searches/date-matrix",
