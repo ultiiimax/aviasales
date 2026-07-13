@@ -25,6 +25,7 @@ flight-hunter-cleanup-live-observations = "flight_hunter.ops.live_observation_cl
 flight-hunter-observe = "flight_hunter.providers.personal_observer.cli:main"
 flight-hunter-parse-fixture = "flight_hunter.providers.personal_observer.parse_fixture_cli:main"
 flight-hunter-redact-url = "flight_hunter.ops.redact_url:main"
+flight-hunter-release-check = "flight_hunter.ops.release_check:main"
 flight-hunter-run-personal-observation = "flight_hunter.providers.personal_observer.worker_cli:main"
 flight-hunter-sanitize-html = "flight_hunter.ops.sanitize_html:main"
 flight-hunter-security-scan = "flight_hunter.ops.security_scan:main"

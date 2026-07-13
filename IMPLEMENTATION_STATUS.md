@@ -29,7 +29,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [x] Stabilize Aviasales failures, partial success and exact live smoke.
   - [x] Repair Russian web UI encoding.
   - [x] Make browser runtime/bootstrap and local E2E explicit.
-  - [ ] Add release-check and pre-v1 upgrade tooling.
+  - [x] Add release-check and pre-v1 upgrade tooling.
   - [ ] Package Compose/CI/release artifacts.
   - [ ] Finish documentation and full release gate.
 

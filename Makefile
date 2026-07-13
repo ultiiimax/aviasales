@@ -1,4 +1,4 @@
-.PHONY: help bootstrap browser-bootstrap dev dev-api test test-unit test-integration test-e2e lint typecheck migrate seed-demo quality provider-contracts security source-smoke browser-smoke parse-fixture redact-url sanitize-html backup backup-verify restore cleanup-live-observations import-airports worker worker-healthcheck compose-up compose-down compose-worker-up compose-deals-up compose-deals-config
+.PHONY: help bootstrap browser-bootstrap dev dev-api test test-unit test-integration test-e2e lint typecheck migrate seed-demo quality release-check provider-contracts security source-smoke browser-smoke parse-fixture redact-url sanitize-html backup backup-verify restore cleanup-live-observations import-airports worker worker-healthcheck compose-up compose-down compose-worker-up compose-deals-up compose-deals-config
 
 SOURCE ?= aviasales_search
 FIXTURE_ARGS ?=
@@ -21,6 +21,7 @@ help:
 	@echo "  make migrate            Apply Alembic migrations"
 	@echo "  make seed-demo          Seed deterministic local demo data"
 	@echo "  make quality            Run test, lint, and typecheck"
+	@echo "  make release-check      Run deterministic local v1 gates (RELEASE_ARGS optional)"
 	@echo "  make provider-contracts Run current policy contract tests"
 	@echo "  make security           Run local secret scanner"
 	@echo "  make source-smoke SOURCE=aviasales_search Run one sanitized source smoke check"
@@ -77,6 +78,9 @@ seed-demo: migrate
 	uv run flight-hunter-seed-demo
 
 quality: test lint typecheck security
+
+release-check:
+	uv run flight-hunter-release-check $(RELEASE_ARGS)
 
 provider-contracts:
 	uv run pytest tests/unit/policy
