@@ -273,14 +273,20 @@ sets the process exit code to non-zero. An optional stage may be `skipped` only 
 stable reason such as `docker_unavailable` or `browser_runtime_not_requested`.
 
 Migration validation has two paths. The fresh path upgrades an empty temporary SQLite database to
-head. The upgrade path creates a temporary database at revision `0017`, inserts representative
-owner/household/session and watch records using the revision-0017 schema, upgrades through every
-remaining migration to head, and verifies both the preserved records and the final Alembic
-revision. Its exact automated entry point is
+head. The upgrade path creates a temporary database at immediate pre-v1 revision `0021`, inserts
+representative owner/household/session, watch, browser-control, worker-heartbeat/drain, and deal-job
+records using the revision-0021 schema, upgrades to the v1 head, and verifies the preserved records
+plus the final Alembic revision. If v1 requires no schema migration and head remains `0021`, the
+same test still proves that a populated pre-v1 database opens unchanged under v1 code. Its exact
+automated entry point is
 `uv run pytest tests/integration/test_upgrade_from_pre_v1.py -q` and release-check stage name is
 `upgrade_migrations`.
 
-Live provider smoke is a separate manual command so CI never contacts Aviasales. Docker image
+Live provider smoke is a separate manual command so CI never contacts Aviasales. The exact
+sanitized live-search command is
+`uv run flight-hunter-source-smoke --source aviasales_search --exact-search --origin MOW --destination LED --departure-offset-days 30`.
+It computes the departure date from the current UTC date and prints only status, stable code,
+offer count, source IDs, and freshness values. Docker image
 build is part of CI and the documented final local release procedure, but the release-check must
 report Docker unavailability clearly rather than misclassifying it as an application test failure.
 
@@ -414,19 +420,20 @@ The release is accepted only when fresh evidence proves all of the following:
 
 | Requirement | Owner | Automated evidence / exact command |
 |---|---|---|
-| Full Python behavior | `src/flight_hunter/`, `tests/unit`, `tests/integration` | `uv run pytest --disable-warnings -q` |
+| Full credential-free Python behavior | `src/flight_hunter/`, `tests/unit`, `tests/integration` | `uv run pytest --disable-warnings -q -m "not browser_e2e"` |
 | Formatting and lint | all tracked Python | `uv run ruff format --check .` and `uv run ruff check .` |
 | Public type safety | `src/flight_hunter/` | `uv run mypy` |
 | Fresh migrations | `migrations/`, persistence | `uv run flight-hunter-release-check --stage migrations` |
 | Existing database upgrade | migrations and pre-v1 fixture builder | `uv run pytest tests/integration/test_upgrade_from_pre_v1.py -q` |
 | Secret/log safety | ops and full tree | `uv run flight-hunter-security-scan` |
-| Russian UI and browser flows | `api/web.py`, `tests/e2e` | `uv run pytest tests/e2e -q` after `uv run flight-hunter-browser-bootstrap` |
+| Russian UI and browser flows | `api/web.py`, `tests/e2e` | `uv run pytest tests/e2e -q -m browser_e2e` after `uv run flight-hunter-browser-bootstrap` |
 | API liveness/readiness | `api/app.py`, database engine factory | unit tests plus `uv run flight-hunter-release-check --stage health` |
 | SQLite API/worker contention | database engine factory and repositories | `uv run pytest tests/integration/test_sqlite_concurrency.py -q` |
 | Compose topology | `compose.yaml`, `Dockerfile` | `docker compose config` and `docker compose build` |
 | Windows/PowerShell support | command surfaces and docs | `windows-latest` CI code-quality job |
 | Aviasales offline contract | provider schemas/client/mapper | `uv run pytest tests/unit/providers/aviasales_search -q` |
-| Aviasales external smoke | manual provider check | `uv run flight-hunter-source-smoke --source aviasales_search` plus sanitized exact-date smoke |
+| Aviasales suggest smoke | manual provider check | `uv run flight-hunter-source-smoke --source aviasales_search` |
+| Aviasales exact-date smoke | manual provider check | `uv run flight-hunter-source-smoke --source aviasales_search --exact-search --origin MOW --destination LED --departure-offset-days 30` |
 | Backup/restore | `ops/backup.py`, runbook | `uv run pytest tests/unit/ops/test_backup_restore.py -q` |
 | Release aggregate | all credential-free gates | `uv run flight-hunter-release-check` |
 
