@@ -52,10 +52,15 @@ def parse_chunks(chunks: list[dict[str, Any]]) -> tuple[ParsedTicket, ...]:
 
     parsed: list[ParsedTicket] = []
     for chunk in chunks:
+        tickets = chunk.get("tickets", []) or []
+        if not isinstance(tickets, list):
+            raise AviasalesSearchParseError("aviasales_search_invalid_chunk")
         legs = chunk.get("flight_legs")
         if not isinstance(legs, list):
+            if "flight_legs" in chunk or tickets:
+                raise AviasalesSearchParseError("aviasales_search_invalid_chunk")
             continue
-        for raw in chunk.get("tickets", []) or []:
+        for raw in tickets:
             ticket = _parse_ticket(raw, legs, airlines, agents)
             if ticket is not None:
                 parsed.append(ticket)

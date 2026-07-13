@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import UUID
 
 DEFAULT_CARRIER_LINKS = (
     "aeroflot",
@@ -302,6 +304,21 @@ class AppSettings:
     def aviasales_search_credentials_present(self) -> bool:
         return (
             self.aviasales_search_signature is not None and self.aviasales_search_marker is not None
+        )
+
+    @property
+    def aviasales_search_credentials_valid(self) -> bool:
+        if not self.aviasales_search_credentials_present:
+            return False
+        signature = self.aviasales_search_signature or ""
+        marker = self.aviasales_search_marker or ""
+        try:
+            parsed_signature = UUID(signature)
+        except ValueError:
+            return False
+        return (
+            str(parsed_signature) == signature.lower()
+            and re.fullmatch(r"mobile_app\.[0-9a-f]{32}", marker) is not None
         )
 
     @property

@@ -8,10 +8,12 @@ from typing import Any
 import pytest
 
 from flight_hunter.providers.aviasales_search.client import (
+    AviasalesSearchAuthFailed,
     AviasalesSearchBlocked,
     AviasalesSearchClient,
     AviasalesSearchError,
     AviasalesSearchRateLimited,
+    AviasalesSearchSchemaError,
     AviasalesSearchTransport,
     CurlCffiTransport,
     SearchStartParams,
@@ -121,6 +123,32 @@ def test_start_search_builds_mobile_body_and_returns_ids() -> None:
     assert call["headers"]["X-Signature"] == "sig"
 
 
+def test_start_search_classifies_upstream_auth_failure_without_retry() -> None:
+    transport = _FakeTransport(posts=[_FakeResponse(status_code=401, payload={})])
+
+    with pytest.raises(AviasalesSearchAuthFailed, match="aviasales_search_auth_failed"):
+        _client(transport).start_search(_start_params())
+
+    assert len(transport.post_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _FakeResponse(payload=None),
+        _FakeResponse(payload=[]),
+        _FakeResponse(payload={"results_url": "host-1"}),
+    ],
+)
+def test_start_search_classifies_invalid_payload_as_schema_error(
+    response: _FakeResponse,
+) -> None:
+    transport = _FakeTransport(posts=[response])
+
+    with pytest.raises(AviasalesSearchSchemaError, match="aviasales_search_schema_error"):
+        _client(transport).start_search(_start_params())
+
+
 def test_start_search_raises_blocked_on_403() -> None:
     transport = _FakeTransport(posts=[_FakeResponse(status_code=403)])
     client = _client(transport)
@@ -159,6 +187,13 @@ def test_poll_results_returns_empty_when_no_tickets_after_rounds() -> None:
 
     assert chunks == []
     assert len(transport.post_calls) == 3
+
+
+def test_poll_results_rejects_non_list_payload() -> None:
+    transport = _FakeTransport(posts=[_FakeResponse(payload={"tickets": []})])
+
+    with pytest.raises(AviasalesSearchSchemaError, match="aviasales_search_schema_error"):
+        _client(transport).poll_results("host-1", "sid-1", rounds=1, delay=0.0)
 
 
 def test_get_purchase_url_returns_url_from_clicks_response() -> None:

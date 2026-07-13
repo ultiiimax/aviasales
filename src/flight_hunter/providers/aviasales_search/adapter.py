@@ -12,6 +12,7 @@ from flight_hunter.domain.policy import (
 from flight_hunter.policy.guard import PolicyDecision, ProviderPolicyGuard
 from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchClient,
+    AviasalesSearchSchemaError,
     CalendarPrice,
     GraphqlFeedBlock,
     HotOffer,
@@ -19,7 +20,7 @@ from flight_hunter.providers.aviasales_search.client import (
     SuggestPlace,
 )
 from flight_hunter.providers.aviasales_search.mapper import map_parsed_ticket
-from flight_hunter.providers.aviasales_search.schemas import parse_chunks
+from flight_hunter.providers.aviasales_search.schemas import AviasalesSearchParseError, parse_chunks
 
 
 class AviasalesSearchAdapter:
@@ -105,7 +106,10 @@ class AviasalesSearchAdapter:
             delay=self._poll_delay,
             limit=self._poll_limit,
         )
-        parsed = parse_chunks(chunks)
+        try:
+            parsed = parse_chunks(chunks)
+        except AviasalesSearchParseError as exc:
+            raise AviasalesSearchSchemaError() from exc
         observed_at = self._clock()
         return tuple(
             map_parsed_ticket(

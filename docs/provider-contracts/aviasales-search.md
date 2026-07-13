@@ -1,8 +1,8 @@
 # Aviasales Search API Contract Notes
 
-Verified: 2026-07-05 (`suggest.aviasales.ru` smoke: OK, 1 result for `LED`);
-search/result/click schema from 2026-07-04 live capture against
-`tickets-api.aviasales.ru`.
+Verified: 2026-07-13 (`suggest.aviasales.ru` HTTP 200; exact MOW–LED search:
+OK, 50 live offers with sanitized summary); search/result/click schema from
+2026-07-04 live capture against `tickets-api.aviasales.ru`.
 
 Source: reverse-engineered from Aviasales Android APK `Aviasales_7.24.0` (local
 hobby project, not a partner integration). The mobile API endpoints below are
@@ -137,6 +137,32 @@ mobile app headers (`User-Agent`, `X-Client-Type: mobile`, `Referer`). This is
 the same approach as the decompiled APK client. HTTP 403 is surfaced as
 `aviasales_search_blocked` so the UI can show an honest `blocked` state.
 
+Stable failure codes:
+
+| Condition | Direct API HTTP | Code | Retry |
+|---|---:|---|---|
+| Provider disabled | 503 | `aviasales_search_disabled` | no |
+| Credentials missing | 503 | `aviasales_search_credentials_missing` | no |
+| Local credential shape invalid | 503 | `aviasales_search_credentials_invalid` | no |
+| Upstream HTTP 401 | 502 | `aviasales_search_auth_failed` | no |
+| Upstream HTTP 403 | 502 | `aviasales_search_blocked` | no |
+| Upstream HTTP 429 | 429 | `aviasales_search_rate_limited` | after `Retry-After` |
+| Transport/5xx exhausted | 502 | `aviasales_search_unavailable` | bounded |
+| Invalid provider JSON/schema | 502 | `aviasales_search_schema_error` | no |
+
+Aggregate search and date-matrix endpoints keep their successful fake/partial
+data and report the same stable code as a provider denial instead of failing the
+whole request.
+
+Exact live smoke (summary only):
+
+```powershell
+uv run flight-hunter-source-smoke --source aviasales_search --exact-search --origin MOW --destination LED --departure-offset-days 30
+```
+
+The output contains only status, code, count, source IDs and freshness values;
+it excludes amounts, offer IDs, raw payloads, provider refs and booking URLs.
+
 ## Policy (Flight Hunter, local hobby project)
 
 - Adapter disabled until `AVIASALES_SEARCH_ENABLED=true` and
@@ -149,6 +175,7 @@ the same approach as the decompiled APK client. HTTP 403 is surfaced as
 - `X-Signature`, `marker`, signed booking URLs and full tokens never appear in
   logs, API responses, or client bundles.
 - `Retry-After` and rate-limit headers respected. 403 → `blocked` (no retry).
-  429 → `rate_limited`. 5xx → retry with backoff/jitter (max 2).
+  401 → `auth_failed` (no retry). 429 → `rate_limited`. 5xx → retry with
+  backoff (max 2).
 - `curl_cffi` transport is the default; a fake transport is injected in tests so
   no live call is made in CI.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from flight_hunter.config import AppSettings, load_env_file
@@ -18,6 +19,27 @@ def test_settings_detects_aviasales_search_credentials_without_exposing_value(
     assert settings.aviasales_search_signature == "secret-signature"
     assert settings.aviasales_search_marker == "secret-marker"
     assert settings.aviasales_search_credentials_present
+
+
+def test_aviasales_credentials_shape_is_validated_locally() -> None:
+    valid = AppSettings(
+        database_url="sqlite+aiosqlite:///:memory:",
+        aviasales_search_enabled=True,
+        aviasales_search_signature="123e4567-e89b-12d3-a456-426614174000",
+        aviasales_search_marker="mobile_app.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        aviasales_search_internal_rpm=20,
+        telegram_enabled=False,
+        telegram_webhook_secret=None,
+    )
+    invalid = replace(
+        valid,
+        aviasales_search_signature="not-a-uuid",
+        aviasales_search_marker="not-a-marker",
+    )
+
+    assert valid.aviasales_search_credentials_valid is True
+    assert invalid.aviasales_search_credentials_present is True
+    assert invalid.aviasales_search_credentials_valid is False
 
 
 def test_settings_parse_invitation_auth_env(monkeypatch) -> None:

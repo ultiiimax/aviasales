@@ -7,7 +7,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
 | Provider | Adapter | Credentials | Enabled | Background allowed | Merge allowed | Last verification |
 |---|---|---:|---:|---:|---:|---|
 | Fake | implemented offline demo | none | yes | yes | yes | n/a |
-| Aviasales Search | implemented mobile API, live | `AVIASALES_SEARCH_SIGNATURE`, `AVIASALES_SEARCH_MARKER` | env flag | yes | yes | 2026-07-05 implementation review; 2026-07-04 live fixture capture |
+| Aviasales Search | implemented mobile API, live | `AVIASALES_SEARCH_SIGNATURE`, `AVIASALES_SEARCH_MARKER` | env flag | yes | yes | 2026-07-13 exact live MOW–LED smoke: 50 offers |
 | SearXNG | implemented URL discovery | self-hosted optional | env flag | no, user action | candidate only | 2026-06-29 |
 | Crawl4AI | implemented markdown extraction | self-hosted optional | env flag | no, user action | candidate only | 2026-06-29 |
 | Deal discovery | implemented orchestrator | local components | component flags | no, user action | candidate only | 2026-06-29 |
@@ -16,7 +16,24 @@ This file is maintained by coding agents. Mark a slice done only after implement
 | Skyscanner Live | contract only | none | no | no | no | 2026-06-23 |
 | Duffel | contract only | none | no | no | no | 2026-06-23 |
 
-## Current Slice: Aviasales Mobile API Hard Cut
+## Current Slice: Local v1 Release
+
+- Goal: ship a reliable single-machine v1 without rebuilding the project around
+  `MEGA_PROMPT.md`.
+- Design: `docs/superpowers/specs/2026-07-13-local-v1-release-design.md`.
+- Execution plan: `docs/superpowers/plans/2026-07-13-local-v1-release.md`.
+- Progress:
+  - [x] Remove wall-clock expiry from worker tests.
+  - [x] Centralize SQLite safety settings, concurrency coverage and `/readyz`.
+  - [x] Add safe local `.env` initialization and secure auth defaults.
+  - [x] Stabilize Aviasales failures, partial success and exact live smoke.
+  - [ ] Repair Russian web UI encoding.
+  - [ ] Make browser runtime/bootstrap and local E2E explicit.
+  - [ ] Add release-check and pre-v1 upgrade tooling.
+  - [ ] Package Compose/CI/release artifacts.
+  - [ ] Finish documentation and full release gate.
+
+## Previous Slice: Aviasales Mobile API Hard Cut
 
 - Goal: make Aviasales mobile API the active primary fare source and remove the old cached provider path from active code, API/UI, scripts, env, README and tests.
 - Result: implemented.

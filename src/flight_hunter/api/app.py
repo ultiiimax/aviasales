@@ -165,8 +165,12 @@ from flight_hunter.persistence.repositories import (
 )
 from flight_hunter.providers.aviasales_search.adapter import AviasalesSearchAdapter
 from flight_hunter.providers.aviasales_search.client import (
+    AviasalesSearchAuthFailed,
+    AviasalesSearchBlocked,
     AviasalesSearchClient,
     AviasalesSearchError,
+    AviasalesSearchRateLimited,
+    AviasalesSearchSchemaError,
 )
 from flight_hunter.providers.personal_observer import (
     PersonalObserverConfig,
@@ -2924,6 +2928,7 @@ def create_app(
         )
         offers, denials, provider_calls = _date_matrix_mobile_calendar_offers(
             body,
+            settings=settings,
             provider_instances=provider_instances,
         )
         return _date_matrix_response(
@@ -2938,12 +2943,15 @@ def create_app(
         q: str = Query(min_length=1, max_length=80),
         locale: str = Query(default="ru", min_length=2, max_length=8),
         max_results: int = Query(default=5, ge=1, le=20),
-    ) -> AviasalesSuggestResponse:
-        provider = _require_aviasales_search_provider(provider_instances)
+    ) -> AviasalesSuggestResponse | JSONResponse:
+        provider, error = _aviasales_search_provider_or_error(settings, provider_instances)
+        if error is not None:
+            return error
+        assert provider is not None
         try:
             places = provider.suggest_places(q, locale=locale, max_results=max_results)
         except AviasalesSearchError as exc:
-            raise HTTPException(status_code=502, detail="aviasales_search_unavailable") from exc
+            return _aviasales_error_response(exc)
         return AviasalesSuggestResponse(
             places=[
                 AviasalesSuggestItemResponse(
@@ -2963,8 +2971,11 @@ def create_app(
         market: str = Query(default="RU", min_length=2, max_length=8),
         currency: str = Query(default="rub", min_length=3, max_length=3),
         one_way: bool = True,
-    ) -> AviasalesHotOffersResponse:
-        provider = _require_aviasales_search_provider(provider_instances)
+    ) -> AviasalesHotOffersResponse | JSONResponse:
+        provider, error = _aviasales_search_provider_or_error(settings, provider_instances)
+        if error is not None:
+            return error
+        assert provider is not None
         try:
             offers = provider.hot_offers(
                 origin=origin,
@@ -2974,7 +2985,7 @@ def create_app(
                 one_way=one_way,
             )
         except AviasalesSearchError as exc:
-            raise HTTPException(status_code=502, detail="aviasales_search_unavailable") from exc
+            return _aviasales_error_response(exc)
         return AviasalesHotOffersResponse(
             offers=[
                 AviasalesHotOfferResponse(
@@ -2997,8 +3008,11 @@ def create_app(
         destination: str = Query(min_length=3, max_length=3),
         one_way: bool = True,
         currency: str = Query(default="rub", min_length=3, max_length=3),
-    ) -> AviasalesCalendarResponse:
-        provider = _require_aviasales_search_provider(provider_instances)
+    ) -> AviasalesCalendarResponse | JSONResponse:
+        provider, error = _aviasales_search_provider_or_error(settings, provider_instances)
+        if error is not None:
+            return error
+        assert provider is not None
         try:
             prices = provider.calendar_prices(
                 origin=origin,
@@ -3009,7 +3023,7 @@ def create_app(
                 currency=currency,
             )
         except AviasalesSearchError as exc:
-            raise HTTPException(status_code=502, detail="aviasales_search_unavailable") from exc
+            return _aviasales_error_response(exc)
         return AviasalesCalendarResponse(
             prices=[
                 AviasalesCalendarPriceResponse(
@@ -3035,8 +3049,11 @@ def create_app(
         currency: str = Query(default="rub", min_length=3, max_length=3),
         language: str = Query(default="ru", min_length=2, max_length=8),
         one_way: bool = True,
-    ) -> AviasalesGraphqlBlocksResponse:
-        provider = _require_aviasales_search_provider(provider_instances)
+    ) -> AviasalesGraphqlBlocksResponse | JSONResponse:
+        provider, error = _aviasales_search_provider_or_error(settings, provider_instances)
+        if error is not None:
+            return error
+        assert provider is not None
         try:
             blocks = provider.main_page_blocks(
                 origin=origin,
@@ -3047,13 +3064,15 @@ def create_app(
                 one_way=one_way,
             )
         except AviasalesSearchError as exc:
-            raise HTTPException(status_code=502, detail="aviasales_search_unavailable") from exc
+            return _aviasales_error_response(exc)
         return AviasalesGraphqlBlocksResponse(
             blocks=[AviasalesGraphqlBlockResponse(typename=block.typename) for block in blocks]
         )
 
     @app.post("/api/v1/booking-actions/resolve", response_model=BookingResolveResponse)
-    def resolve_booking_action(body: BookingResolveRequestBody) -> BookingResolveResponse:
+    def resolve_booking_action(
+        body: BookingResolveRequestBody,
+    ) -> BookingResolveResponse | JSONResponse:
         if not settings.app_secret_key:
             raise HTTPException(status_code=503, detail="booking_action_secret_missing")
         try:
@@ -3070,7 +3089,10 @@ def create_app(
             or ref.get("provider_id") != payload.provider_id
         ):
             raise HTTPException(status_code=400, detail="booking_action_provider_mismatch")
-        provider = _require_aviasales_search_provider(provider_instances)
+        provider, error = _aviasales_search_provider_or_error(settings, provider_instances)
+        if error is not None:
+            return error
+        assert provider is not None
         try:
             url = provider.resolve_purchase_url(
                 search_id=_required_ref_str(ref, "search_id"),
@@ -3079,7 +3101,9 @@ def create_app(
                 request_fingerprint="booking-action:" + payload.provider_id,
                 context=ExecutionContext.WEB_USER_ACTION,
             )
-        except (AviasalesSearchError, BookingActionTokenError) as exc:
+        except AviasalesSearchError as exc:
+            return _aviasales_error_response(exc)
+        except BookingActionTokenError as exc:
             raise HTTPException(status_code=502, detail="booking_action_unavailable") from exc
         return BookingResolveResponse(status="resolved" if url else "unavailable", url=url)
 
@@ -3563,7 +3587,7 @@ def _watch_session_factory(database_url: str) -> async_sessionmaker[AsyncSession
 
 
 def _provider_instances(settings: AppSettings) -> dict[str, AviasalesSearchAdapter]:
-    if not settings.aviasales_search_credentials_present:
+    if not settings.aviasales_search_credentials_valid:
         return {}
     return {
         "aviasales_search": AviasalesSearchAdapter(
@@ -3579,13 +3603,62 @@ def _provider_instances(settings: AppSettings) -> dict[str, AviasalesSearchAdapt
     }
 
 
-def _require_aviasales_search_provider(
+def _aviasales_search_provider_or_error(
+    settings: AppSettings,
     provider_instances: dict[str, AviasalesSearchAdapter],
-) -> AviasalesSearchAdapter:
+) -> tuple[AviasalesSearchAdapter | None, JSONResponse | None]:
+    if not settings.aviasales_search_enabled:
+        return None, _coded_error_response(
+            status_code=503,
+            code="aviasales_search_disabled",
+            message="provider is disabled",
+        )
     provider = provider_instances.get("aviasales_search")
-    if provider is None:
-        raise HTTPException(status_code=503, detail="aviasales_search_credentials_missing")
-    return provider
+    if provider is not None:
+        return provider, None
+    code = _aviasales_configuration_error_code(settings)
+    return None, _coded_error_response(
+        status_code=503,
+        code=code,
+        message="provider is not configured",
+    )
+
+
+def _aviasales_configuration_error_code(settings: AppSettings) -> str:
+    if not settings.aviasales_search_enabled:
+        return "aviasales_search_disabled"
+    if not settings.aviasales_search_credentials_present:
+        return "aviasales_search_credentials_missing"
+    if not settings.aviasales_search_credentials_valid:
+        return "aviasales_search_credentials_invalid"
+    return "aviasales_search_unavailable"
+
+
+def _aviasales_error_response(exc: AviasalesSearchError) -> JSONResponse:
+    if isinstance(exc, AviasalesSearchRateLimited):
+        headers = (
+            {"Retry-After": str(exc.retry_after_seconds)}
+            if exc.retry_after_seconds is not None
+            else {}
+        )
+        return JSONResponse(
+            status_code=429,
+            content={
+                "code": exc.code,
+                "message": "provider rate limited",
+            },
+            headers=headers,
+        )
+    code = {
+        AviasalesSearchAuthFailed: "aviasales_search_auth_failed",
+        AviasalesSearchBlocked: "aviasales_search_blocked",
+        AviasalesSearchSchemaError: "aviasales_search_schema_error",
+    }.get(type(exc), "aviasales_search_unavailable")
+    return _coded_error_response(
+        status_code=502,
+        code=code,
+        message="provider unavailable",
+    )
 
 
 def _required_ref_str(ref: dict[str, object], key: str) -> str:
@@ -4685,6 +4758,7 @@ def _nearby_airport_response(nearby: NearbyAirport) -> NearbyAirportResponse:
 def _date_matrix_mobile_calendar_offers(
     body: DateMatrixRequestBody,
     *,
+    settings: AppSettings,
     provider_instances: dict[str, AviasalesSearchAdapter],
 ) -> tuple[tuple[FlightOffer, ...], list[str], int]:
     if body.origin is None or body.destination is None:
@@ -4695,7 +4769,7 @@ def _date_matrix_mobile_calendar_offers(
         return (), ["passenger_mix_not_supported"], 0
     provider = provider_instances.get("aviasales_search")
     if provider is None:
-        return (), ["aviasales_search_credentials_missing"], 0
+        return (), [_aviasales_configuration_error_code(settings)], 0
     try:
         prices = provider.calendar_prices(
             origin=body.origin,
@@ -4705,8 +4779,8 @@ def _date_matrix_mobile_calendar_offers(
             one_way=body.return_date is None,
             currency=body.currency,
         )
-    except AviasalesSearchError:
-        return (), ["aviasales_search_unavailable"], 1
+    except AviasalesSearchError as exc:
+        return (), [exc.code], 1
     offers = tuple(
         FlightOffer(
             provider_id="aviasales_search",

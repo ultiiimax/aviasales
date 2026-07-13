@@ -9,6 +9,7 @@ from typing import Any, Literal, Protocol, cast
 
 from curl_cffi import requests as cc
 
+from flight_hunter.domain.provider_errors import ProviderOperationError
 from flight_hunter.ops.structured_logging import log_event
 
 TICKETS_BASE = "https://tickets-api.aviasales.ru"
@@ -19,17 +20,36 @@ DEFAULT_USER_AGENT = "Aviasales/7.24.0 (Android; 14; Pixel_8) okhttp/5.3.2"
 DEFAULT_IMPERSONATE: Literal["chrome120"] = "chrome120"
 
 
-class AviasalesSearchError(RuntimeError):
+class AviasalesSearchError(ProviderOperationError):
     """Raised when the Aviasales Search mobile API call cannot be used safely."""
+
+    provider_id = "aviasales_search"
+    code = "aviasales_search_unavailable"
+
+
+class AviasalesSearchAuthFailed(AviasalesSearchError):
+    """The configured mobile credentials were rejected (HTTP 401)."""
+
+    code = "aviasales_search_auth_failed"
 
 
 class AviasalesSearchBlocked(AviasalesSearchError):
     """CloudFront/WAF blocked the request (typically HTTP 403)."""
 
+    code = "aviasales_search_blocked"
+
+
+class AviasalesSearchSchemaError(AviasalesSearchError):
+    """The provider response did not match the verified mobile contract."""
+
+    code = "aviasales_search_schema_error"
+
 
 class AviasalesSearchRateLimited(AviasalesSearchError):
+    code = "aviasales_search_rate_limited"
+
     def __init__(self, *, retry_after_seconds: int | None) -> None:
-        super().__init__("aviasales_search_rate_limited")
+        super().__init__()
         self.retry_after_seconds = retry_after_seconds
 
 
@@ -284,15 +304,16 @@ class AviasalesSearchClient:
                 extra_headers={"X-Request-Id": req_id},
                 full_url=True,
             )
-            if response.status_code == 200 and response.content:
-                parsed = response.json()
-                if isinstance(parsed, list):
-                    for chunk in parsed:
-                        if isinstance(chunk, dict):
-                            chunks.append(chunk)
-                            ts = chunk.get("last_update_timestamp")
-                            if isinstance(ts, int):
-                                last_ts = max(last_ts, ts)
+            parsed = _json_value(response)
+            if not isinstance(parsed, list):
+                raise AviasalesSearchSchemaError()
+            for chunk in parsed:
+                if not isinstance(chunk, dict):
+                    raise AviasalesSearchSchemaError()
+                chunks.append(chunk)
+                ts = chunk.get("last_update_timestamp")
+                if isinstance(ts, int):
+                    last_ts = max(last_ts, ts)
             if any(isinstance(c, dict) and c.get("tickets") for c in chunks):
                 break
             self._sleep(delay)
@@ -343,7 +364,7 @@ class AviasalesSearchClient:
             },
             full_url=True,
         )
-        return tuple(_parse_suggest_place(item) for item in _iter_items(response.json()))
+        return tuple(_parse_suggest_place(item) for item in _iter_items(_json_value(response)))
 
     def hot_offers(
         self,
@@ -373,7 +394,7 @@ class AviasalesSearchClient:
         )
         return tuple(
             _parse_hot_offer(item, default_currency=currency)
-            for item in _iter_items(response.json())
+            for item in _iter_items(_json_value(response))
         )
 
     def calendar_prices(
@@ -406,7 +427,7 @@ class AviasalesSearchClient:
         )
         return tuple(
             price
-            for item in _iter_items(response.json())
+            for item in _iter_items(_json_value(response))
             if (
                 price := _parse_calendar_price(
                     item,
@@ -472,9 +493,7 @@ class AviasalesSearchClient:
             extra_headers={"Content-Type": "application/json"},
             full_url=True,
         )
-        payload = response.json()
-        if not isinstance(payload, dict):
-            return ()
+        payload = _json_object(response)
         data = payload.get("data")
         if not isinstance(data, dict):
             return ()
@@ -520,6 +539,16 @@ class AviasalesSearchClient:
                         url, params=params or {}, headers=headers, timeout=self._timeout
                     )
                 status = response.status_code
+                if status == 401:
+                    log_event(
+                        "provider_call",
+                        provider="aviasales_search",
+                        endpoint=_endpoint_name(target),
+                        status_code=status,
+                        error_class="auth_failed",
+                        duration_ms=max(0, int((perf_counter() - started) * 1000)),
+                    )
+                    raise AviasalesSearchAuthFailed()
                 if status == 403:
                     log_event(
                         "provider_call",
@@ -529,7 +558,7 @@ class AviasalesSearchClient:
                         error_class="blocked",
                         duration_ms=max(0, int((perf_counter() - started) * 1000)),
                     )
-                    raise AviasalesSearchBlocked("aviasales_search_blocked")
+                    raise AviasalesSearchBlocked()
                 if status == 429:
                     retry_after = _parse_retry_after(response.headers.get("Retry-After"))
                     log_event(
@@ -590,19 +619,26 @@ def _endpoint_name(target: str) -> str:
 
 
 def _json_object(response: AviasalesSearchResponse) -> dict[str, Any]:
+    payload = _json_value(response)
+    if not isinstance(payload, dict):
+        raise AviasalesSearchSchemaError()
+    return payload
+
+
+def _json_value(response: AviasalesSearchResponse) -> Any:
     if response.status_code >= 400:
         raise AviasalesSearchError(f"aviasales_search_http_{response.status_code}")
     if not response.content:
-        raise AviasalesSearchError("aviasales_search_empty_response")
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise AviasalesSearchError("aviasales_search_invalid_payload")
-    return payload
+        raise AviasalesSearchSchemaError()
+    try:
+        return response.json()
+    except Exception as exc:  # JSON decoder boundary; payload text is intentionally discarded.
+        raise AviasalesSearchSchemaError() from exc
 
 
 def _require_str(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value:
-        raise AviasalesSearchError(f"aviasales_search_missing_{field_name}")
+        raise AviasalesSearchSchemaError()
     return value
 
 

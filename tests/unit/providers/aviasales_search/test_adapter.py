@@ -5,11 +5,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from flight_hunter.domain.offers import Freshness, SearchIntent
 from flight_hunter.domain.policy import ExecutionContext
 from flight_hunter.providers.aviasales_search.adapter import AviasalesSearchAdapter
 from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchClient,
+    AviasalesSearchSchemaError,
     AviasalesSearchTransport,
 )
 
@@ -115,6 +118,23 @@ def test_search_returns_live_offers_from_fixture_when_enabled() -> None:
     assert all(o.destination == "LED" for o in offers)
     assert offers[0].total_price.minor_units <= offers[-1].total_price.minor_units
     assert transport.post_calls == 2
+
+
+def test_search_wraps_chunk_parse_failure_as_schema_error() -> None:
+    transport = _FakeTransport(
+        posts=[
+            _FakeResponse(payload={"search_id": "sid-1", "results_url": "host-1"}),
+            _FakeResponse(payload=[{"tickets": "not-a-list"}]),
+        ]
+    )
+    adapter = _adapter(transport, enabled=True, credentials=True)
+
+    with pytest.raises(AviasalesSearchSchemaError, match="aviasales_search_schema_error"):
+        adapter.search(
+            _intent(),
+            request_fingerprint="sha256:abc",
+            context=ExecutionContext.WEB_USER_ACTION,
+        )
 
 
 def test_search_returns_empty_and_skips_calls_when_disabled() -> None:
