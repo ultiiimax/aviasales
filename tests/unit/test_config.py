@@ -32,6 +32,14 @@ def test_settings_parse_invitation_auth_env(monkeypatch) -> None:
     assert not settings.auth_allow_legacy_headers
 
 
+def test_settings_disable_legacy_headers_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("AUTH_ALLOW_LEGACY_HEADERS", raising=False)
+
+    settings = AppSettings.from_env()
+
+    assert not settings.auth_allow_legacy_headers
+
+
 def test_load_env_file_sets_missing_values_without_overriding_existing_env(
     tmp_path: Path,
     monkeypatch,

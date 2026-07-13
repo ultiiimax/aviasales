@@ -38,7 +38,7 @@ class AppSettings:
     app_secret_key: str | None = None
     auth_bootstrap_token: str | None = None
     auth_session_ttl_seconds: int = 2_592_000
-    auth_allow_legacy_headers: bool = True
+    auth_allow_legacy_headers: bool = False
     telegram_bot_token: str | None = None
     telegram_quiet_hours_start: str | None = "23:00"
     telegram_quiet_hours_end: str | None = "08:00"
@@ -129,7 +129,7 @@ class AppSettings:
                 "AUTH_SESSION_TTL_SECONDS",
                 default=2_592_000,
             ),
-            auth_allow_legacy_headers=_env_bool("AUTH_ALLOW_LEGACY_HEADERS", default=True),
+            auth_allow_legacy_headers=_env_bool("AUTH_ALLOW_LEGACY_HEADERS", default=False),
             live_refresh_min_gap_seconds=_env_int("LIVE_REFRESH_MIN_GAP_SECONDS", default=600),
             agent_mode_enabled=_env_bool("AGENT_MODE_ENABLED", default=True),
             agent_provider=os.getenv("AGENT_PROVIDER", "deterministic_presets"),

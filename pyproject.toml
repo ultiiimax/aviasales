@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 flight-hunter-import-airports = "flight_hunter.ops.airport_import:main"
+flight-hunter-init-local = "flight_hunter.ops.init_local:main"
 flight-hunter-backup = "flight_hunter.ops.backup:backup_main"
 flight-hunter-backup-verify = "flight_hunter.ops.backup:verify_main"
 flight-hunter-browser-smoke = "flight_hunter.ops.browser_smoke:main"
