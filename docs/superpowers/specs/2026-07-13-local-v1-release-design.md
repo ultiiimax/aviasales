@@ -62,6 +62,12 @@ The 2026-07-13 audit established this baseline:
 Missing or invalid credentials must produce a typed unavailable state without preventing startup
 or falling back to invented live data.
 
+Credential validation has two layers. Empty values are `credentials_missing`. Values that fail
+the documented local signature/marker shape are `credentials_invalid` and are rejected before an
+HTTP call. An upstream HTTP 401 is `auth_failed`. None of these configuration/authentication
+states is retried automatically; HTTP 403 remains the separately observable provider/WAF
+`blocked` state.
+
 **Telegram mode** remains optional. With `TELEGRAM_ENABLED=false`, webhook and delivery workers
 must remain inert. Enabling it requires the existing webhook secret and bot-token checks.
 
@@ -179,6 +185,13 @@ command that installs the optional Python group and Chromium. The browser smoke 
 - return a stable machine-readable failure code when the runtime is absent;
 - avoid network access to live providers.
 
+The minimal packaged worker has `PERSONAL_OBSERVER_ENABLED=false` and does not claim browser jobs.
+In an explicitly browser-enabled direct runtime, a missing Playwright package or Chromium binary
+is a permanent local configuration failure: the job becomes `failed` with
+`browser_runtime_unavailable`, no `next_retry_at`, and no automatic retry. After running browser
+bootstrap, the operator must explicitly create or requeue the observation. Transient navigation,
+timeout, or provider-page failures keep their existing classified retry policy.
+
 CI installs the browser runtime before running browser smoke and local web E2E checks.
 
 The browser E2E server uses a temporary migrated SQLite database, generated test secrets,
@@ -195,6 +208,8 @@ random loopback port. The suite covers these exact scenarios:
 7. verify `/healthz` and `/readyz` without making any external provider request.
 
 Each scenario starts from deterministic seeded state and records a screenshot only on failure.
+Browser tests use the `browser_e2e` pytest marker; aggregate credential-free checks exclude that
+marker unless browser bootstrap has completed, while the dedicated Ubuntu browser job requires it.
 
 ### 5.4 Container packaging
 
@@ -248,6 +263,22 @@ order and exits non-zero at the first failed stage. Its credential-free gate cov
 6. Compose configuration validation;
 7. API/web acceptance checks;
 8. browser smoke when the browser runtime is explicitly requested or installed.
+
+Each stage emits one JSON object with keys and types represented by this valid example:
+`{"schema_version":1,"stage":"tests","status":"passed","code":"ok","skipped_reason":null}`.
+`schema_version` is integer `1`; `stage` and `code` are non-empty strings; `status` is one of
+`passed`, `failed`, or `skipped`; and `skipped_reason` is null or a non-empty string.
+Human-readable progress goes to stderr; stdout remains machine-readable. A failed required stage
+sets the process exit code to non-zero. An optional stage may be `skipped` only with a populated
+stable reason such as `docker_unavailable` or `browser_runtime_not_requested`.
+
+Migration validation has two paths. The fresh path upgrades an empty temporary SQLite database to
+head. The upgrade path creates a temporary database at revision `0017`, inserts representative
+owner/household/session and watch records using the revision-0017 schema, upgrades through every
+remaining migration to head, and verifies both the preserved records and the final Alembic
+revision. Its exact automated entry point is
+`uv run pytest tests/integration/test_upgrade_from_pre_v1.py -q` and release-check stage name is
+`upgrade_migrations`.
 
 Live provider smoke is a separate manual command so CI never contacts Aviasales. Docker image
 build is part of CI and the documented final local release procedure, but the release-check must
@@ -315,20 +346,26 @@ Network failure, provider block, rate limit, missing credentials, schema failure
 browser-runtime absence retain distinct machine-readable codes. The web UI shows a concise next
 action and never substitutes fake or cached prices for failed live data without an explicit label.
 
-The local-v1 stable mappings are:
+The local-v1 stable mappings are below. HTTP statuses apply only to direct Aviasales-specific
+operations (`/api/v1/aviasales/*` and booking resolution). Aggregate `/api/v1/searches` and
+`/api/v1/searches/date-matrix` return HTTP 200 with fake/partial results and put the same stable
+codes in `provider_errors` or `pricing_denials`; a disabled or failed Aviasales call must not hide
+valid fake/other-source results.
 
-| Condition | HTTP/command result | Stable code |
-|---|---:|---|
-| Aviasales disabled | HTTP 503 | `aviasales_search_disabled` |
-| Aviasales credentials absent | HTTP 503 | `aviasales_search_credentials_missing` |
-| CloudFront/provider block | HTTP 502 | `aviasales_search_blocked` |
-| Provider rate limit | HTTP 429 plus safe `Retry-After` when supplied | `aviasales_search_rate_limited` |
-| Provider transport/network failure | HTTP 502 | `aviasales_search_unavailable` |
-| Required provider schema missing/invalid | HTTP 502 | `aviasales_search_schema_error` |
-| Browser package or Chromium absent | CLI non-zero / job retryable | `browser_runtime_unavailable` |
-| Database cannot be opened | HTTP 503 readiness | `database_unavailable` |
-| Database revision is not current | HTTP 503 readiness | `migration_pending` |
-| Cached or stale offer | HTTP 200, explicit freshness field | `cached` or `stale`, never `live` |
+| Condition | Direct HTTP/command result | Retry | Stable code |
+|---|---:|---:|---|
+| Aviasales disabled | HTTP 503 | no | `aviasales_search_disabled` |
+| Aviasales credentials absent | HTTP 503 | no | `aviasales_search_credentials_missing` |
+| Aviasales credential shape invalid | HTTP 503 | no | `aviasales_search_credentials_invalid` |
+| Provider authentication rejected (HTTP 401) | HTTP 502 | no | `aviasales_search_auth_failed` |
+| CloudFront/provider block (HTTP 403) | HTTP 502 | no | `aviasales_search_blocked` |
+| Provider rate limit | HTTP 429 plus safe `Retry-After` when supplied | header/backoff | `aviasales_search_rate_limited` |
+| Provider transport/network failure | HTTP 502 | bounded transport retry | `aviasales_search_unavailable` |
+| Required provider schema missing/invalid | HTTP 502 | no | `aviasales_search_schema_error` |
+| Browser package or Chromium absent | CLI non-zero / job failed | no | `browser_runtime_unavailable` |
+| Database cannot be opened | HTTP 503 readiness | healthcheck retry | `database_unavailable` |
+| Database revision is not current | HTTP 503 readiness | after migration | `migration_pending` |
+| Cached or stale offer | HTTP 200, explicit freshness field | n/a | `cached` or `stale`, never `live` |
 
 All HTTP failures use the repository's coded error envelope rather than FastAPI's raw `detail`
 shape. Provider exception text, request IDs, signed URLs, tokens, markers, and signatures are not
@@ -366,8 +403,9 @@ The release is accepted only when fresh evidence proves all of the following:
 9. default Compose binds only to loopback and starts API plus worker;
 10. fixture-based Aviasales contract tests pass. A manual sanitized suggest and exact-date search
     smoke is attempted when local credentials and network are available, without exposing
-    credentials or raw provider data. `blocked`, `rate_limited`, or `network_error` is recorded as
-    an external limitation and does not fail the credential-free release gate;
+    credentials or raw provider data. `aviasales_search_blocked`,
+    `aviasales_search_rate_limited`, or `aviasales_search_unavailable` is recorded as an external
+    limitation and does not fail the credential-free release gate;
 11. documentation matches the exact commands and observed results;
 12. no `TODO`, `pass`, `NotImplementedError`, fake return, or commented incomplete code exists in
     the changed production flow.
@@ -380,6 +418,7 @@ The release is accepted only when fresh evidence proves all of the following:
 | Formatting and lint | all tracked Python | `uv run ruff format --check .` and `uv run ruff check .` |
 | Public type safety | `src/flight_hunter/` | `uv run mypy` |
 | Fresh migrations | `migrations/`, persistence | `uv run flight-hunter-release-check --stage migrations` |
+| Existing database upgrade | migrations and pre-v1 fixture builder | `uv run pytest tests/integration/test_upgrade_from_pre_v1.py -q` |
 | Secret/log safety | ops and full tree | `uv run flight-hunter-security-scan` |
 | Russian UI and browser flows | `api/web.py`, `tests/e2e` | `uv run pytest tests/e2e -q` after `uv run flight-hunter-browser-bootstrap` |
 | API liveness/readiness | `api/app.py`, database engine factory | unit tests plus `uv run flight-hunter-release-check --stage health` |
