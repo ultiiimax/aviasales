@@ -61,6 +61,14 @@ def test_agent_core_metadata_has_reviewed_checks_and_approval_snapshot() -> None
         "status IN ('queued', 'running', 'cancel_requested', "
         "'completed', 'partial', 'failed', 'cancelled')"
     )
+    assert run_checks["ck_agent_plan_run_chronology"] == (
+        "(started_at IS NULL OR started_at >= created_at) AND "
+        "(cancel_requested_at IS NULL OR cancel_requested_at >= created_at) AND "
+        "(finished_at IS NULL OR finished_at >= created_at) AND "
+        "(finished_at IS NULL OR started_at IS NULL OR finished_at >= started_at) AND "
+        "(finished_at IS NULL OR cancel_requested_at IS NULL OR "
+        "finished_at >= cancel_requested_at)"
+    )
     for column_name in (
         "revision_content_hash",
         "approved_by_session_id",
@@ -352,6 +360,15 @@ def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
     assert (
         "status IN ('queued', 'running', 'cancel_requested', "
         "'completed', 'partial', 'failed', 'cancelled')"
+    ) in " ".join(agent_run_table_sql[0].split())
+    assert "ck_agent_plan_run_chronology" in agent_run_table_sql[0]
+    assert (
+        "(started_at IS NULL OR started_at >= created_at) AND "
+        "(cancel_requested_at IS NULL OR cancel_requested_at >= created_at) AND "
+        "(finished_at IS NULL OR finished_at >= created_at) AND "
+        "(finished_at IS NULL OR started_at IS NULL OR finished_at >= started_at) AND "
+        "(finished_at IS NULL OR cancel_requested_at IS NULL OR "
+        "finished_at >= cancel_requested_at)"
     ) in " ".join(agent_run_table_sql[0].split())
     assert "'succeeded'" not in agent_run_table_sql[0]
     assert agent_revision_table_sql is not None

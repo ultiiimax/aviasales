@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -134,16 +134,23 @@ class AgentPlanApprovalSnapshot:
     risk_warning_versions: Mapping[str, str]
 
     def __post_init__(self) -> None:
+        approved_budget = _deep_freeze(self.approved_budget)
+        approved_strategies = _deep_freeze(self.approved_strategies)
+        risk_warning_versions = _deep_freeze(self.risk_warning_versions)
         object.__setattr__(
             self,
             "approved_budget",
-            MappingProxyType(dict(self.approved_budget)),
+            cast(Mapping[str, object], approved_budget),
         )
-        object.__setattr__(self, "approved_strategies", tuple(self.approved_strategies))
+        object.__setattr__(
+            self,
+            "approved_strategies",
+            cast(tuple[str, ...], approved_strategies),
+        )
         object.__setattr__(
             self,
             "risk_warning_versions",
-            MappingProxyType(dict(self.risk_warning_versions)),
+            cast(Mapping[str, str], risk_warning_versions),
         )
 
 
@@ -774,13 +781,23 @@ class AgentRunRepository:
         elif status in _TERMINAL_RUN_STATUSES:
             values["finished_at"] = normalized_changed_at
 
-        result = await self._session.execute(
+        statement = (
             update(agent_plan_runs_table)
             .where(agent_plan_runs_table.c.id == str(run_id))
             .where(agent_plan_runs_table.c.household_id == str(household_id))
             .where(agent_plan_runs_table.c.status.in_(_TRANSITION_SOURCES[status]))
-            .values(**values)
+            .where(agent_plan_runs_table.c.created_at <= normalized_changed_at)
         )
+        if status in {"completed", "partial", "failed"}:
+            statement = statement.where(agent_plan_runs_table.c.started_at.is_not(None)).where(
+                agent_plan_runs_table.c.started_at <= normalized_changed_at
+            )
+        elif status == "cancelled":
+            statement = statement.where(
+                agent_plan_runs_table.c.cancel_requested_at.is_not(None)
+            ).where(agent_plan_runs_table.c.cancel_requested_at <= normalized_changed_at)
+
+        result = await self._session.execute(statement.values(**values))
         if cast(CursorResult[Any], result).rowcount != 1:
             stored = await self.get_run(household_id, run_id)
             if stored is None:
@@ -897,7 +914,7 @@ def _content_hash(revision: NewAgentPlanRevision) -> str:
 
 def _canonical_json(value: object) -> str:
     return json.dumps(
-        value,
+        _json_mutable_copy(value),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -1081,9 +1098,12 @@ def _utc_datetime(value: datetime) -> datetime:
 
 
 async def _acquire_sqlite_write_transaction(session: AsyncSession) -> None:
-    connection = await session.connection()
-    if connection.dialect.name != "sqlite":
+    bind = session.get_bind()
+    if bind.dialect.name != "sqlite":
         return
+    if session.in_nested_transaction():
+        raise AgentPlanConflict("agent_sqlite_nested_transaction_unsupported")
+    connection = await session.connection()
     sync_connection = connection.sync_connection
     if sync_connection is None:
         raise RuntimeError("SQLite synchronous connection is unavailable")
@@ -1096,6 +1116,22 @@ async def _acquire_sqlite_write_transaction(session: AsyncSession) -> None:
         raise RuntimeError("SQLite driver does not expose transaction state")
     if not in_transaction:
         await connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
+def _deep_freeze(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return tuple(_deep_freeze(item) for item in value)
+    return value
+
+
+def _json_mutable_copy(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _json_mutable_copy(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_json_mutable_copy(item) for item in value]
+    return value
 
 
 def _aware_datetime(value: datetime) -> datetime:

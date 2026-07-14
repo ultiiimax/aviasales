@@ -286,6 +286,82 @@ async def test_successor_is_removed_by_external_transaction_rollback(
 
 
 @pytest.mark.anyio
+async def test_sqlite_successor_rejects_caller_savepoint_before_mutation(
+    tmp_path: Path,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "successor-savepoint.db")
+    successor = _revision(
+        id_value=UUID("44444444-4444-4444-4444-444444444444"),
+        plan={"route": ["MOW", "KZN"]},
+        created_at=NOW + timedelta(minutes=1),
+    )
+    async with session_factory() as session:
+        await AgentPlanRepository(session).create_plan(_plan(), _revision())
+        await session.commit()
+
+    async with session_factory() as session:
+        caller_savepoint = await session.begin_nested()
+        with pytest.raises(AgentPlanConflict) as captured:
+            await AgentPlanRepository(session).create_successor(
+                household_id=HOUSEHOLD_ID,
+                source_revision_id=REVISION_ID,
+                revision=successor,
+            )
+        assert captured.value.code == "agent_sqlite_nested_transaction_unsupported"
+        await caller_savepoint.rollback()
+        await session.rollback()
+
+    async with session_factory() as session:
+        revisions = await AgentPlanRepository(session).list_revisions(HOUSEHOLD_ID, PLAN_ID)
+        assert len(revisions) == 1
+        assert revisions[0].state == "awaiting_approval"
+        assert revisions[0].superseded_at is None
+
+    async with session_factory() as session:
+        created = await AgentPlanRepository(session).create_successor(
+            household_id=HOUSEHOLD_ID,
+            source_revision_id=REVISION_ID,
+            revision=successor,
+        )
+        await session.commit()
+        assert created.revision_number == 2
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_sqlite_successor_honors_explicit_outer_transaction_rollback(
+    tmp_path: Path,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "explicit-outer-rollback.db")
+    successor = _revision(
+        id_value=UUID("44444444-4444-4444-4444-444444444444"),
+        plan={"route": ["MOW", "KZN"]},
+        created_at=NOW + timedelta(minutes=1),
+    )
+    async with session_factory() as session:
+        await AgentPlanRepository(session).create_plan(_plan(), _revision())
+        await session.commit()
+
+    async with session_factory() as session:
+        caller_transaction = await session.begin()
+        await AgentPlanRepository(session).create_successor(
+            household_id=HOUSEHOLD_ID,
+            source_revision_id=REVISION_ID,
+            revision=successor,
+        )
+        await caller_transaction.rollback()
+
+    async with session_factory() as session:
+        revisions = await AgentPlanRepository(session).list_revisions(HOUSEHOLD_ID, PLAN_ID)
+        assert len(revisions) == 1
+        assert revisions[0].state == "awaiting_approval"
+        assert revisions[0].superseded_at is None
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("field_name", "invalid_value"),
     [

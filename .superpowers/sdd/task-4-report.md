@@ -115,3 +115,43 @@ active-run, and successor race selection passed eight tests without a lock leak.
 - Global format: `271 files already formatted`; global Ruff: `All checks passed`.
 - Global mypy: `Success: no issues found in 111 source files`.
 - `git diff --check`: clean.
+
+## Second re-review hardening addendum (2026-07-14)
+
+One Important and two Minor findings remained after the first hardening commit. Production and
+migration files stayed unchanged while the next focused RED was captured: `12 failed, 65 passed in
+10.45s`. The failures were the two real SQLite caller-savepoint mutations, shallow nested approval
+data, three repository chronology violations, three direct database chronology violations, a
+PostgreSQL fake observing an unnecessary connection acquisition, and the missing Core/migrated
+chronology checks.
+
+### Transaction boundary
+
+- Successor and execute inspect the bound dialect before acquiring a connection. PostgreSQL is a
+  SQL-free no-op even when its session is nested.
+- SQLite rejects any already-open caller savepoint before a read, row mutation, or repository-owned
+  savepoint with `agent_sqlite_nested_transaction_unsupported`. Tests roll the caller back, prove
+  source/revision/approval/run state is untouched, then write successfully from a fresh session.
+- Ordinary explicit `session.begin()` and autobegin remain supported. When no physical SQLite
+  transaction exists they acquire `BEGIN IMMEDIATE`; caller rollback removes every mutation.
+
+### Chronology and immutable evidence
+
+- Run transition CAS updates require `changed_at >= created_at`; completed/partial/failed also
+  require `changed_at >= started_at`, and cancelled requires
+  `changed_at >= cancel_requested_at`. Equal timestamps are valid.
+- Matching `ck_agent_plan_run_chronology` checks in Core metadata and unreleased migration 0023
+  enforce the same ordering against direct database writes.
+- Approval mappings and sequences are recursively defensive-copied and frozen. Nested caller
+  mutation cannot alter input or read DTOs, nested mutation attempts fail, and canonical JSON is
+  generated from a deterministic mutable copy without weakening the immutable snapshot.
+
+### Fresh verification
+
+- Exact focused repository/migration/pre-v1 upgrade gate: `78 passed in 8.51s`.
+- Migration/pre-v1 upgrade subset: `7 passed in 1.98s`.
+- Full persistence unit directory: `135 passed in 13.93s`.
+- Full unit suite: `693 passed, 19 existing dependency/aiosqlite warnings in 47.95s`.
+- Full integration suite: `4 passed in 3.31s`.
+- Global format: `271 files already formatted`; global Ruff: `All checks passed`.
+- Global mypy: `Success: no issues found in 111 source files`.

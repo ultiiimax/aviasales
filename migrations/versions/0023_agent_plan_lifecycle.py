@@ -192,6 +192,15 @@ def upgrade() -> None:
             "'completed', 'partial', 'failed', 'cancelled')",
             name="ck_agent_plan_run_status",
         ),
+        sa.CheckConstraint(
+            "(started_at IS NULL OR started_at >= created_at) AND "
+            "(cancel_requested_at IS NULL OR cancel_requested_at >= created_at) AND "
+            "(finished_at IS NULL OR finished_at >= created_at) AND "
+            "(finished_at IS NULL OR started_at IS NULL OR finished_at >= started_at) AND "
+            "(finished_at IS NULL OR cancel_requested_at IS NULL OR "
+            "finished_at >= cancel_requested_at)",
+            name="ck_agent_plan_run_chronology",
+        ),
     )
     op.create_index("ix_agent_plan_runs_household_id", "agent_plan_runs", ["household_id"])
     op.create_index("ix_agent_plan_runs_plan_id", "agent_plan_runs", ["plan_id"])

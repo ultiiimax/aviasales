@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -25,6 +27,7 @@ from flight_hunter.persistence.agent_repositories import (
     NewAgentPlanApproval,
     NewAgentPlanRevision,
     NewAgentPlanRun,
+    _acquire_sqlite_write_transaction,
     classify_agent_integrity_constraint,
 )
 from flight_hunter.persistence.database import create_database_engine
@@ -180,6 +183,80 @@ async def test_approval_snapshot_roundtrips_canonical_immutable_values(tmp_path:
 
 
 @pytest.mark.anyio
+async def test_approval_snapshot_is_recursively_defensive_and_immutable(
+    tmp_path: Path,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "deep-approval-snapshot.db")
+    attempts: list[object] = [7, {"deadline_seconds": 60}]
+    provider_limits: dict[str, object] = {"attempts": attempts}
+    budget: dict[str, object] = {
+        "logical_operations": 3,
+        "provider_limits": provider_limits,
+    }
+    strategies = ["direct", "self_transfer"]
+    warning_versions = {"hidden_city": "hidden-city-warning-v3"}
+
+    async with session_factory() as session:
+        revision = await _create_plan(session)
+        approval = _approval(
+            revision.content_hash,
+            approved_budget=budget,
+            approved_strategies=cast(tuple[str, ...], strategies),
+            risk_warning_versions=warning_versions,
+        )
+        created = await AgentRunRepository(session).create_approval(approval)
+
+        attempts.append(99)
+        provider_limits["new_limit"] = 10
+        strategies.append("hidden_city")
+        warning_versions["hidden_city"] = "mutated"
+
+        assert approval.snapshot.approved_budget == {
+            "logical_operations": 3,
+            "provider_limits": {"attempts": (7, {"deadline_seconds": 60})},
+        }
+        assert approval.snapshot.approved_strategies == ("direct", "self_transfer")
+        assert approval.snapshot.risk_warning_versions == {"hidden_city": "hidden-city-warning-v3"}
+        assert created.snapshot.approved_budget == {
+            "logical_operations": 3,
+            "provider_limits": {"attempts": (7, {"deadline_seconds": 60})},
+        }
+        assert created.snapshot.approved_strategies == ("direct", "self_transfer")
+        assert created.snapshot.risk_warning_versions == {"hidden_city": "hidden-city-warning-v3"}
+        await session.commit()
+
+    async with session_factory() as session:
+        stored = await AgentRunRepository(session).get_approval(HOUSEHOLD_ID, APPROVAL_ID)
+        raw_budget = (
+            await session.execute(
+                select(agent_plan_execution_approvals_table.c.approved_budget_json).where(
+                    agent_plan_execution_approvals_table.c.id == str(APPROVAL_ID)
+                )
+            )
+        ).scalar_one()
+
+        assert stored is not None
+        nested_limits = stored.snapshot.approved_budget["provider_limits"]
+        assert isinstance(nested_limits, Mapping)
+        nested_attempts = nested_limits["attempts"]
+        assert nested_attempts == (7, {"deadline_seconds": 60})
+        with pytest.raises(TypeError):
+            nested_limits["new_limit"] = 10  # type: ignore[index]
+        assert isinstance(nested_attempts, tuple)
+        with pytest.raises(AttributeError):
+            nested_attempts.append(99)  # type: ignore[attr-defined]
+        nested_deadline = nested_attempts[1]
+        assert isinstance(nested_deadline, Mapping)
+        with pytest.raises(TypeError):
+            nested_deadline["deadline_seconds"] = 1  # type: ignore[index]
+        assert raw_budget == (
+            '{"logical_operations":3,"provider_limits":{"attempts":[7,{"deadline_seconds":60}]}}'
+        )
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_execute_rejects_approval_snapshot_for_different_revision_content(
     tmp_path: Path,
 ) -> None:
@@ -275,6 +352,55 @@ async def test_precommitted_approval_execute_is_removed_by_external_rollback(
         assert revision.state == "awaiting_approval"
         assert revision.consumed_at is None
         assert await repository.list_runs(HOUSEHOLD_ID, PLAN_ID) == ()
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_sqlite_execute_rejects_caller_savepoint_before_mutation(
+    tmp_path: Path,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "execute-savepoint.db")
+    async with session_factory() as session:
+        revision = await _create_plan(session)
+        await AgentRunRepository(session).create_approval(_approval(revision.content_hash))
+        await session.commit()
+
+    async with session_factory() as session:
+        caller_savepoint = await session.begin_nested()
+        with pytest.raises(AgentPlanConflict) as captured:
+            await AgentRunRepository(session).execute(
+                household_id=HOUSEHOLD_ID,
+                approval_id=APPROVAL_ID,
+                run=_run(),
+            )
+        assert captured.value.code == "agent_sqlite_nested_transaction_unsupported"
+        await caller_savepoint.rollback()
+        await session.rollback()
+
+    async with session_factory() as session:
+        repository = AgentRunRepository(session)
+        approval = await repository.get_approval(HOUSEHOLD_ID, APPROVAL_ID)
+        revision = await AgentPlanRepository(session).get_revision(
+            HOUSEHOLD_ID,
+            REVISION_ID,
+        )
+        assert approval is not None
+        assert approval.run_id is None
+        assert approval.consumed_at is None
+        assert revision is not None
+        assert revision.state == "awaiting_approval"
+        assert revision.consumed_at is None
+        assert await repository.list_runs(HOUSEHOLD_ID, PLAN_ID) == ()
+
+    async with session_factory() as session:
+        created = await AgentRunRepository(session).execute(
+            household_id=HOUSEHOLD_ID,
+            approval_id=APPROVAL_ID,
+            run=_run(),
+        )
+        await session.commit()
+        assert created.id == RUN_ID
 
     await engine.dispose()
 
@@ -772,6 +898,203 @@ async def test_run_lifecycle_rejects_skips_and_stale_transitions(tmp_path: Path)
 
 
 @pytest.mark.anyio
+async def test_run_transition_rejects_changed_at_before_run_created(
+    tmp_path: Path,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "transition-before-created.db")
+    async with session_factory() as session:
+        revision = await _create_plan(session)
+        repository = AgentRunRepository(session)
+        await repository.create_approval(_approval(revision.content_hash))
+        await repository.execute(
+            household_id=HOUSEHOLD_ID,
+            approval_id=APPROVAL_ID,
+            run=_run(),
+        )
+
+        with pytest.raises(AgentPlanConflict) as captured:
+            await repository.set_status(
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                status="cancel_requested",
+                changed_at=NOW - timedelta(microseconds=1),
+            )
+        assert captured.value.code == "agent_run_transition_conflict"
+        stored = await repository.get_run(HOUSEHOLD_ID, RUN_ID)
+        assert stored is not None
+        assert stored.status == "queued"
+        assert stored.cancel_requested_at is None
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_terminal_transition_rejects_time_before_started_at(tmp_path: Path) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "terminal-before-start.db")
+    async with session_factory() as session:
+        revision = await _create_plan(session)
+        repository = AgentRunRepository(session)
+        await repository.create_approval(_approval(revision.content_hash))
+        await repository.execute(
+            household_id=HOUSEHOLD_ID,
+            approval_id=APPROVAL_ID,
+            run=_run(),
+        )
+        await repository.set_status(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            status="running",
+            changed_at=NOW + timedelta(minutes=2),
+        )
+
+        with pytest.raises(AgentPlanConflict) as captured:
+            await repository.set_status(
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                status="completed",
+                changed_at=NOW + timedelta(minutes=1),
+            )
+        assert captured.value.code == "agent_run_transition_conflict"
+        stored = await repository.get_run(HOUSEHOLD_ID, RUN_ID)
+        assert stored is not None
+        assert stored.status == "running"
+        assert stored.finished_at is None
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_cancelled_transition_rejects_time_before_cancel_request(
+    tmp_path: Path,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "cancel-before-request.db")
+    async with session_factory() as session:
+        revision = await _create_plan(session)
+        repository = AgentRunRepository(session)
+        await repository.create_approval(_approval(revision.content_hash))
+        await repository.execute(
+            household_id=HOUSEHOLD_ID,
+            approval_id=APPROVAL_ID,
+            run=_run(),
+        )
+        await repository.set_status(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            status="cancel_requested",
+            changed_at=NOW + timedelta(minutes=2),
+        )
+
+        with pytest.raises(AgentPlanConflict) as captured:
+            await repository.set_status(
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                status="cancelled",
+                changed_at=NOW + timedelta(minutes=1),
+            )
+        assert captured.value.code == "agent_run_transition_conflict"
+        stored = await repository.get_run(HOUSEHOLD_ID, RUN_ID)
+        assert stored is not None
+        assert stored.status == "cancel_requested"
+        assert stored.finished_at is None
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "transitions",
+    [
+        ("running", "completed"),
+        ("cancel_requested", "cancelled"),
+    ],
+)
+async def test_run_transition_accepts_equal_chronology_boundaries(
+    tmp_path: Path,
+    transitions: tuple[str, str],
+) -> None:
+    engine, session_factory = await _session_factory(
+        tmp_path,
+        "equal-boundary-" + transitions[0] + ".db",
+    )
+    async with session_factory() as session:
+        revision = await _create_plan(session)
+        repository = AgentRunRepository(session)
+        await repository.create_approval(_approval(revision.content_hash))
+        await repository.execute(
+            household_id=HOUSEHOLD_ID,
+            approval_id=APPROVAL_ID,
+            run=_run(),
+        )
+        for status in transitions:
+            stored = await repository.set_status(
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                status=status,
+                changed_at=NOW,
+            )
+
+        assert stored.status == transitions[-1]
+        assert stored.finished_at == NOW
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("case_name", "status", "started_at", "cancel_requested_at", "finished_at"),
+    [
+        ("started-before-created", "running", NOW - timedelta(seconds=1), None, None),
+        (
+            "finished-before-started",
+            "completed",
+            NOW + timedelta(seconds=2),
+            None,
+            NOW + timedelta(seconds=1),
+        ),
+        (
+            "finished-before-cancel-request",
+            "cancelled",
+            None,
+            NOW + timedelta(seconds=2),
+            NOW + timedelta(seconds=1),
+        ),
+    ],
+)
+async def test_database_rejects_invalid_run_chronology(
+    tmp_path: Path,
+    case_name: str,
+    status: str,
+    started_at: datetime | None,
+    cancel_requested_at: datetime | None,
+    finished_at: datetime | None,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, f"chronology-{case_name}.db")
+    async with session_factory() as session:
+        revision = await _create_plan(session)
+        await AgentRunRepository(session).create_approval(_approval(revision.content_hash))
+        with pytest.raises(IntegrityError, match="ck_agent_plan_run_chronology"):
+            async with session.begin_nested():
+                await session.execute(
+                    insert(agent_plan_runs_table).values(
+                        id=str(RUN_ID),
+                        household_id=str(HOUSEHOLD_ID),
+                        plan_id=str(PLAN_ID),
+                        revision_id=str(REVISION_ID),
+                        approval_id=str(APPROVAL_ID),
+                        execute_idempotency_key=f"execute:{case_name}",
+                        status=status,
+                        created_at=NOW,
+                        deadline_at=NOW + timedelta(minutes=10),
+                        started_at=started_at,
+                        cancel_requested_at=cancel_requested_at,
+                        finished_at=finished_at,
+                    )
+                )
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_run_lifecycle_rejects_error_fields_for_incompatible_statuses(
     tmp_path: Path,
 ) -> None:
@@ -869,6 +1192,15 @@ async def test_concurrent_run_transition_compare_and_swap_has_one_winner(tmp_pat
     )
 
     await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_postgresql_nested_transaction_path_is_sql_free_and_not_rejected() -> None:
+    session = _FakePostgresNestedSession()
+
+    await _acquire_sqlite_write_transaction(cast(AsyncSession, session))
+
+    assert session.connection_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -1155,3 +1487,26 @@ class _PostgresIntegrity(Exception):
     def __init__(self, constraint_name: str) -> None:
         self.diag = _PostgresDiagnostic(constraint_name)
         super().__init__(constraint_name)
+
+
+class _FakePostgresDialect:
+    name = "postgresql"
+
+
+class _FakePostgresBind:
+    dialect = _FakePostgresDialect()
+
+
+class _FakePostgresNestedSession:
+    def __init__(self) -> None:
+        self.connection_calls = 0
+
+    def get_bind(self) -> _FakePostgresBind:
+        return _FakePostgresBind()
+
+    def in_nested_transaction(self) -> bool:
+        return True
+
+    async def connection(self) -> None:
+        self.connection_calls += 1
+        raise AssertionError("PostgreSQL boundary check must not acquire or query a connection")
