@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import importlib.util
+import io
 import logging
+import re
 import sqlite3
 from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.schema import CreateIndex, CreateTable
 
 from flight_hunter.ops.structured_logging import LOGGER_NAME
 from flight_hunter.persistence.models import (
@@ -122,7 +128,7 @@ def test_review_agent_ledger_core_metadata_has_budget_checks_and_indexes() -> No
     assert logical_root.unique
     assert (
         str(logical_root.dialect_options["sqlite"]["where"].compile(dialect=sqlite.dialect()))
-        == "consumes_logical_unit = 1"
+        == "consumes_logical_unit IS TRUE"
     )
     assert (
         str(
@@ -130,12 +136,13 @@ def test_review_agent_ledger_core_metadata_has_budget_checks_and_indexes() -> No
                 dialect=postgresql.dialect()
             )
         )
-        == "consumes_logical_unit = 1"
+        == "consumes_logical_unit IS TRUE"
     )
     assert "ix_agent_operation_claim" in operation_indexes
     assert "ix_agent_run_operation_logical_root_id" in operation_indexes
     assert {
         "logical_root_operation_id",
+        "handoff_predecessor_operation_id",
         "circuit_permit_token_digest",
         "circuit_permit_generation",
         "circuit_permit_mode",
@@ -157,6 +164,8 @@ def test_review_agent_ledger_core_metadata_has_budget_checks_and_indexes() -> No
         "operation_attempt_number",
         "circuit_permit_generation",
         "circuit_permit_token_digest",
+        "circuit_outcome",
+        "circuit_outcome_recorded_at",
     }.issubset(agent_provider_http_attempts_table.c.keys())
     assert "uq_agent_provider_http_operation_attempt" in attempt_constraints
     assert "uq_agent_run_scope" in scope_constraints
@@ -176,6 +185,86 @@ def test_review_agent_ledger_core_metadata_has_budget_checks_and_indexes() -> No
         constraint.name == "uq_agent_ranking_fingerprint"
         for constraint in agent_ranking_snapshots_table.constraints
     )
+
+
+def test_rereview_second_0024_and_core_compile_postgresql_safe_boolean_ddl() -> None:
+    output = io.StringIO()
+    context = MigrationContext.configure(
+        url="postgresql://",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration_path = (
+        Path(__file__).parents[3] / "migrations" / "versions" / "0024_agent_execution_ledger.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_0024_under_test", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    with Operations.context(context):
+        migration.upgrade()
+    migration_sql = output.getvalue()
+
+    core_table_sql = str(
+        CreateTable(agent_run_operations_table).compile(dialect=postgresql.dialect())
+    )
+    logical_root_index = next(
+        index
+        for index in agent_run_operations_table.indexes
+        if index.name == "uq_agent_run_logical_root"
+    )
+    core_index_sql = str(CreateIndex(logical_root_index).compile(dialect=postgresql.dialect()))
+    compiled = "\n".join((migration_sql, core_table_sql, core_index_sql))
+
+    assert "ck_agent_run_operation_logical_shape" in migration_sql
+    assert "CREATE UNIQUE INDEX uq_agent_run_logical_root" in migration_sql
+    assert "consumes_logical_unit IS TRUE" in compiled
+    assert "consumes_logical_unit IS FALSE" in compiled
+    assert not re.search(r"consumes_logical_unit\s*=\s*[01](?!\d)", compiled)
+
+
+def test_rereview_second_core_metadata_has_outcome_and_handoff_invariants() -> None:
+    operation_indexes = {index.name: index for index in agent_run_operations_table.indexes}
+    operation_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in agent_run_operations_table.constraints
+        if constraint.name is not None and hasattr(constraint, "sqltext")
+    }
+    attempt_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in agent_provider_http_attempts_table.constraints
+        if constraint.name is not None and hasattr(constraint, "sqltext")
+    }
+
+    assert "handoff_predecessor_operation_id" in agent_run_operations_table.c
+    handoff_fk = next(
+        iter(agent_run_operations_table.c.handoff_predecessor_operation_id.foreign_keys)
+    )
+    assert handoff_fk.target_fullname == "agent_run_operations.id"
+    handoff_index = operation_indexes["uq_agent_operation_handoff_predecessor"]
+    assert handoff_index.unique
+    assert (
+        str(
+            handoff_index.dialect_options["postgresql"]["where"].compile(
+                dialect=postgresql.dialect()
+            )
+        )
+        == "handoff_predecessor_operation_id IS NOT NULL"
+    )
+    assert (
+        "handoff_predecessor_operation_id"
+        in operation_checks["ck_agent_run_operation_handoff_shape"]
+    )
+
+    assert {
+        "circuit_outcome",
+        "circuit_outcome_recorded_at",
+    }.issubset(agent_provider_http_attempts_table.c.keys())
+    outcome_check = attempt_checks["ck_agent_provider_http_attempt_outcome"]
+    assert "success" in outcome_check
+    assert "transient_failure" in outcome_check
+    assert "non_transient_failure" in outcome_check
+    assert "circuit_outcome_recorded_at" in outcome_check
+    assert agent_provider_http_attempts_table.c.circuit_outcome_recorded_at.type.timezone
 
 
 def test_alembic_upgrade_does_not_disable_application_loggers(tmp_path: Path) -> None:
@@ -546,6 +635,7 @@ def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> N
         "operation_fingerprint",
         "logical_operation_fingerprint",
         "logical_root_operation_id",
+        "handoff_predecessor_operation_id",
         "consumes_logical_unit",
         "immutable_input_json",
         "private_continuation_json",
@@ -570,6 +660,8 @@ def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> N
         "operation_attempt_number",
         "circuit_permit_generation",
         "circuit_permit_token_digest",
+        "circuit_outcome",
+        "circuit_outcome_recorded_at",
     }.issubset(ledger_table_columns["agent_provider_http_attempts"])
     assert {
         "generation",
@@ -579,9 +671,10 @@ def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> N
     }.issubset(ledger_table_columns["agent_provider_circuit_state"])
     assert "half_open_probe_owner" not in ledger_table_columns["agent_provider_circuit_state"]
     assert "uq_agent_run_logical_root" in operation_indexes
+    assert "uq_agent_operation_handoff_predecessor" in operation_indexes
     assert "ix_agent_operation_claim" in operation_indexes
     assert logical_root_index_sql is not None
-    assert "WHERE consumes_logical_unit = 1" in logical_root_index_sql[0]
+    assert "WHERE consumes_logical_unit IS TRUE" in logical_root_index_sql[0]
     assert operation_table_sql is not None
     assert "ck_agent_run_operation_logical_shape" in operation_table_sql[0]
     assert "ck_agent_run_operation_permit_shape" in operation_table_sql[0]
@@ -594,8 +687,16 @@ def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> N
         and row[6].upper() == "CASCADE"
         for row in operation_foreign_keys
     )
+    assert any(
+        row[2] == "agent_run_operations"
+        and row[3] == "handoff_predecessor_operation_id"
+        and row[4] == "id"
+        and row[6].upper() == "CASCADE"
+        for row in operation_foreign_keys
+    )
     assert attempt_table_sql is not None
     assert "uq_agent_provider_http_operation_attempt" in attempt_table_sql[0]
+    assert "ck_agent_provider_http_attempt_outcome" in attempt_table_sql[0]
     assert scope_table_sql is not None
     assert "uq_agent_run_scope" in scope_table_sql[0]
     assert "uq_agent_run_scope_fingerprint" not in scope_table_sql[0]

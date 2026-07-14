@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -17,7 +17,7 @@ from flight_hunter.application.agent_operations import (
     logical_workflow_fingerprint,
     operation_fingerprint,
 )
-from flight_hunter.domain.agent_evidence import ProtectionStatus
+from flight_hunter.domain.agent_evidence import DiscoverySource, ProtectionStatus
 from flight_hunter.domain.offers import Freshness, PriceBasis
 from flight_hunter.persistence.agent_repositories import (
     AgentEvidenceRepository,
@@ -29,17 +29,21 @@ from flight_hunter.persistence.agent_repositories import (
     AgentPlanApprovalSnapshot,
     AgentPlanRepository,
     AgentPlanStageKind,
+    AgentRunOperationRecord,
     AgentRunRepository,
     AgentStageStatus,
     AttemptKind,
     AttemptReservationStatus,
     CircuitPermitStatus,
+    NewAgentComposedRouteCandidate,
     NewAgentConfirmedOfferEvidence,
+    NewAgentDiscoverySignal,
     NewAgentPlan,
     NewAgentPlanApproval,
     NewAgentPlanRevision,
     NewAgentPlanRun,
     NewAgentPlanStage,
+    NewAgentRankingSnapshot,
     NewAgentRunScopeSnapshot,
     ServerPrivateCircuitPermit,
 )
@@ -1706,10 +1710,20 @@ async def test_review_final_exact_poll_requires_existing_same_run_and_stage_conf
                 logical_root_operation_id=root.id,
             )
         )
-        await repository.mark_operation_skipped(
+        root_lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-root",
+            now=NOW + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+        assert root_lease is not None and root_lease.operation.id == root.id
+        await repository.mark_operation_succeeded(
             household_id=HOUSEHOLD_ID,
             operation_id=root.id,
-            error_code="test_root_already_started",
+            worker_id="worker-root",
+            result_type=AgentOperationResultType.OPERATION,
+            result_id=poll.id,
             now=NOW + timedelta(seconds=1),
         )
         lease = await repository.claim_next_operation(
@@ -1799,6 +1813,14 @@ async def test_review_result_reference_rejects_self_cross_run_and_incompatible_k
                 ),
                 logical_root_operation_id=OPERATION_ID,
             )
+        )
+        await AgentOperationRepository(session).mark_operation_succeeded(
+            household_id=HOUSEHOLD_ID,
+            operation_id=OPERATION_ID,
+            worker_id="worker-result",
+            result_type=AgentOperationResultType.OPERATION,
+            result_id=cross_source_id,
+            now=NOW + timedelta(seconds=1),
         )
         lease = await AgentOperationRepository(session).claim_next_operation(
             household_id=HOUSEHOLD_ID,
@@ -2570,6 +2592,1334 @@ async def test_review_operation_context_accepts_current_typed_route_and_private_
     await engine.dispose()
 
 
+@pytest.mark.anyio
+async def test_rereview_second_duplicate_transient_outcome_is_applied_once(
+    tmp_path: Path,
+) -> None:
+    engine, sessions, permit, reservation_id = await _reserved_network_attempt(
+        tmp_path,
+        "outcome-transient-sequential.db",
+    )
+
+    async with sessions() as session:
+        repository = AgentOperationRepository(session)
+        first = await repository.record_circuit_failure(
+            circuit_permit=permit,
+            reservation_id=reservation_id,
+            transient=True,
+            failure_threshold=2,
+            cooldown_seconds=30,
+            now=NOW + timedelta(seconds=4),
+        )
+        replay = await repository.record_circuit_failure(
+            circuit_permit=permit,
+            reservation_id=reservation_id,
+            transient=True,
+            failure_threshold=2,
+            cooldown_seconds=30,
+            now=NOW + timedelta(seconds=5),
+        )
+        await session.commit()
+
+        assert replay == first
+        assert first.state.value == "closed"
+        assert first.consecutive_transient_failures == 1
+        row = (
+            (
+                await session.execute(
+                    select(agent_provider_http_attempts_table).where(
+                        agent_provider_http_attempts_table.c.id == str(reservation_id)
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        assert row["circuit_outcome"] == "transient_failure"
+        assert row["circuit_outcome_recorded_at"] is not None
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_concurrent_duplicate_transient_outcome_is_applied_once(
+    tmp_path: Path,
+) -> None:
+    engine, sessions, permit, reservation_id = await _reserved_network_attempt(
+        tmp_path,
+        "outcome-transient-concurrent.db",
+    )
+    ready = 0
+    ready_lock = asyncio.Lock()
+    start = asyncio.Event()
+
+    async def record() -> tuple[str, int, int, int]:
+        nonlocal ready
+        async with sessions() as session:
+            async with ready_lock:
+                ready += 1
+                if ready == 2:
+                    start.set()
+            await start.wait()
+            state = await AgentOperationRepository(session).record_circuit_failure(
+                circuit_permit=permit,
+                reservation_id=reservation_id,
+                transient=True,
+                failure_threshold=2,
+                cooldown_seconds=30,
+                now=NOW + timedelta(seconds=4),
+            )
+            await session.commit()
+            return (
+                state.state.value,
+                state.consecutive_transient_failures,
+                state.generation,
+                state.version,
+            )
+
+    outcomes = await asyncio.gather(record(), record())
+    assert outcomes[0] == outcomes[1]
+    assert outcomes[0][0:2] == ("closed", 1)
+
+    async with sessions() as session:
+        state = (
+            (
+                await session.execute(
+                    select(agent_provider_circuit_state_table).where(
+                        agent_provider_circuit_state_table.c.provider_id == "aviasales_search"
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        attempt = (
+            (
+                await session.execute(
+                    select(agent_provider_http_attempts_table).where(
+                        agent_provider_http_attempts_table.c.id == str(reservation_id)
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        assert state["consecutive_transient_failures"] == 1
+        assert state["state"] == "closed"
+        assert attempt["circuit_outcome"] == "transient_failure"
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_duplicate_success_outcome_is_applied_once(
+    tmp_path: Path,
+) -> None:
+    engine, sessions, permit, reservation_id = await _reserved_network_attempt(
+        tmp_path,
+        "outcome-success-sequential.db",
+    )
+
+    async with sessions() as session:
+        repository = AgentOperationRepository(session)
+        first = await repository.record_circuit_success(
+            circuit_permit=permit,
+            reservation_id=reservation_id,
+            now=NOW + timedelta(seconds=4),
+        )
+        replay = await repository.record_circuit_success(
+            circuit_permit=permit,
+            reservation_id=reservation_id,
+            now=NOW + timedelta(seconds=5),
+        )
+        await session.commit()
+
+        assert replay == first
+        attempt = (
+            (
+                await session.execute(
+                    select(agent_provider_http_attempts_table).where(
+                        agent_provider_http_attempts_table.c.id == str(reservation_id)
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        assert attempt["circuit_outcome"] == "success"
+        assert attempt["circuit_outcome_recorded_at"] is not None
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("first_outcome", "second_outcome"),
+    (("success", "transient_failure"), ("transient_failure", "success")),
+)
+async def test_rereview_second_conflicting_circuit_outcome_is_rejected_without_secret_leak(
+    tmp_path: Path,
+    first_outcome: str,
+    second_outcome: str,
+) -> None:
+    engine, sessions, permit, reservation_id = await _reserved_network_attempt(
+        tmp_path,
+        f"outcome-conflict-{first_outcome}.db",
+    )
+
+    async with sessions() as session:
+        repository = AgentOperationRepository(session)
+        if first_outcome == "success":
+            await repository.record_circuit_success(
+                circuit_permit=permit,
+                reservation_id=reservation_id,
+                now=NOW + timedelta(seconds=4),
+            )
+        else:
+            await repository.record_circuit_failure(
+                circuit_permit=permit,
+                reservation_id=reservation_id,
+                transient=True,
+                failure_threshold=2,
+                cooldown_seconds=30,
+                now=NOW + timedelta(seconds=4),
+            )
+
+        with pytest.raises(AgentOperationConflict) as conflict:
+            if second_outcome == "success":
+                await repository.record_circuit_success(
+                    circuit_permit=permit,
+                    reservation_id=reservation_id,
+                    now=NOW + timedelta(seconds=5),
+                )
+            else:
+                await repository.record_circuit_failure(
+                    circuit_permit=permit,
+                    reservation_id=reservation_id,
+                    transient=True,
+                    failure_threshold=2,
+                    cooldown_seconds=30,
+                    now=NOW + timedelta(seconds=5),
+                )
+        assert conflict.value.code == "agent_circuit_outcome_conflict"
+        assert str(conflict.value) == "agent_circuit_outcome_conflict"
+        assert permit.token not in repr(conflict.value)
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_non_transient_failure_is_persisted_without_opening_circuit(
+    tmp_path: Path,
+) -> None:
+    engine, sessions, permit, reservation_id = await _reserved_network_attempt(
+        tmp_path,
+        "outcome-non-transient.db",
+    )
+
+    async with sessions() as session:
+        state = await AgentOperationRepository(session).record_circuit_failure(
+            circuit_permit=permit,
+            reservation_id=reservation_id,
+            transient=False,
+            failure_threshold=1,
+            cooldown_seconds=30,
+            now=NOW + timedelta(seconds=4),
+        )
+        await session.commit()
+        attempt = (
+            (
+                await session.execute(
+                    select(agent_provider_http_attempts_table).where(
+                        agent_provider_http_attempts_table.c.id == str(reservation_id)
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+
+        assert state.state.value == "closed"
+        assert state.consecutive_transient_failures == 0
+        assert attempt["circuit_outcome"] == "non_transient_failure"
+        assert attempt["circuit_outcome_recorded_at"] is not None
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_half_open_success_replay_survives_its_own_generation_change(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "outcome-half-open-replay.db")
+    await _seed_run_and_stage(sessions, logical_budget=2, http_budget=2)
+    probe_id = UUID("88888888-7777-7777-7777-777777777777")
+    async with sessions() as session:
+        scheduler = OperationScheduler(AgentOperationRepository(session))
+        await scheduler.materialize(_operation_spec())
+        await scheduler.materialize(
+            _operation_spec(
+                operation_id=probe_id,
+                immutable_input={"origin": "LED", "destination": "ORY"},
+                logical_input={"origin": "LED", "destination": "ORY"},
+            )
+        )
+        first = await AgentOperationRepository(session).claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-open",
+            now=NOW + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+        await session.commit()
+        assert first is not None and first.operation.id == OPERATION_ID
+
+    opening_permit = await _issue_permit(
+        sessions,
+        operation_id=OPERATION_ID,
+        worker_id="worker-open",
+        now=NOW + timedelta(seconds=2),
+    )
+    async with sessions() as session:
+        repository = AgentOperationRepository(session)
+        opening = await repository.reserve_http_attempt(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            worker_id="worker-open",
+            provider_id="aviasales_search",
+            attempt_kind=AttemptKind.START,
+            provider_rpm=20,
+            now=NOW + timedelta(seconds=3),
+            circuit_permit=opening_permit,
+        )
+        assert opening.reservation_id is not None
+        await repository.record_circuit_failure(
+            circuit_permit=opening_permit,
+            reservation_id=opening.reservation_id,
+            transient=True,
+            failure_threshold=1,
+            cooldown_seconds=5,
+            now=NOW + timedelta(seconds=4),
+        )
+        await repository.mark_operation_failed(
+            household_id=HOUSEHOLD_ID,
+            operation_id=OPERATION_ID,
+            worker_id="worker-open",
+            error_code="provider_network",
+            now=NOW + timedelta(seconds=4),
+        )
+        await session.commit()
+
+    await _lease_operation(
+        sessions,
+        operation_id=probe_id,
+        worker_id="worker-probe",
+        now=NOW + timedelta(seconds=10),
+    )
+    probe_permit = await _issue_permit(
+        sessions,
+        operation_id=probe_id,
+        worker_id="worker-probe",
+        now=NOW + timedelta(seconds=11),
+        expected_status=CircuitPermitStatus.HALF_OPEN_PROBE,
+    )
+    async with sessions() as session:
+        repository = AgentOperationRepository(session)
+        reservation = await repository.reserve_http_attempt(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            operation_id=probe_id,
+            worker_id="worker-probe",
+            provider_id="aviasales_search",
+            attempt_kind=AttemptKind.START,
+            provider_rpm=20,
+            now=NOW + timedelta(seconds=12),
+            circuit_permit=probe_permit,
+        )
+        assert reservation.reservation_id is not None
+        closed = await repository.record_circuit_success(
+            circuit_permit=probe_permit,
+            reservation_id=reservation.reservation_id,
+            now=NOW + timedelta(seconds=13),
+        )
+        replay = await repository.record_circuit_success(
+            circuit_permit=probe_permit,
+            reservation_id=reservation.reservation_id,
+            now=NOW + timedelta(seconds=14),
+        )
+        assert replay == closed
+        assert closed.state.value == "closed"
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_calendar_result_requires_source_provider_and_accepts_owner(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "calendar-result-provider.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=1)
+    calendar_input = {
+        "origin": "LED",
+        "destination": "CDG",
+        "departure_date": "2026-09-01",
+    }
+    async with sessions() as session:
+        repository = AgentOperationRepository(session)
+        operation = await OperationScheduler(repository).materialize(
+            _operation_spec(
+                kind=AgentOperationKind.CALENDAR_SEARCH,
+                immutable_input=calendar_input,
+                logical_input=calendar_input,
+            )
+        )
+        lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-calendar",
+            now=NOW + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+        assert lease is not None and lease.operation.id == operation.id
+        wrong = await AgentEvidenceRepository(session).append_discovery_signal(
+            _discovery_result(
+                id_value=UUID("dddddddd-dddd-dddd-dddd-dddddddddddd"),
+                provider_id="other_provider",
+                fingerprint="sha256:" + "d" * 64,
+            )
+        )
+        owned = await AgentEvidenceRepository(session).append_discovery_signal(_discovery_result())
+
+        with pytest.raises(AgentOperationConflict) as mismatch:
+            await repository.mark_operation_succeeded(
+                household_id=HOUSEHOLD_ID,
+                operation_id=operation.id,
+                worker_id="worker-calendar",
+                result_type=AgentOperationResultType.DISCOVERY_SIGNAL,
+                result_id=wrong.id,
+                now=NOW + timedelta(seconds=2),
+            )
+        assert mismatch.value.code == "agent_operation_result_not_found"
+
+        completed = await repository.mark_operation_succeeded(
+            household_id=HOUSEHOLD_ID,
+            operation_id=operation.id,
+            worker_id="worker-calendar",
+            result_type=AgentOperationResultType.DISCOVERY_SIGNAL,
+            result_id=owned.id,
+            now=NOW + timedelta(seconds=2),
+        )
+        assert completed.result_id == owned.id
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_exact_poll_result_requires_source_provider_and_accepts_owner(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "exact-result-provider.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=2)
+    poll_id = UUID("88888888-7777-7777-7777-777777777777")
+    workflow = {"origin": "LED", "destination": "CDG", "departure_date": "2026-09-01"}
+    async with sessions() as session:
+        repository = AgentOperationRepository(session)
+        scheduler = OperationScheduler(repository)
+        root = await scheduler.materialize(_operation_spec(logical_input=workflow))
+        poll = await scheduler.materialize(
+            replace(
+                _operation_spec(
+                    operation_id=poll_id,
+                    kind=AgentOperationKind.EXACT_POLL,
+                    immutable_input={**workflow, "poll_round": 1},
+                    logical_input=workflow,
+                    consumes_logical_unit=False,
+                ),
+                logical_root_operation_id=root.id,
+            )
+        )
+        root_lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-root",
+            now=NOW + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+        assert root_lease is not None and root_lease.operation.id == root.id
+        await repository.mark_operation_succeeded(
+            household_id=HOUSEHOLD_ID,
+            operation_id=root.id,
+            worker_id="worker-root",
+            result_type=AgentOperationResultType.OPERATION,
+            result_id=poll.id,
+            now=NOW + timedelta(seconds=2),
+        )
+        poll_lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-poll",
+            now=NOW + timedelta(seconds=3),
+            lease_seconds=30,
+        )
+        assert poll_lease is not None and poll_lease.operation.id == poll.id
+        wrong = await AgentEvidenceRepository(session).append_confirmed_evidence(
+            _confirmed_result(
+                id_value=UUID("dddddddd-eeee-eeee-eeee-eeeeeeeeeeee"),
+                provider_id="other_provider",
+                fingerprint="sha256:" + "d" * 64,
+            )
+        )
+        owned = await AgentEvidenceRepository(session).append_confirmed_evidence(
+            _confirmed_result()
+        )
+
+        with pytest.raises(AgentOperationConflict) as mismatch:
+            await repository.mark_operation_succeeded(
+                household_id=HOUSEHOLD_ID,
+                operation_id=poll.id,
+                worker_id="worker-poll",
+                result_type=AgentOperationResultType.CONFIRMED_OFFER,
+                result_id=wrong.id,
+                now=NOW + timedelta(seconds=4),
+            )
+        assert mismatch.value.code == "agent_operation_result_not_found"
+
+        completed = await repository.mark_operation_succeeded(
+            household_id=HOUSEHOLD_ID,
+            operation_id=poll.id,
+            worker_id="worker-poll",
+            result_type=AgentOperationResultType.CONFIRMED_OFFER,
+            result_id=owned.id,
+            now=NOW + timedelta(seconds=4),
+        )
+        assert completed.result_id == owned.id
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_composition_and_ranking_keep_cross_provider_aggregation(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "aggregation-cross-provider.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=1)
+    first_id = UUID("eeeeeeee-1111-1111-1111-111111111111")
+    second_id = UUID("eeeeeeee-2222-2222-2222-222222222222")
+    candidate_id = UUID("eeeeeeee-3333-3333-3333-333333333333")
+    ranking_id = UUID("eeeeeeee-4444-4444-4444-444444444444")
+    composition_id = UUID("11111111-7777-7777-7777-777777777777")
+    ranking_operation_id = UUID("22222222-7777-7777-7777-777777777777")
+
+    async with sessions() as session:
+        evidence_repository = AgentEvidenceRepository(session)
+        first = await evidence_repository.append_confirmed_evidence(
+            _confirmed_result(
+                id_value=first_id,
+                provider_id="aviasales_search",
+                fingerprint="sha256:" + "1" * 64,
+            )
+        )
+        second = await evidence_repository.append_confirmed_evidence(
+            _confirmed_result(
+                id_value=second_id,
+                provider_id="other_provider",
+                fingerprint="sha256:" + "2" * 64,
+            )
+        )
+        candidate = await evidence_repository.append_composed_candidate(
+            NewAgentComposedRouteCandidate(
+                id=candidate_id,
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                stage_id=STAGE_ID,
+                component_evidence_ids=(first.id, second.id),
+                observed_at=NOW,
+                passengers=1,
+                passenger_basis=PriceBasis.PROVIDER_SINGLE_ADULT_TICKET,
+                amount_minor=35_000,
+                currency="RUB",
+                itinerary_evidence={"components": [str(first.id), str(second.id)]},
+                protection_status=ProtectionStatus.UNKNOWN,
+                baggage_status=None,
+                transfer_status=None,
+                visa_status=None,
+                fingerprint="sha256:" + "3" * 64,
+                created_at=NOW,
+            )
+        )
+        ranking = await evidence_repository.create_ranking_snapshot(
+            NewAgentRankingSnapshot(
+                id=ranking_id,
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                confirmed_evidence_ids=(first.id, second.id),
+                composed_candidate_ids=(candidate.id,),
+                ranking={"ordered": [str(candidate.id)], "version": "rank-v1"},
+                fingerprint="sha256:" + "4" * 64,
+                created_at=NOW,
+            )
+        )
+        scheduler = OperationScheduler(AgentOperationRepository(session))
+        composition = await scheduler.materialize(
+            replace(
+                _operation_spec(
+                    operation_id=composition_id,
+                    kind=AgentOperationKind.COMPOSITION,
+                    immutable_input={"component_evidence_ids": [str(first.id), str(second.id)]},
+                    logical_input={"route": ["LED", "CDG"]},
+                    consumes_logical_unit=False,
+                ),
+                provider_id=None,
+                private_continuation=None,
+            )
+        )
+        ranking_operation = await scheduler.materialize(
+            replace(
+                _operation_spec(
+                    operation_id=ranking_operation_id,
+                    kind=AgentOperationKind.RANKING,
+                    immutable_input={"ranking_profile": "cheapest"},
+                    logical_input={"route": ["LED", "CDG"]},
+                    consumes_logical_unit=False,
+                ),
+                provider_id=None,
+                private_continuation=None,
+            )
+        )
+        composition_lease = await AgentOperationRepository(session).claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-composition",
+            now=NOW + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+        assert composition_lease is not None and composition_lease.operation.id == composition.id
+        await AgentOperationRepository(session).mark_operation_succeeded(
+            household_id=HOUSEHOLD_ID,
+            operation_id=composition.id,
+            worker_id="worker-composition",
+            result_type=AgentOperationResultType.COMPOSED_CANDIDATE,
+            result_id=candidate.id,
+            now=NOW + timedelta(seconds=2),
+        )
+        ranking_lease = await AgentOperationRepository(session).claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-ranking",
+            now=NOW + timedelta(seconds=3),
+            lease_seconds=30,
+        )
+        assert ranking_lease is not None and ranking_lease.operation.id == ranking_operation.id
+        completed = await AgentOperationRepository(session).mark_operation_succeeded(
+            household_id=HOUSEHOLD_ID,
+            operation_id=ranking_operation.id,
+            worker_id="worker-ranking",
+            result_type=AgentOperationResultType.RANKING_SNAPSHOT,
+            result_id=ranking.id,
+            now=NOW + timedelta(seconds=4),
+        )
+        assert completed.result_id == ranking.id
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_orphan_exact_poll_is_not_claimable(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "handoff-orphan.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=2)
+    async with sessions() as session:
+        root, (poll,) = await _materialize_exact_chain(
+            session,
+            (UUID("88888888-7777-7777-7777-777777777777"),),
+        )
+        repository = AgentOperationRepository(session)
+        root_lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-root",
+            now=NOW + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+        assert root_lease is not None and root_lease.operation.id == root.id
+        orphan = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-orphan",
+            now=NOW + timedelta(seconds=2),
+            lease_seconds=30,
+        )
+        assert orphan is None
+        stored = await repository.get_operation(HOUSEHOLD_ID, poll.id)
+        assert stored is not None and stored.status is AgentOperationStatus.PENDING
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_handoff_binds_forward_start_poll_poll_chain(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "handoff-forward-chain.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=3)
+    poll_ids = (
+        UUID("88888888-7777-7777-7777-777777777777"),
+        UUID("99999999-7777-7777-7777-777777777777"),
+    )
+    async with sessions() as session:
+        root, polls = await _materialize_exact_chain(session, poll_ids)
+        poll_one, poll_two = polls
+        repository = AgentOperationRepository(session)
+        root_lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-root",
+            now=NOW + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+        assert root_lease is not None and root_lease.operation.id == root.id
+        await repository.mark_operation_succeeded(
+            household_id=HOUSEHOLD_ID,
+            operation_id=root.id,
+            worker_id="worker-root",
+            result_type=AgentOperationResultType.OPERATION,
+            result_id=poll_one.id,
+            now=NOW + timedelta(seconds=2),
+        )
+        bound_one = await repository.get_operation(HOUSEHOLD_ID, poll_one.id)
+        assert bound_one is not None
+        assert bound_one.handoff_predecessor_operation_id == root.id
+
+        first_poll = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-poll-one",
+            now=NOW + timedelta(seconds=3),
+            lease_seconds=30,
+        )
+        assert first_poll is not None and first_poll.operation.id == poll_one.id
+        await repository.mark_operation_succeeded(
+            household_id=HOUSEHOLD_ID,
+            operation_id=poll_one.id,
+            worker_id="worker-poll-one",
+            result_type=AgentOperationResultType.OPERATION,
+            result_id=poll_two.id,
+            now=NOW + timedelta(seconds=4),
+        )
+        bound_two = await repository.get_operation(HOUSEHOLD_ID, poll_two.id)
+        assert bound_two is not None
+        assert bound_two.handoff_predecessor_operation_id == poll_one.id
+
+        second_poll = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-poll-two",
+            now=NOW + timedelta(seconds=5),
+            lease_seconds=30,
+        )
+        assert second_poll is not None and second_poll.operation.id == poll_two.id
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_handoff_rejects_self_and_cross_root_targets(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "handoff-self-cross-root.db")
+    await _seed_run_and_stage(sessions, logical_budget=2, http_budget=2)
+    other_root_id = UUID("88888888-7777-7777-7777-777777777777")
+    other_poll_id = UUID("99999999-7777-7777-7777-777777777777")
+    other_workflow = {"origin": "LED", "destination": "ORY", "departure_date": "2026-09-02"}
+    async with sessions() as session:
+        scheduler = OperationScheduler(AgentOperationRepository(session))
+        root = await scheduler.materialize(_operation_spec())
+        other_root = await scheduler.materialize(
+            _operation_spec(
+                operation_id=other_root_id,
+                immutable_input={**other_workflow, "phase": "start"},
+                logical_input=other_workflow,
+            )
+        )
+        other_poll = await scheduler.materialize(
+            replace(
+                _operation_spec(
+                    operation_id=other_poll_id,
+                    kind=AgentOperationKind.EXACT_POLL,
+                    immutable_input={**other_workflow, "poll_round": 1},
+                    logical_input=other_workflow,
+                    consumes_logical_unit=False,
+                ),
+                logical_root_operation_id=other_root.id,
+            )
+        )
+        repository = AgentOperationRepository(session)
+        lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-root",
+            now=NOW + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+        assert lease is not None and lease.operation.id == root.id
+        with pytest.raises(AgentOperationConflict) as self_reference:
+            await repository.mark_operation_succeeded(
+                household_id=HOUSEHOLD_ID,
+                operation_id=root.id,
+                worker_id="worker-root",
+                result_type=AgentOperationResultType.OPERATION,
+                result_id=root.id,
+                now=NOW + timedelta(seconds=2),
+            )
+        assert self_reference.value.code == "agent_operation_result_invalid"
+        with pytest.raises(AgentOperationConflict) as cross_root:
+            await repository.mark_operation_succeeded(
+                household_id=HOUSEHOLD_ID,
+                operation_id=root.id,
+                worker_id="worker-root",
+                result_type=AgentOperationResultType.OPERATION,
+                result_id=other_poll.id,
+                now=NOW + timedelta(seconds=2),
+            )
+        assert cross_root.value.code == "agent_operation_result_invalid"
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_handoff_rejects_backward_target_and_cycle(
+    tmp_path: Path,
+) -> None:
+    backward_engine, backward_sessions = await _session_factory(
+        tmp_path,
+        "handoff-backward.db",
+    )
+    await _seed_run_and_stage(backward_sessions, logical_budget=1, http_budget=2)
+    backward_poll_id = UUID("88888888-7777-7777-7777-777777777777")
+    workflow = {"origin": "LED", "destination": "CDG", "departure_date": "2026-09-01"}
+    async with backward_sessions() as session:
+        scheduler = OperationScheduler(AgentOperationRepository(session))
+        root = await scheduler.materialize(
+            replace(_operation_spec(logical_input=workflow), created_at=NOW + timedelta(seconds=1))
+        )
+        old_poll = await scheduler.materialize(
+            replace(
+                _operation_spec(
+                    operation_id=backward_poll_id,
+                    kind=AgentOperationKind.EXACT_POLL,
+                    immutable_input={**workflow, "poll_round": 1},
+                    logical_input=workflow,
+                    consumes_logical_unit=False,
+                ),
+                logical_root_operation_id=root.id,
+                created_at=NOW,
+            )
+        )
+        repository = AgentOperationRepository(session)
+        lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-backward",
+            now=NOW + timedelta(seconds=2),
+            lease_seconds=30,
+        )
+        assert lease is not None and lease.operation.id == root.id
+        with pytest.raises(AgentOperationConflict) as backward:
+            await repository.mark_operation_succeeded(
+                household_id=HOUSEHOLD_ID,
+                operation_id=root.id,
+                worker_id="worker-backward",
+                result_type=AgentOperationResultType.OPERATION,
+                result_id=old_poll.id,
+                now=NOW + timedelta(seconds=3),
+            )
+        assert backward.value.code == "agent_operation_handoff_conflict"
+    await backward_engine.dispose()
+
+    cycle_engine, cycle_sessions = await _session_factory(tmp_path, "handoff-cycle.db")
+    await _seed_run_and_stage(cycle_sessions, logical_budget=1, http_budget=3)
+    async with cycle_sessions() as session:
+        root, polls = await _materialize_exact_chain(
+            session,
+            (
+                UUID("88888888-7777-7777-7777-777777777777"),
+                UUID("99999999-7777-7777-7777-777777777777"),
+            ),
+        )
+        poll_one, poll_two = polls
+        repository = AgentOperationRepository(session)
+        root_lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-root",
+            now=NOW + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+        assert root_lease is not None
+        await repository.mark_operation_succeeded(
+            household_id=HOUSEHOLD_ID,
+            operation_id=root.id,
+            worker_id="worker-root",
+            result_type=AgentOperationResultType.OPERATION,
+            result_id=poll_one.id,
+            now=NOW + timedelta(seconds=2),
+        )
+        poll_one_lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-one",
+            now=NOW + timedelta(seconds=3),
+            lease_seconds=30,
+        )
+        assert poll_one_lease is not None
+        await repository.mark_operation_succeeded(
+            household_id=HOUSEHOLD_ID,
+            operation_id=poll_one.id,
+            worker_id="worker-one",
+            result_type=AgentOperationResultType.OPERATION,
+            result_id=poll_two.id,
+            now=NOW + timedelta(seconds=4),
+        )
+        poll_two_lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-two",
+            now=NOW + timedelta(seconds=5),
+            lease_seconds=30,
+        )
+        assert poll_two_lease is not None
+        with pytest.raises(AgentOperationConflict) as cycle:
+            await repository.mark_operation_succeeded(
+                household_id=HOUSEHOLD_ID,
+                operation_id=poll_two.id,
+                worker_id="worker-two",
+                result_type=AgentOperationResultType.OPERATION,
+                result_id=poll_one.id,
+                now=NOW + timedelta(seconds=6),
+            )
+        assert cycle.value.code == "agent_operation_handoff_conflict"
+
+    await cycle_engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("target_state", ("skipped", "leased", "retry_wait"))
+async def test_rereview_second_handoff_rejects_non_fresh_target(
+    tmp_path: Path,
+    target_state: str,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, f"handoff-target-{target_state}.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=2)
+    async with sessions() as session:
+        root, (poll,) = await _materialize_exact_chain(
+            session,
+            (UUID("88888888-7777-7777-7777-777777777777"),),
+        )
+        repository = AgentOperationRepository(session)
+        root_lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-root",
+            now=NOW + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+        assert root_lease is not None and root_lease.operation.id == root.id
+        if target_state == "skipped":
+            await repository.mark_operation_skipped(
+                household_id=HOUSEHOLD_ID,
+                operation_id=poll.id,
+                error_code="target_terminal",
+                now=NOW + timedelta(seconds=2),
+            )
+        elif target_state == "leased":
+            await session.execute(
+                update(agent_run_operations_table)
+                .where(agent_run_operations_table.c.id == str(poll.id))
+                .values(
+                    status=AgentOperationStatus.LEASED.value,
+                    lease_owner="other-worker",
+                    lease_expires_at=NOW + timedelta(seconds=30),
+                    attempt_count=1,
+                    updated_at=NOW + timedelta(seconds=2),
+                )
+            )
+        else:
+            await session.execute(
+                update(agent_run_operations_table)
+                .where(agent_run_operations_table.c.id == str(poll.id))
+                .values(
+                    status=AgentOperationStatus.RETRY_WAIT.value,
+                    next_retry_at=NOW + timedelta(seconds=30),
+                    attempt_count=1,
+                    error_code="provider_network",
+                    updated_at=NOW + timedelta(seconds=2),
+                )
+            )
+        with pytest.raises(AgentOperationConflict) as conflict:
+            await repository.mark_operation_succeeded(
+                household_id=HOUSEHOLD_ID,
+                operation_id=root.id,
+                worker_id="worker-root",
+                result_type=AgentOperationResultType.OPERATION,
+                result_id=poll.id,
+                now=NOW + timedelta(seconds=3),
+            )
+        assert conflict.value.code == "agent_operation_handoff_conflict"
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_concurrent_handoff_rejects_fan_in(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "handoff-fan-in.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=8)
+    poll_ids = tuple(
+        UUID(value)
+        for value in (
+            "81111111-7777-7777-7777-777777777777",
+            "82222222-7777-7777-7777-777777777777",
+            "83333333-7777-7777-7777-777777777777",
+            "84444444-7777-7777-7777-777777777777",
+            "85555555-7777-7777-7777-777777777777",
+        )
+    )
+    async with sessions() as session:
+        _root, polls = await _materialize_exact_chain(session, poll_ids)
+        predecessor_one, predecessor_two, source_one, source_two, _target = polls
+        for source, predecessor, worker in (
+            (source_one, predecessor_one, "worker-one"),
+            (source_two, predecessor_two, "worker-two"),
+        ):
+            await session.execute(
+                update(agent_run_operations_table)
+                .where(agent_run_operations_table.c.id == str(source.id))
+                .values(
+                    handoff_predecessor_operation_id=str(predecessor.id),
+                    status=AgentOperationStatus.LEASED.value,
+                    lease_owner=worker,
+                    lease_expires_at=NOW + timedelta(seconds=30),
+                    attempt_count=1,
+                    updated_at=NOW + timedelta(seconds=1),
+                )
+            )
+        await session.commit()
+
+    target_id = poll_ids[-1]
+    ready = 0
+    ready_lock = asyncio.Lock()
+    start = asyncio.Event()
+
+    async def bind(source_id: UUID, worker: str) -> str:
+        nonlocal ready
+        async with sessions() as session:
+            async with ready_lock:
+                ready += 1
+                if ready == 2:
+                    start.set()
+            await start.wait()
+            try:
+                await AgentOperationRepository(session).mark_operation_succeeded(
+                    household_id=HOUSEHOLD_ID,
+                    operation_id=source_id,
+                    worker_id=worker,
+                    result_type=AgentOperationResultType.OPERATION,
+                    result_id=target_id,
+                    now=NOW + timedelta(seconds=2),
+                )
+                await session.commit()
+                return "stored"
+            except AgentOperationConflict as error:
+                await session.rollback()
+                return f"conflict:{error.code}"
+
+    outcomes = await asyncio.gather(
+        bind(poll_ids[2], "worker-one"),
+        bind(poll_ids[3], "worker-two"),
+    )
+    assert outcomes.count("stored") == 1
+    assert outcomes.count("conflict:agent_operation_handoff_conflict") == 1
+    async with sessions() as session:
+        target = (
+            (
+                await session.execute(
+                    select(agent_run_operations_table).where(
+                        agent_run_operations_table.c.id == str(target_id)
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        assert target["handoff_predecessor_operation_id"] in {
+            str(poll_ids[2]),
+            str(poll_ids[3]),
+        }
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_concurrent_handoff_rejects_fan_out(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "handoff-fan-out.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=5)
+    poll_ids = tuple(
+        UUID(value)
+        for value in (
+            "81111111-7777-7777-7777-777777777777",
+            "82222222-7777-7777-7777-777777777777",
+            "83333333-7777-7777-7777-777777777777",
+            "84444444-7777-7777-7777-777777777777",
+        )
+    )
+    async with sessions() as session:
+        _root, polls = await _materialize_exact_chain(session, poll_ids)
+        predecessor, source, _first_target, _second_target = polls
+        await session.execute(
+            update(agent_run_operations_table)
+            .where(agent_run_operations_table.c.id == str(source.id))
+            .values(
+                handoff_predecessor_operation_id=str(predecessor.id),
+                status=AgentOperationStatus.LEASED.value,
+                lease_owner="worker-source",
+                lease_expires_at=NOW + timedelta(seconds=30),
+                attempt_count=1,
+                updated_at=NOW + timedelta(seconds=1),
+            )
+        )
+        await session.commit()
+
+    ready = 0
+    ready_lock = asyncio.Lock()
+    start = asyncio.Event()
+
+    async def bind(target_id: UUID) -> str:
+        nonlocal ready
+        async with sessions() as session:
+            async with ready_lock:
+                ready += 1
+                if ready == 2:
+                    start.set()
+            await start.wait()
+            try:
+                await AgentOperationRepository(session).mark_operation_succeeded(
+                    household_id=HOUSEHOLD_ID,
+                    operation_id=poll_ids[1],
+                    worker_id="worker-source",
+                    result_type=AgentOperationResultType.OPERATION,
+                    result_id=target_id,
+                    now=NOW + timedelta(seconds=2),
+                )
+                await session.commit()
+                return "stored"
+            except AgentOperationConflict as error:
+                await session.rollback()
+                return f"conflict:{error.code}"
+
+    outcomes = await asyncio.gather(bind(poll_ids[2]), bind(poll_ids[3]))
+    assert outcomes.count("stored") == 1
+    assert sum(outcome.startswith("conflict:") for outcome in outcomes) == 1
+    async with sessions() as session:
+        child_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(agent_run_operations_table)
+                .where(
+                    agent_run_operations_table.c.handoff_predecessor_operation_id
+                    == str(poll_ids[1])
+                )
+            )
+        ).scalar_one()
+        assert child_count == 1
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_equivalent_private_continuation_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "private-continuation-equal.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=1)
+    first_spec = replace(
+        _operation_spec(),
+        private_continuation={"search_id": "private-search", "cursor": 7},
+    )
+    replay_spec = replace(
+        first_spec,
+        id=UUID("88888888-7777-7777-7777-777777777777"),
+        private_continuation={"cursor": 7, "search_id": "private-search"},
+    )
+    async with sessions() as session:
+        scheduler = OperationScheduler(AgentOperationRepository(session))
+        first = await scheduler.materialize(first_spec)
+        replay = await scheduler.materialize(replay_spec)
+        assert replay.id == first.id
+        assert "private-search" not in repr(replay)
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("stored_continuation", "requested_continuation"),
+    (
+        (None, {"search_id": "private-object"}),
+        ({}, {"cursor": 1}),
+        ({"search_id": "private-first"}, {"search_id": "private-second"}),
+        ({"cursor": 1}, {"cursor": 2}),
+    ),
+    ids=("none-object", "empty-nonempty", "search-id", "cursor"),
+)
+async def test_rereview_second_private_continuation_drift_is_rejected_without_leak(
+    tmp_path: Path,
+    stored_continuation: dict[str, object] | None,
+    requested_continuation: dict[str, object] | None,
+) -> None:
+    case_name = "-".join(sorted((stored_continuation or requested_continuation or {}).keys()))
+    engine, sessions = await _session_factory(
+        tmp_path,
+        f"private-continuation-drift-{case_name}-{len(str(stored_continuation))}.db",
+    )
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=1)
+    first_spec = replace(_operation_spec(), private_continuation=stored_continuation)
+    replay_spec = replace(
+        first_spec,
+        id=UUID("88888888-7777-7777-7777-777777777777"),
+        private_continuation=requested_continuation,
+    )
+    async with sessions() as session:
+        scheduler = OperationScheduler(AgentOperationRepository(session))
+        await scheduler.materialize(first_spec)
+        with pytest.raises(AgentOperationConflict) as drift:
+            await scheduler.materialize(replay_spec)
+        assert drift.value.code == "agent_operation_private_continuation_conflict"
+        assert str(drift.value) == "agent_operation_private_continuation_conflict"
+        rendered = repr(drift.value)
+        for continuation in (stored_continuation, requested_continuation):
+            for value in (continuation or {}).values():
+                assert str(value) not in rendered
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_rereview_second_concurrent_private_continuation_drift_has_one_winner(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "private-continuation-concurrent.db")
+    await _seed_run_and_stage(sessions, logical_budget=2, http_budget=2)
+    specs = (
+        replace(_operation_spec(), private_continuation={"search_id": "private-alpha"}),
+        replace(
+            _operation_spec(operation_id=UUID("88888888-7777-7777-7777-777777777777")),
+            private_continuation={"search_id": "private-beta"},
+        ),
+    )
+    ready = 0
+    ready_lock = asyncio.Lock()
+    start = asyncio.Event()
+
+    async def materialize(spec: OperationSpec) -> str:
+        nonlocal ready
+        async with sessions() as session:
+            async with ready_lock:
+                ready += 1
+                if ready == 2:
+                    start.set()
+            await start.wait()
+            try:
+                await OperationScheduler(AgentOperationRepository(session)).materialize(spec)
+                await session.commit()
+                return "stored"
+            except AgentOperationConflict as error:
+                await session.rollback()
+                assert "private-alpha" not in repr(error)
+                assert "private-beta" not in repr(error)
+                return f"conflict:{error.code}"
+
+    outcomes = await asyncio.gather(*(materialize(spec) for spec in specs))
+    assert outcomes.count("stored") == 1
+    assert outcomes.count("conflict:agent_operation_private_continuation_conflict") == 1
+    async with sessions() as session:
+        assert (
+            await session.execute(select(func.count()).select_from(agent_run_operations_table))
+        ).scalar_one() == 1
+
+    await engine.dispose()
+
+
+async def _reserved_network_attempt(
+    tmp_path: Path,
+    filename: str,
+) -> tuple[
+    AsyncEngine,
+    async_sessionmaker[AsyncSession],
+    ServerPrivateCircuitPermit,
+    UUID,
+]:
+    engine, sessions = await _session_factory(tmp_path, filename)
+    await _seed_operation(sessions, logical_budget=1, http_budget=2)
+    await _lease_operation(
+        sessions,
+        worker_id="worker-outcome",
+        now=NOW + timedelta(seconds=1),
+    )
+    permit = await _issue_permit(
+        sessions,
+        operation_id=OPERATION_ID,
+        worker_id="worker-outcome",
+        now=NOW + timedelta(seconds=2),
+    )
+    async with sessions() as session:
+        reservation = await AgentOperationRepository(session).reserve_http_attempt(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            worker_id="worker-outcome",
+            provider_id="aviasales_search",
+            attempt_kind=AttemptKind.START,
+            provider_rpm=20,
+            now=NOW + timedelta(seconds=3),
+            circuit_permit=permit,
+        )
+        await session.commit()
+        assert reservation.reservation_id is not None
+        return engine, sessions, permit, reservation.reservation_id
+
+
+async def _materialize_exact_chain(
+    session: AsyncSession,
+    poll_ids: tuple[UUID, ...],
+) -> tuple[AgentRunOperationRecord, tuple[AgentRunOperationRecord, ...]]:
+    repository = AgentOperationRepository(session)
+    scheduler = OperationScheduler(repository)
+    workflow = {"origin": "LED", "destination": "CDG", "departure_date": "2026-09-01"}
+    root = await scheduler.materialize(_operation_spec(logical_input=workflow))
+    polls = []
+    for index, poll_id in enumerate(poll_ids, start=1):
+        polls.append(
+            await scheduler.materialize(
+                replace(
+                    _operation_spec(
+                        operation_id=poll_id,
+                        kind=AgentOperationKind.EXACT_POLL,
+                        immutable_input={**workflow, "poll_round": index},
+                        logical_input=workflow,
+                        consumes_logical_unit=False,
+                    ),
+                    logical_root_operation_id=root.id,
+                )
+            )
+        )
+    return root, tuple(polls)
+
+
 async def _session_factory(
     tmp_path: Path,
     filename: str,
@@ -2815,13 +4165,47 @@ def _operation_spec(
     )
 
 
-def _confirmed_result() -> NewAgentConfirmedOfferEvidence:
-    return NewAgentConfirmedOfferEvidence(
-        id=EVIDENCE_RESULT_ID,
+def _discovery_result(
+    *,
+    id_value: UUID = EVIDENCE_RESULT_ID,
+    provider_id: str = "aviasales_search",
+    fingerprint: str = "sha256:" + "c" * 64,
+) -> NewAgentDiscoverySignal:
+    return NewAgentDiscoverySignal(
+        id=id_value,
         household_id=HOUSEHOLD_ID,
         run_id=RUN_ID,
         stage_id=STAGE_ID,
-        provider_id="aviasales_search",
+        provider_id=provider_id,
+        origin="LED",
+        destination="CDG",
+        departure_date=date(2026, 9, 1),
+        return_date=None,
+        amount_minor=18_000,
+        currency="RUB",
+        passengers=1,
+        passenger_basis=PriceBasis.PROVIDER_SINGLE_ADULT_TICKET,
+        source_kind=DiscoverySource.CALENDAR,
+        freshness=Freshness.API_CACHED,
+        observed_at=NOW,
+        signal_evidence={"calendar_bucket": "2026-09"},
+        fingerprint=fingerprint,
+        created_at=NOW,
+    )
+
+
+def _confirmed_result(
+    *,
+    id_value: UUID = EVIDENCE_RESULT_ID,
+    provider_id: str = "aviasales_search",
+    fingerprint: str = "sha256:" + "e" * 64,
+) -> NewAgentConfirmedOfferEvidence:
+    return NewAgentConfirmedOfferEvidence(
+        id=id_value,
+        household_id=HOUSEHOLD_ID,
+        run_id=RUN_ID,
+        stage_id=STAGE_ID,
+        provider_id=provider_id,
         source="exact_search",
         observed_at=NOW,
         freshness=Freshness.LIVE_OBSERVED,
@@ -2834,7 +4218,7 @@ def _confirmed_result() -> NewAgentConfirmedOfferEvidence:
         baggage_status=None,
         transfer_status=None,
         visa_status=None,
-        fingerprint="sha256:" + "e" * 64,
+        fingerprint=fingerprint,
         created_at=NOW,
     )
 

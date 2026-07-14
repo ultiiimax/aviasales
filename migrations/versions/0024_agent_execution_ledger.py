@@ -124,6 +124,12 @@ def upgrade() -> None:
             sa.ForeignKey("agent_run_operations.id", ondelete="CASCADE"),
             nullable=True,
         ),
+        sa.Column(
+            "handoff_predecessor_operation_id",
+            sa.String(length=36),
+            sa.ForeignKey("agent_run_operations.id", ondelete="CASCADE"),
+            nullable=True,
+        ),
         sa.Column("consumes_logical_unit", sa.Boolean(), nullable=False),
         sa.Column("immutable_input_json", sa.Text(), nullable=False),
         sa.Column("private_continuation_json", sa.Text(), nullable=True),
@@ -166,13 +172,17 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "(operation_kind IN ('calendar_search', 'exact_start') "
-            "AND consumes_logical_unit = 1 AND logical_root_operation_id IS NULL) OR "
-            "(operation_kind = 'exact_poll' AND consumes_logical_unit = 0 "
+            "AND consumes_logical_unit IS TRUE AND logical_root_operation_id IS NULL) OR "
+            "(operation_kind = 'exact_poll' AND consumes_logical_unit IS FALSE "
             "AND logical_root_operation_id IS NOT NULL) OR "
             "(operation_kind IN ('scope_freeze', 'comparison', 'composition', "
-            "'ranking', 'analysis') AND consumes_logical_unit = 0 "
+            "'ranking', 'analysis') AND consumes_logical_unit IS FALSE "
             "AND logical_root_operation_id IS NULL)",
             name="ck_agent_run_operation_logical_shape",
+        ),
+        sa.CheckConstraint(
+            "operation_kind = 'exact_poll' OR handoff_predecessor_operation_id IS NULL",
+            name="ck_agent_run_operation_handoff_shape",
         ),
         sa.CheckConstraint(
             "status IN ('pending', 'leased', 'retry_wait', 'succeeded', 'failed', 'skipped')",
@@ -244,6 +254,14 @@ def upgrade() -> None:
         ["logical_root_operation_id"],
     )
     op.create_index(
+        "uq_agent_operation_handoff_predecessor",
+        "agent_run_operations",
+        ["handoff_predecessor_operation_id"],
+        unique=True,
+        sqlite_where=sa.text("handoff_predecessor_operation_id IS NOT NULL"),
+        postgresql_where=sa.text("handoff_predecessor_operation_id IS NOT NULL"),
+    )
+    op.create_index(
         "ix_agent_run_operations_provider_id",
         "agent_run_operations",
         ["provider_id"],
@@ -254,8 +272,8 @@ def upgrade() -> None:
         "agent_run_operations",
         ["run_id", "logical_operation_fingerprint"],
         unique=True,
-        sqlite_where=sa.text("consumes_logical_unit = 1"),
-        postgresql_where=sa.text("consumes_logical_unit = 1"),
+        sqlite_where=sa.text("consumes_logical_unit IS TRUE"),
+        postgresql_where=sa.text("consumes_logical_unit IS TRUE"),
     )
     op.create_index(
         "ix_agent_operation_claim",
@@ -291,6 +309,12 @@ def upgrade() -> None:
         sa.Column("circuit_permit_generation", sa.Integer(), nullable=False),
         sa.Column("circuit_permit_token_digest", sa.String(length=71), nullable=False),
         sa.Column("reserved_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("circuit_outcome", sa.String(length=32), nullable=True),
+        sa.Column(
+            "circuit_outcome_recorded_at",
+            sa.DateTime(timezone=True),
+            nullable=True,
+        ),
         sa.UniqueConstraint(
             "operation_id",
             "operation_attempt_number",
@@ -304,6 +328,12 @@ def upgrade() -> None:
             "operation_attempt_number > 0 AND circuit_permit_generation >= 0 "
             "AND length(circuit_permit_token_digest) = 71",
             name="ck_agent_provider_http_attempt_binding",
+        ),
+        sa.CheckConstraint(
+            "(circuit_outcome IS NULL AND circuit_outcome_recorded_at IS NULL) OR "
+            "(circuit_outcome IN ('success', 'transient_failure', "
+            "'non_transient_failure') AND circuit_outcome_recorded_at IS NOT NULL)",
+            name="ck_agent_provider_http_attempt_outcome",
         ),
     )
     op.create_index(

@@ -226,3 +226,108 @@ Warning audit: the full unit run had no failure and reported two third-party
 cleanup warnings in `test_deal_candidate_repository`; none originates in the
 Task 7 files or changes gate status. No provider network I/O was performed.
 Task 7 remains pending independent re-review and is not accepted by this report.
+
+## Second independent re-review fix RED evidence
+
+The five Important findings from the second independent review were translated
+into additive focused tests before any production or migration change. The
+first tests-only run from baseline `3b0fe4b` was:
+
+```text
+python -m pytest tests/unit/persistence/test_agent_operation_repository.py tests/unit/persistence/test_alembic_upgrade.py -k rereview_second -q
+
+24 failed, 2 passed, 74 deselected in 9.00s; exit code 1
+```
+
+The failures demonstrated repeated circuit mutations, missing persisted
+outcomes, accepted conflicting outcomes, stale half-open replay, cross-provider
+result attachment, executable orphan polls, absent predecessor binding and
+fan-in/fan-out protection, accepted continuation drift, missing outcome/handoff
+schema, and PostgreSQL boolean predicates compiled as `= 0/1`.
+
+The same run also exposed a tests-only fixture error: cursor values in two
+private-continuation case groups were strings, while the already reviewed typed
+contract requires non-negative integers. Those fixture values are corrected and
+a clean second RED is recorded below before production is touched.
+
+```text
+python -m pytest tests/unit/persistence/test_agent_operation_repository.py tests/unit/persistence/test_alembic_upgrade.py -k rereview_second -q
+
+23 failed, 3 passed, 74 deselected in 9.65s; exit code 1
+```
+
+All 23 failures now arise from the five missing product invariants; the three
+passing preservation cases prove canonical continuation equality, explicit
+self/cross-root rejection, and cross-provider composition/ranking aggregation.
+No provider network request was made.
+
+## Second independent re-review fix decisions
+
+- Migration 0024 remains the unreleased Task 7 migration. Its operation checks
+  and consuming-root partial index now use `IS TRUE` / `IS FALSE` in both Core
+  and migration metadata. The test executes the actual 0024 upgrade through an
+  offline PostgreSQL Alembic context and compiles the matching Core DDL.
+- Every HTTP reservation owns nullable `circuit_outcome` and
+  `circuit_outcome_recorded_at` fields under a paired-null/allowed-values check.
+  Outcome handling locks the reservation row on PostgreSQL and uses the existing
+  SQLite write boundary; state transition plus outcome CAS share one savepoint.
+  Identical replay returns without another state mutation, conflicting replay
+  raises `agent_circuit_outcome_conflict`, and non-transient failures are stored
+  without incrementing circuit counters.
+- Calendar discovery and exact-poll confirmation references include the source
+  operation provider in the ownership query. Composition and ranking remain
+  intentionally provider-neutral and aggregate evidence from multiple providers.
+- `handoff_predecessor_operation_id` is a nullable operation self-FK. A unique
+  partial index gives each predecessor at most one child; the target column plus
+  CAS gives each poll at most one predecessor. Exact polls are claimable only
+  after binding. Binding requires a fresh pending attempt-zero forward poll with
+  matching household/run/stage/provider/root/fingerprint and commits in the same
+  savepoint as source completion.
+- Materialization compares the stored server-private canonical continuation JSON
+  after all public fingerprint fields match. Exact equality, including reordered
+  JSON, reuses the operation; any `None`/empty/content drift raises
+  `agent_operation_private_continuation_conflict` without rendering either value.
+
+## Second independent re-review fix GREEN evidence
+
+The final dedicated re-review command is green after adding the explicit
+`retry_wait` target case:
+
+```text
+uv run pytest tests/unit/persistence/test_agent_operation_repository.py tests/unit/persistence/test_alembic_upgrade.py -k rereview_second -q
+
+27 passed, 74 deselected in 6.90s
+```
+
+The complete focused and adjacent gates are green:
+
+```text
+repository + migration final gate:                    101 passed in 24.04s
+Task 7 ledger/evidence/application/schema/pre-v1 gate: 160 passed in 33.26s
+Task 4-6 lifecycle/API/UI regression gate:             77 passed in 15.90s
+extended lifecycle run including run repository:       127 passed in 22.35s
+```
+
+The complete final gates are green:
+
+```text
+full unit suite:                 909 passed, 9 warnings in 111.04s
+separate integration suite:      4 passed in 3.65s
+actual 0024 PostgreSQL DDL test:  1 passed in 0.77s
+affected source mypy:             no issues in 2 source files
+global ruff format --check:       281 files already formatted
+global ruff check:                all checks passed
+git diff --check:                 clean
+```
+
+Warning audit: the unit suite reported two third-party `lxml` deprecation
+warnings and seven unrelated `aiosqlite` event-loop cleanup warnings in
+`test_household_watch_repository`; none originates in Task 7 files. A direct
+system-Python lifecycle invocation also stopped before collection because that
+interpreter lacks the project's optional `httpx2`; the required `uv run` command
+then passed. An intermediate `uv` re-review run exposed only a namespace-package
+test harness import (`26 passed, 1 harness failure`); loading the actual migration
+by absolute file path fixed the harness without changing production behavior.
+
+No provider network I/O was performed. Task 7 remains pending independent
+re-review and is not accepted by this report.

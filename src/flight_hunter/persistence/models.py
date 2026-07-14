@@ -780,6 +780,12 @@ agent_run_operations_table = Table(
         ForeignKey("agent_run_operations.id", ondelete="CASCADE"),
         nullable=True,
     ),
+    Column(
+        "handoff_predecessor_operation_id",
+        String(36),
+        ForeignKey("agent_run_operations.id", ondelete="CASCADE"),
+        nullable=True,
+    ),
     Column("consumes_logical_unit", Boolean, nullable=False),
     Column("immutable_input_json", Text, nullable=False),
     Column("private_continuation_json", Text, nullable=True),
@@ -822,13 +828,17 @@ agent_run_operations_table = Table(
     ),
     CheckConstraint(
         "(operation_kind IN ('calendar_search', 'exact_start') "
-        "AND consumes_logical_unit = 1 AND logical_root_operation_id IS NULL) OR "
-        "(operation_kind = 'exact_poll' AND consumes_logical_unit = 0 "
+        "AND consumes_logical_unit IS TRUE AND logical_root_operation_id IS NULL) OR "
+        "(operation_kind = 'exact_poll' AND consumes_logical_unit IS FALSE "
         "AND logical_root_operation_id IS NOT NULL) OR "
         "(operation_kind IN ('scope_freeze', 'comparison', 'composition', "
-        "'ranking', 'analysis') AND consumes_logical_unit = 0 "
+        "'ranking', 'analysis') AND consumes_logical_unit IS FALSE "
         "AND logical_root_operation_id IS NULL)",
         name="ck_agent_run_operation_logical_shape",
+    ),
+    CheckConstraint(
+        "operation_kind = 'exact_poll' OR handoff_predecessor_operation_id IS NULL",
+        name="ck_agent_run_operation_handoff_shape",
     ),
     CheckConstraint(
         "status IN ('pending', 'leased', 'retry_wait', 'succeeded', 'failed', 'skipped')",
@@ -893,12 +903,19 @@ Index(
     agent_run_operations_table.c.logical_root_operation_id,
 )
 Index(
+    "uq_agent_operation_handoff_predecessor",
+    agent_run_operations_table.c.handoff_predecessor_operation_id,
+    unique=True,
+    sqlite_where=text("handoff_predecessor_operation_id IS NOT NULL"),
+    postgresql_where=text("handoff_predecessor_operation_id IS NOT NULL"),
+)
+Index(
     "uq_agent_run_logical_root",
     agent_run_operations_table.c.run_id,
     agent_run_operations_table.c.logical_operation_fingerprint,
     unique=True,
-    sqlite_where=text("consumes_logical_unit = 1"),
-    postgresql_where=text("consumes_logical_unit = 1"),
+    sqlite_where=text("consumes_logical_unit IS TRUE"),
+    postgresql_where=text("consumes_logical_unit IS TRUE"),
 )
 Index(
     "ix_agent_operation_claim",
@@ -942,6 +959,8 @@ agent_provider_http_attempts_table = Table(
     Column("circuit_permit_generation", Integer, nullable=False),
     Column("circuit_permit_token_digest", String(71), nullable=False),
     Column("reserved_at", DateTime(timezone=True), nullable=False),
+    Column("circuit_outcome", String(32), nullable=True),
+    Column("circuit_outcome_recorded_at", DateTime(timezone=True), nullable=True),
     UniqueConstraint(
         "operation_id",
         "operation_attempt_number",
@@ -955,6 +974,12 @@ agent_provider_http_attempts_table = Table(
         "operation_attempt_number > 0 AND circuit_permit_generation >= 0 "
         "AND length(circuit_permit_token_digest) = 71",
         name="ck_agent_provider_http_attempt_binding",
+    ),
+    CheckConstraint(
+        "(circuit_outcome IS NULL AND circuit_outcome_recorded_at IS NULL) OR "
+        "(circuit_outcome IN ('success', 'transient_failure', "
+        "'non_transient_failure') AND circuit_outcome_recorded_at IS NOT NULL)",
+        name="ck_agent_provider_http_attempt_outcome",
     ),
 )
 

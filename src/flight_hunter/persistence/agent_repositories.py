@@ -385,6 +385,12 @@ class CircuitPermitMode(StrEnum):
     HALF_OPEN = "half_open"
 
 
+class CircuitOutcome(StrEnum):
+    SUCCESS = "success"
+    TRANSIENT_FAILURE = "transient_failure"
+    NON_TRANSIENT_FAILURE = "non_transient_failure"
+
+
 class AgentOperationError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
@@ -547,6 +553,7 @@ class AgentRunOperationRecord:
     operation_fingerprint: str
     logical_operation_fingerprint: str
     logical_root_operation_id: UUID | None
+    handoff_predecessor_operation_id: UUID | None
     consumes_logical_unit: bool
     immutable_input: Mapping[str, object]
     status: AgentOperationStatus
@@ -1710,13 +1717,21 @@ class AgentOperationRepository:
     ) -> AgentRunOperationRecord:
         immutable_input_json, private_continuation_json = _validate_new_operation(operation)
         await self._acquire_write_transaction()
-        existing = await self._get_operation_by_fingerprint(
+        existing_row = await self._get_operation_by_fingerprint(
             operation.household_id,
             operation.run_id,
             operation.operation_fingerprint,
         )
-        if existing is not None:
-            _require_materialization_match(existing, operation)
+        if existing_row is not None:
+            existing = _operation_record(existing_row)
+            _require_materialization_match(
+                existing,
+                operation,
+                existing_private_continuation_json=_optional_text(
+                    existing_row["private_continuation_json"]
+                ),
+                requested_private_continuation_json=private_continuation_json,
+            )
             return existing
         if not await self._run_allows_io(
             operation.household_id,
@@ -1738,8 +1753,23 @@ class AgentOperationRepository:
             )
             if logical_root is not None:
                 if logical_root.operation_fingerprint == operation.operation_fingerprint:
-                    _require_materialization_match(logical_root, operation)
-                    return logical_root
+                    logical_row = await self._get_operation_by_fingerprint(
+                        operation.household_id,
+                        operation.run_id,
+                        operation.operation_fingerprint,
+                    )
+                    if logical_row is None:
+                        raise AgentOperationConflict("agent_operation_fingerprint_conflict")
+                    existing = _operation_record(logical_row)
+                    _require_materialization_match(
+                        existing,
+                        operation,
+                        existing_private_continuation_json=_optional_text(
+                            logical_row["private_continuation_json"]
+                        ),
+                        requested_private_continuation_json=private_continuation_json,
+                    )
+                    return existing
                 raise AgentOperationConflict("agent_logical_operation_exists")
         elif operation.kind is AgentOperationKind.EXACT_POLL:
             if operation.logical_root_operation_id is None:
@@ -1789,6 +1819,7 @@ class AgentOperationRepository:
                             if operation.logical_root_operation_id is not None
                             else None
                         ),
+                        handoff_predecessor_operation_id=None,
                         consumes_logical_unit=operation.consumes_logical_unit,
                         immutable_input_json=immutable_input_json,
                         private_continuation_json=private_continuation_json,
@@ -1814,13 +1845,21 @@ class AgentOperationRepository:
                     )
                 )
         except IntegrityError:
-            existing = await self._get_operation_by_fingerprint(
+            existing_row = await self._get_operation_by_fingerprint(
                 operation.household_id,
                 operation.run_id,
                 operation.operation_fingerprint,
             )
-            if existing is not None:
-                _require_materialization_match(existing, operation)
+            if existing_row is not None:
+                existing = _operation_record(existing_row)
+                _require_materialization_match(
+                    existing,
+                    operation,
+                    existing_private_continuation_json=_optional_text(
+                        existing_row["private_continuation_json"]
+                    ),
+                    requested_private_continuation_json=private_continuation_json,
+                )
                 return existing
             logical_root = await self._get_logical_root(
                 operation.household_id,
@@ -2035,31 +2074,38 @@ class AgentOperationRepository:
         )
         if claimed is None:
             await self._raise_operation_transition_conflict(household_id, operation_id)
-        await self._validate_operation_result_reference(
-            cast(RowMapping, claimed),
-            normalized_result_type,
-            result_id,
-        )
-        result = await self._session.execute(
-            update(agent_run_operations_table)
-            .where(agent_run_operations_table.c.id == str(operation_id))
-            .where(agent_run_operations_table.c.household_id == str(household_id))
-            .where(agent_run_operations_table.c.status == AgentOperationStatus.LEASED.value)
-            .where(agent_run_operations_table.c.lease_owner == worker_id)
-            .where(agent_run_operations_table.c.lease_expires_at >= normalized_now)
-            .values(
-                status=AgentOperationStatus.SUCCEEDED.value,
-                lease_owner=None,
-                lease_expires_at=None,
-                next_retry_at=None,
-                result_type=normalized_result_type.value,
-                result_id=str(result_id),
-                error_code=None,
-                updated_at=normalized_now,
-                completed_at=normalized_now,
-            )
-        )
-        await self._require_operation_transition(result, household_id, operation_id)
+        try:
+            async with self._session.begin_nested():
+                await self._validate_operation_result_reference(
+                    cast(RowMapping, claimed),
+                    normalized_result_type,
+                    result_id,
+                    normalized_now,
+                )
+                result = await self._session.execute(
+                    update(agent_run_operations_table)
+                    .where(agent_run_operations_table.c.id == str(operation_id))
+                    .where(agent_run_operations_table.c.household_id == str(household_id))
+                    .where(agent_run_operations_table.c.status == AgentOperationStatus.LEASED.value)
+                    .where(agent_run_operations_table.c.lease_owner == worker_id)
+                    .where(agent_run_operations_table.c.lease_expires_at >= normalized_now)
+                    .values(
+                        status=AgentOperationStatus.SUCCEEDED.value,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        next_retry_at=None,
+                        result_type=normalized_result_type.value,
+                        result_id=str(result_id),
+                        error_code=None,
+                        updated_at=normalized_now,
+                        completed_at=normalized_now,
+                    )
+                )
+                await self._require_operation_transition(result, household_id, operation_id)
+        except IntegrityError:
+            if normalized_result_type is AgentOperationResultType.OPERATION:
+                raise AgentOperationConflict("agent_operation_handoff_conflict") from None
+            raise
         return await self._required_operation(household_id, operation_id)
 
     async def mark_operation_failed(
@@ -2290,6 +2336,8 @@ class AgentOperationRepository:
                         circuit_permit_generation=circuit_permit.generation,
                         circuit_permit_token_digest=permit_digest,
                         reserved_at=normalized_now,
+                        circuit_outcome=None,
+                        circuit_outcome_recorded_at=None,
                     )
                 )
                 operation_result = await self._session.execute(
@@ -2563,40 +2611,56 @@ class AgentOperationRepository:
             raise ValueError("cooldown_seconds must be positive")
         normalized_now = _utc_datetime(now)
         await self._acquire_write_transaction()
-        state = await self._validate_consumed_circuit_permit(
+        outcome = (
+            CircuitOutcome.TRANSIENT_FAILURE if transient else CircuitOutcome.NON_TRANSIENT_FAILURE
+        )
+        state, replayed = await self._prepare_circuit_outcome(
             circuit_permit,
             reservation_id,
+            outcome,
             normalized_now,
         )
-        if not transient:
+        if replayed:
             return _circuit_record(state)
-        failures = int(state["consecutive_transient_failures"]) + 1
-        state_value = AgentCircuitState(str(state["state"]))
-        should_open = state_value is not AgentCircuitState.CLOSED or failures >= failure_threshold
-        values: dict[str, object] = {
-            "consecutive_transient_failures": failures,
-            "version": agent_provider_circuit_state_table.c.version + 1,
-            "updated_at": normalized_now,
-        }
-        if should_open:
-            values.update(
-                state=AgentCircuitState.OPEN.value,
-                opened_at=normalized_now,
-                cooldown_until=normalized_now + timedelta(seconds=cooldown_seconds),
-                half_open_probe_operation_id=None,
-                half_open_probe_attempt_number=None,
-                half_open_probe_token_digest=None,
-                half_open_probe_expires_at=None,
-                generation=int(state["generation"]) + 1,
+        async with self._session.begin_nested():
+            if transient:
+                failures = int(state["consecutive_transient_failures"]) + 1
+                state_value = AgentCircuitState(str(state["state"]))
+                should_open = (
+                    state_value is not AgentCircuitState.CLOSED or failures >= failure_threshold
+                )
+                values: dict[str, object] = {
+                    "consecutive_transient_failures": failures,
+                    "version": agent_provider_circuit_state_table.c.version + 1,
+                    "updated_at": normalized_now,
+                }
+                if should_open:
+                    values.update(
+                        state=AgentCircuitState.OPEN.value,
+                        opened_at=normalized_now,
+                        cooldown_until=normalized_now + timedelta(seconds=cooldown_seconds),
+                        half_open_probe_operation_id=None,
+                        half_open_probe_attempt_number=None,
+                        half_open_probe_token_digest=None,
+                        half_open_probe_expires_at=None,
+                        generation=int(state["generation"]) + 1,
+                    )
+                result = await self._session.execute(
+                    update(agent_provider_circuit_state_table)
+                    .where(
+                        agent_provider_circuit_state_table.c.provider_id
+                        == circuit_permit.provider_id
+                    )
+                    .where(agent_provider_circuit_state_table.c.version == int(state["version"]))
+                    .values(**values)
+                )
+                if cast(CursorResult[Any], result).rowcount != 1:
+                    raise AgentOperationConflict("agent_circuit_permit_stale")
+            await self._persist_circuit_outcome(
+                reservation_id,
+                outcome,
+                normalized_now,
             )
-        result = await self._session.execute(
-            update(agent_provider_circuit_state_table)
-            .where(agent_provider_circuit_state_table.c.provider_id == circuit_permit.provider_id)
-            .where(agent_provider_circuit_state_table.c.version == int(state["version"]))
-            .values(**values)
-        )
-        if cast(CursorResult[Any], result).rowcount != 1:
-            raise AgentOperationConflict("agent_circuit_permit_stale")
         return await self._locked_circuit_state(circuit_permit.provider_id)
 
     async def _acquire_write_transaction(self) -> None:
@@ -2735,34 +2799,45 @@ class AgentOperationRepository:
             raise TypeError("reservation_id must be UUID")
         normalized_now = _utc_datetime(now)
         await self._acquire_write_transaction()
-        state = await self._validate_consumed_circuit_permit(
+        state, replayed = await self._prepare_circuit_outcome(
             circuit_permit,
             reservation_id,
+            CircuitOutcome.SUCCESS,
             normalized_now,
         )
+        if replayed:
+            return _circuit_record(state)
         generation = int(state["generation"])
         if CircuitPermitMode(circuit_permit.mode) is CircuitPermitMode.HALF_OPEN:
             generation += 1
-        result = await self._session.execute(
-            update(agent_provider_circuit_state_table)
-            .where(agent_provider_circuit_state_table.c.provider_id == circuit_permit.provider_id)
-            .where(agent_provider_circuit_state_table.c.version == int(state["version"]))
-            .values(
-                state=AgentCircuitState.CLOSED.value,
-                consecutive_transient_failures=0,
-                opened_at=None,
-                cooldown_until=None,
-                half_open_probe_operation_id=None,
-                half_open_probe_attempt_number=None,
-                half_open_probe_token_digest=None,
-                half_open_probe_expires_at=None,
-                generation=generation,
-                version=agent_provider_circuit_state_table.c.version + 1,
-                updated_at=normalized_now,
+        async with self._session.begin_nested():
+            result = await self._session.execute(
+                update(agent_provider_circuit_state_table)
+                .where(
+                    agent_provider_circuit_state_table.c.provider_id == circuit_permit.provider_id
+                )
+                .where(agent_provider_circuit_state_table.c.version == int(state["version"]))
+                .values(
+                    state=AgentCircuitState.CLOSED.value,
+                    consecutive_transient_failures=0,
+                    opened_at=None,
+                    cooldown_until=None,
+                    half_open_probe_operation_id=None,
+                    half_open_probe_attempt_number=None,
+                    half_open_probe_token_digest=None,
+                    half_open_probe_expires_at=None,
+                    generation=generation,
+                    version=agent_provider_circuit_state_table.c.version + 1,
+                    updated_at=normalized_now,
+                )
             )
-        )
-        if cast(CursorResult[Any], result).rowcount != 1:
-            raise AgentOperationConflict("agent_circuit_permit_stale")
+            if cast(CursorResult[Any], result).rowcount != 1:
+                raise AgentOperationConflict("agent_circuit_permit_stale")
+            await self._persist_circuit_outcome(
+                reservation_id,
+                CircuitOutcome.SUCCESS,
+                normalized_now,
+            )
         return await self._locked_circuit_state(circuit_permit.provider_id)
 
     async def _require_run(self, household_id: UUID, run_id: UUID) -> None:
@@ -2882,42 +2957,40 @@ class AgentOperationRepository:
         state = await self._locked_circuit_row(permit.provider_id)
         _require_current_circuit_binding(state, permit, permit_digest, now=now)
 
-    async def _validate_consumed_circuit_permit(
+    async def _prepare_circuit_outcome(
         self,
         permit: ServerPrivateCircuitPermit,
         reservation_id: UUID,
+        desired_outcome: CircuitOutcome,
         now: datetime,
-    ) -> RowMapping:
+    ) -> tuple[RowMapping, bool]:
         permit_digest = _permit_digest(permit.token)
-        reservation = (
-            (
-                await self._session.execute(
-                    select(agent_provider_http_attempts_table)
-                    .where(agent_provider_http_attempts_table.c.id == str(reservation_id))
-                    .where(
-                        agent_provider_http_attempts_table.c.operation_id
-                        == str(permit.operation_id)
-                    )
-                    .where(agent_provider_http_attempts_table.c.provider_id == permit.provider_id)
-                    .where(
-                        agent_provider_http_attempts_table.c.operation_attempt_number
-                        == permit.operation_attempt_number
-                    )
-                    .where(
-                        agent_provider_http_attempts_table.c.circuit_permit_generation
-                        == permit.generation
-                    )
-                    .where(
-                        agent_provider_http_attempts_table.c.circuit_permit_token_digest
-                        == permit_digest
-                    )
-                )
+        reservation_statement = (
+            select(agent_provider_http_attempts_table)
+            .where(agent_provider_http_attempts_table.c.id == str(reservation_id))
+            .where(agent_provider_http_attempts_table.c.operation_id == str(permit.operation_id))
+            .where(agent_provider_http_attempts_table.c.provider_id == permit.provider_id)
+            .where(
+                agent_provider_http_attempts_table.c.operation_attempt_number
+                == permit.operation_attempt_number
             )
-            .mappings()
-            .one_or_none()
+            .where(
+                agent_provider_http_attempts_table.c.circuit_permit_generation == permit.generation
+            )
+            .where(
+                agent_provider_http_attempts_table.c.circuit_permit_token_digest == permit_digest
+            )
         )
+        if self._session.get_bind().dialect.name != "sqlite":
+            reservation_statement = reservation_statement.with_for_update()
+        reservation = (await self._session.execute(reservation_statement)).mappings().one_or_none()
         if reservation is None:
             raise AgentOperationConflict("agent_circuit_permit_stale")
+        stored_outcome = reservation["circuit_outcome"]
+        if stored_outcome is not None:
+            if CircuitOutcome(str(stored_outcome)) is not desired_outcome:
+                raise AgentOperationConflict("agent_circuit_outcome_conflict")
+            return await self._locked_circuit_row(permit.provider_id), True
         reserved_at = _aware_datetime(cast(datetime, reservation["reserved_at"]))
         if reserved_at > permit.expires_at or now < reserved_at:
             raise AgentOperationConflict("agent_circuit_permit_stale")
@@ -2946,7 +3019,26 @@ class AgentOperationRepository:
             raise AgentOperationConflict("agent_circuit_permit_stale")
         state = await self._locked_circuit_row(permit.provider_id)
         _require_current_circuit_binding(state, permit, permit_digest, now=None)
-        return state
+        return state, False
+
+    async def _persist_circuit_outcome(
+        self,
+        reservation_id: UUID,
+        outcome: CircuitOutcome,
+        recorded_at: datetime,
+    ) -> None:
+        result = await self._session.execute(
+            update(agent_provider_http_attempts_table)
+            .where(agent_provider_http_attempts_table.c.id == str(reservation_id))
+            .where(agent_provider_http_attempts_table.c.circuit_outcome.is_(None))
+            .where(agent_provider_http_attempts_table.c.circuit_outcome_recorded_at.is_(None))
+            .values(
+                circuit_outcome=outcome.value,
+                circuit_outcome_recorded_at=recorded_at,
+            )
+        )
+        if cast(CursorResult[Any], result).rowcount != 1:
+            raise AgentOperationConflict("agent_circuit_outcome_conflict")
 
     async def _locked_claimed_operation(
         self,
@@ -2981,6 +3073,7 @@ class AgentOperationRepository:
         source: RowMapping,
         result_type: AgentOperationResultType,
         result_id: UUID,
+        now: datetime,
     ) -> None:
         kind = AgentOperationKind(str(source["operation_kind"]))
         allowed = _OPERATION_RESULT_MATRIX[kind]
@@ -2990,7 +3083,7 @@ class AgentOperationRepository:
             raise TypeError("result_id must be UUID")
 
         if result_type is AgentOperationResultType.OPERATION:
-            await self._validate_operation_handoff(source, result_id)
+            await self._bind_operation_handoff(source, result_id, now)
             return
 
         table, stage_scoped = _RESULT_REFERENCE_TABLES[result_type]
@@ -3002,14 +3095,23 @@ class AgentOperationRepository:
         )
         if stage_scoped:
             statement = statement.where(table.c.stage_id == str(source["stage_id"]))
+        if (
+            kind is AgentOperationKind.CALENDAR_SEARCH
+            and result_type is AgentOperationResultType.DISCOVERY_SIGNAL
+        ) or (
+            kind is AgentOperationKind.EXACT_POLL
+            and result_type is AgentOperationResultType.CONFIRMED_OFFER
+        ):
+            statement = statement.where(table.c.provider_id == source["provider_id"])
         exists = (await self._session.execute(statement)).scalar_one_or_none()
         if exists is None:
             raise AgentOperationConflict("agent_operation_result_not_found")
 
-    async def _validate_operation_handoff(
+    async def _bind_operation_handoff(
         self,
         source: RowMapping,
         target_id: UUID,
+        now: datetime,
     ) -> None:
         if str(target_id) == str(source["id"]):
             raise AgentOperationConflict("agent_operation_result_invalid")
@@ -3020,6 +3122,8 @@ class AgentOperationRepository:
             .where(agent_run_operations_table.c.run_id == str(source["run_id"]))
             .where(agent_run_operations_table.c.stage_id == str(source["stage_id"]))
         )
+        if self._session.get_bind().dialect.name != "sqlite":
+            statement = statement.with_for_update()
         target = (await self._session.execute(statement)).mappings().one_or_none()
         if target is None:
             raise AgentOperationConflict("agent_operation_result_not_found")
@@ -3035,6 +3139,30 @@ class AgentOperationRepository:
             or target["logical_root_operation_id"] != expected_root_id
         ):
             raise AgentOperationConflict("agent_operation_result_invalid")
+        if (
+            target["status"] != AgentOperationStatus.PENDING.value
+            or int(target["attempt_count"]) != 0
+            or target["handoff_predecessor_operation_id"] is not None
+            or _aware_datetime(cast(datetime, target["created_at"]))
+            < _aware_datetime(cast(datetime, source["created_at"]))
+        ):
+            raise AgentOperationConflict("agent_operation_handoff_conflict")
+        target_created_at = _aware_datetime(cast(datetime, target["created_at"]))
+        bound_at = max(now, target_created_at)
+        bound = await self._session.execute(
+            update(agent_run_operations_table)
+            .where(agent_run_operations_table.c.id == str(target_id))
+            .where(agent_run_operations_table.c.status == AgentOperationStatus.PENDING.value)
+            .where(agent_run_operations_table.c.attempt_count == 0)
+            .where(agent_run_operations_table.c.handoff_predecessor_operation_id.is_(None))
+            .where(agent_run_operations_table.c.created_at >= source["created_at"])
+            .values(
+                handoff_predecessor_operation_id=str(source["id"]),
+                updated_at=bound_at,
+            )
+        )
+        if cast(CursorResult[Any], bound).rowcount != 1:
+            raise AgentOperationConflict("agent_operation_handoff_conflict")
 
     async def _get_stage_by_kind(
         self,
@@ -3061,8 +3189,8 @@ class AgentOperationRepository:
         household_id: UUID,
         run_id: UUID,
         fingerprint: str,
-    ) -> AgentRunOperationRecord | None:
-        row = (
+    ) -> RowMapping | None:
+        return (
             (
                 await self._session.execute(
                     select(agent_run_operations_table)
@@ -3074,7 +3202,6 @@ class AgentOperationRepository:
             .mappings()
             .one_or_none()
         )
-        return _operation_record(row) if row is not None else None
 
     async def _get_logical_root(
         self,
@@ -4523,6 +4650,9 @@ def _validate_fingerprint(value: str, field_name: str) -> None:
 def _require_materialization_match(
     existing: AgentRunOperationRecord,
     requested: NewAgentRunOperation,
+    *,
+    existing_private_continuation_json: str | None,
+    requested_private_continuation_json: str | None,
 ) -> None:
     if (
         existing.household_id != requested.household_id
@@ -4538,6 +4668,12 @@ def _require_materialization_match(
         or existing.max_attempts != requested.max_attempts
     ):
         raise AgentOperationConflict("agent_operation_fingerprint_conflict")
+    if existing_private_continuation_json != requested_private_continuation_json:
+        raise AgentOperationConflict("agent_operation_private_continuation_conflict")
+
+
+def _optional_text(value: object) -> str | None:
+    return str(value) if value is not None else None
 
 
 def _logical_root_matches_child(
@@ -4588,6 +4724,11 @@ def _operation_record(row: RowMapping) -> AgentRunOperationRecord:
             if row["logical_root_operation_id"] is not None
             else None
         ),
+        handoff_predecessor_operation_id=(
+            UUID(str(row["handoff_predecessor_operation_id"]))
+            if row["handoff_predecessor_operation_id"] is not None
+            else None
+        ),
         consumes_logical_unit=bool(row["consumes_logical_unit"]),
         immutable_input=_json_object(str(row["immutable_input_json"])),
         status=AgentOperationStatus(str(row["status"])),
@@ -4621,7 +4762,7 @@ def _private_operation_lease(row: RowMapping) -> ServerPrivateOperationLease:
 
 
 def _operation_claim_eligibility(now: datetime) -> Any:
-    return or_(
+    status_eligible = or_(
         agent_run_operations_table.c.status == AgentOperationStatus.PENDING.value,
         (
             (agent_run_operations_table.c.status == AgentOperationStatus.RETRY_WAIT.value)
@@ -4632,6 +4773,11 @@ def _operation_claim_eligibility(now: datetime) -> Any:
             & (agent_run_operations_table.c.lease_expires_at <= now)
         ),
     )
+    handoff_eligible = or_(
+        agent_run_operations_table.c.operation_kind != AgentOperationKind.EXACT_POLL.value,
+        agent_run_operations_table.c.handoff_predecessor_operation_id.is_not(None),
+    )
+    return status_eligible & handoff_eligible
 
 
 def _run_state_allows_io(row: Mapping[Any, Any], now: datetime) -> bool:
