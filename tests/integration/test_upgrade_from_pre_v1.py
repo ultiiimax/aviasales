@@ -161,6 +161,45 @@ def test_upgrade_from_immediate_pre_v1_preserves_local_data(tmp_path: Path) -> N
             connection.execute(text("SELECT status FROM deal_discovery_jobs")).scalar_one()
             == "queued"
         )
+        preserved_counts = {
+            table_name: connection.execute(
+                text(f'SELECT count(*) FROM "{table_name}"')
+            ).scalar_one()
+            for table_name in (
+                "households",
+                "users",
+                "household_memberships",
+                "auth_sessions",
+                "watches",
+                "browser_observation_jobs",
+                "worker_heartbeats",
+                "worker_control",
+                "deal_discovery_jobs",
+            )
+        }
+        assert preserved_counts == {
+            "households": 1,
+            "users": 1,
+            "household_memberships": 1,
+            "auth_sessions": 1,
+            "watches": 1,
+            "browser_observation_jobs": 1,
+            "worker_heartbeats": 1,
+            "worker_control": 1,
+            "deal_discovery_jobs": 1,
+        }
+        new_agent_tables = {
+            row[0]
+            for row in connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'agent_%'")
+            )
+        }
+        assert {
+            "agent_search_plans",
+            "agent_search_plan_revisions",
+            "agent_plan_execution_approvals",
+            "agent_plan_runs",
+        }.issubset(new_agent_tables)
         database_revision = connection.execute(text("SELECT version_num FROM alembic_version"))
         assert (
             database_revision.scalar_one() == ScriptDirectory.from_config(config).get_current_head()

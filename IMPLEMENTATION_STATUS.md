@@ -85,6 +85,14 @@ and global Ruff checks 267 files. The immediately preceding full-unit gate had
 coordinator direction. Independent final review accepted Task 3 with no
 Critical, Important or Minor findings at `655a069`.
 
+Task 4 is complete: forward-only migration 0023 and matching Core metadata now
+persist household-scoped immutable plan revisions, approvals, and runs without
+raw prompts. Canonical JSON snapshots and checksums, CAS successor creation,
+clone/execute idempotency, caller-owned execution transactions, approval
+consumption, exact latest-run ordering, and the active-run partial index are
+covered by real file-backed SQLite races and populated-0021 upgrade tests. The
+focused, migration, persistence, mypy, Ruff, unit, and integration gates pass.
+
 Implementation status on 2026-07-13: the user-approved design and reviewed
 implementation plan are complete. Production implementation now includes the
 verified provider-neutral contracts and frozen generic geographic scopes;

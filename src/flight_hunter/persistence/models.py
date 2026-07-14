@@ -1,6 +1,21 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, MetaData, String, Table
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import registry
 
 metadata = MetaData()
@@ -516,4 +531,147 @@ audit_events_table = Table(
     Column("entity_id", String(36), nullable=False, index=True),
     Column("summary", String(500), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+
+agent_search_plans_table = Table(
+    "agent_search_plans",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column("created_by_user_id", String(36), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+
+agent_search_plan_revisions_table = Table(
+    "agent_search_plan_revisions",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column(
+        "plan_id",
+        String(36),
+        ForeignKey("agent_search_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column("source_revision_id", String(36), nullable=True),
+    Column("revision_number", Integer, nullable=False),
+    Column("state", String(40), nullable=False, index=True),
+    Column("plan_json", Text, nullable=False),
+    Column("scope_snapshot_json", Text, nullable=False),
+    Column("capability_snapshot_json", Text, nullable=False),
+    Column("cost_model_snapshot_json", Text, nullable=False),
+    Column("parser_version", String(120), nullable=False),
+    Column("planner_version", String(120), nullable=False),
+    Column("estimated_calendar_searches", Integer, nullable=True),
+    Column("estimated_exact_searches", Integer, nullable=True),
+    Column("estimated_logical_operations", Integer, nullable=True),
+    Column("estimated_http_attempts", Integer, nullable=True),
+    Column("estimated_deadline_seconds", Integer, nullable=True),
+    Column("content_hash", String(71), nullable=False),
+    Column("clone_idempotency_key", String(240), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("superseded_at", DateTime(timezone=True), nullable=True),
+    Column("consumed_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint("plan_id", "revision_number", name="uq_agent_plan_revision_number"),
+    UniqueConstraint("plan_id", "content_hash", name="uq_agent_plan_revision_hash"),
+    CheckConstraint(
+        "state IN ('draft', 'awaiting_approval', 'superseded', 'consumed', 'expired')",
+        name="ck_agent_plan_revision_state",
+    ),
+)
+
+Index(
+    "ix_agent_plan_revision_clone_idempotency",
+    agent_search_plan_revisions_table.c.household_id,
+    agent_search_plan_revisions_table.c.clone_idempotency_key,
+    unique=True,
+    sqlite_where=agent_search_plan_revisions_table.c.clone_idempotency_key.is_not(None),
+    postgresql_where=agent_search_plan_revisions_table.c.clone_idempotency_key.is_not(None),
+)
+
+
+agent_plan_execution_approvals_table = Table(
+    "agent_plan_execution_approvals",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column(
+        "plan_id",
+        String(36),
+        ForeignKey("agent_search_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "revision_id",
+        String(36),
+        ForeignKey("agent_search_plan_revisions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("approved_by_user_id", String(36), nullable=False),
+    Column("approved_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("consumed_at", DateTime(timezone=True), nullable=True),
+    Column("run_id", String(36), nullable=True),
+    UniqueConstraint("run_id", name="uq_agent_approval_run"),
+)
+
+
+agent_plan_runs_table = Table(
+    "agent_plan_runs",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column(
+        "plan_id",
+        String(36),
+        ForeignKey("agent_search_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "revision_id",
+        String(36),
+        ForeignKey("agent_search_plan_revisions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "approval_id",
+        String(36),
+        ForeignKey("agent_plan_execution_approvals.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("execute_idempotency_key", String(240), nullable=False),
+    Column("status", String(40), nullable=False, index=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("deadline_at", DateTime(timezone=True), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("cancel_requested_at", DateTime(timezone=True), nullable=True),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    Column("error_code", String(80), nullable=True),
+    Column("error_message", String(500), nullable=True),
+    UniqueConstraint(
+        "household_id",
+        "execute_idempotency_key",
+        name="uq_agent_run_execute_idempotency",
+    ),
+    UniqueConstraint("approval_id", name="uq_agent_run_approval"),
+    CheckConstraint(
+        "status IN ('queued', 'running', 'cancel_requested', 'succeeded', 'failed', 'cancelled')",
+        name="ck_agent_plan_run_status",
+    ),
+)
+
+Index(
+    "ix_agent_plan_one_active_run",
+    agent_plan_runs_table.c.plan_id,
+    unique=True,
+    sqlite_where=text("status IN ('queued', 'running', 'cancel_requested')"),
+    postgresql_where=text("status IN ('queued', 'running', 'cancel_requested')"),
 )

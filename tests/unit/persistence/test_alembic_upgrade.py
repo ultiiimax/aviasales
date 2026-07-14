@@ -8,12 +8,23 @@ from alembic import command
 from alembic.config import Config
 
 from flight_hunter.ops.structured_logging import LOGGER_NAME
-from flight_hunter.persistence.models import airports_table
+from flight_hunter.persistence.models import agent_plan_runs_table, airports_table
 
 
 def test_airport_core_metadata_does_not_invent_commercial_defaults() -> None:
     assert airports_table.c.scheduled_service.default is None
     assert airports_table.c.commercial_provenance.default is None
+
+
+def test_agent_run_core_partial_index_has_only_active_statuses() -> None:
+    active_index = next(
+        index
+        for index in agent_plan_runs_table.indexes
+        if index.name == "ix_agent_plan_one_active_run"
+    )
+    predicate = str(active_index.dialect_options["sqlite"]["where"])
+
+    assert predicate == "status IN ('queued', 'running', 'cancel_requested')"
 
 
 def test_alembic_upgrade_does_not_disable_application_loggers(tmp_path: Path) -> None:
@@ -90,6 +101,28 @@ def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
         airport_columns = {
             row[1] for row in connection.execute("pragma table_info(airports)").fetchall()
         }
+        agent_revision_columns = {
+            row[1]
+            for row in connection.execute(
+                "pragma table_info(agent_search_plan_revisions)"
+            ).fetchall()
+        }
+        agent_revision_indexes = {
+            row[1]
+            for row in connection.execute(
+                "pragma index_list(agent_search_plan_revisions)"
+            ).fetchall()
+        }
+        agent_run_columns = {
+            row[1] for row in connection.execute("pragma table_info(agent_plan_runs)").fetchall()
+        }
+        agent_run_indexes = {
+            row[1] for row in connection.execute("pragma index_list(agent_plan_runs)").fetchall()
+        }
+        active_run_index_sql = connection.execute(
+            "select sql from sqlite_master where type = 'index' and name = ?",
+            ("ix_agent_plan_one_active_run",),
+        ).fetchone()
 
     assert {
         "watches",
@@ -118,6 +151,10 @@ def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
         "worker_heartbeats",
         "worker_control",
         "deal_discovery_jobs",
+        "agent_search_plans",
+        "agent_search_plan_revisions",
+        "agent_plan_execution_approvals",
+        "agent_plan_runs",
     }.issubset(tables)
     assert {
         "attempts",
@@ -209,6 +246,40 @@ def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
         "result_count",
     }.issubset(deal_discovery_job_columns)
     assert {"scheduled_service", "commercial_provenance"}.issubset(airport_columns)
+    assert {
+        "household_id",
+        "plan_id",
+        "revision_number",
+        "state",
+        "plan_json",
+        "scope_snapshot_json",
+        "capability_snapshot_json",
+        "cost_model_snapshot_json",
+        "parser_version",
+        "planner_version",
+        "estimated_logical_operations",
+        "estimated_http_attempts",
+        "content_hash",
+        "expires_at",
+        "superseded_at",
+        "consumed_at",
+        "clone_idempotency_key",
+    }.issubset(agent_revision_columns)
+    assert "raw_prompt" not in agent_revision_columns
+    assert "ix_agent_plan_revision_clone_idempotency" in agent_revision_indexes
+    assert {
+        "household_id",
+        "plan_id",
+        "revision_id",
+        "approval_id",
+        "execute_idempotency_key",
+        "status",
+        "created_at",
+        "deadline_at",
+    }.issubset(agent_run_columns)
+    assert "ix_agent_plan_one_active_run" in agent_run_indexes
+    assert active_run_index_sql is not None
+    assert "WHERE status IN ('queued', 'running', 'cancel_requested')" in active_run_index_sql[0]
 
 
 def test_airport_commercial_migration_backfills_legacy_rows(tmp_path: Path) -> None:
