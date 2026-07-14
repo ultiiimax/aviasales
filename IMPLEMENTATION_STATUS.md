@@ -125,22 +125,26 @@ tests and 4 integration tests pass, rendered web JavaScript parses, mypy checks
 114 source files, and Ruff format/check remain clean across 276 files. Final
 independent re-review accepted the slice at `8f7b39b` with no findings.
 
-Task 7 implementation and both independent-review fix cycles are complete and
-pending re-review; its acceptance checkbox remains unchecked. Unreleased
+Task 7 implementation and three independent-review fix cycles are complete and
+pending independent re-review; its acceptance checkbox remains unchecked. The
+third cycle reproduces the real stale-read/duplicate-INSERT race and now raises
+stable fingerprint or private-continuation conflicts only after leaving the
+`IntegrityError` handler. Public errors retain no SQL cause/context or formatted
+private parameters, and unknown INSERT collisions no longer escape raw. Unreleased
 migration 0024 and matching Core metadata now compile PostgreSQL-safe boolean
 predicates, persist one-shot circuit outcomes, and add a unique DB-backed
 predecessor link for forward exact-search handoffs. Duplicate circuit callbacks
 are idempotent while conflicting outcomes fail stably; provider-bound operations
 can attach only their own provider evidence. Orphan polls cannot execute, and a
 source completes atomically with binding one fresh forward poll. Canonical private
-continuation drift is rejected without entering public DTOs, reprs or errors.
-The second re-review suite passes 27/27, the combined Task 7 gate passes 160/160,
-Task 4-6 lifecycle/API/UI regressions pass 77/77, all 909 unit tests and 4
+continuation drift is rejected without entering public DTOs, reprs, errors, or
+formatted traceback chains. The traceback suite passes 3/3, the second re-review
+suite passes 27/27, the combined Task 7 gate passes 163/163, Task 4-6
+lifecycle/API/UI regressions pass 77/77, all 912 unit tests and 4
 integration tests pass, the actual 0024 PostgreSQL offline compilation passes,
 targeted mypy and global Ruff format/check are clean, and `git diff --check`
-passes. The warning audit found only two unrelated third-party `lxml` warnings
-and seven unrelated SQLite test-cleanup warnings. No provider call was made and
-Task 8 was not started.
+passes. The warning audit found only two unrelated third-party `lxml` warnings.
+No provider call was made and Task 8 was not started.
 
 Task 4 hardening is complete and accepted by independent review. Forward-only
 migration 0023 and matching Core metadata persist household-scoped immutable

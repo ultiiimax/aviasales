@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select, update
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -3852,6 +3854,198 @@ async def test_rereview_second_concurrent_private_continuation_drift_has_one_win
         ).scalar_one() == 1
 
     await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("public_mismatch", "expected_code"),
+    (
+        (False, "agent_operation_private_continuation_conflict"),
+        (True, "agent_operation_fingerprint_conflict"),
+    ),
+    ids=("private-conflict", "public-conflict"),
+)
+async def test_traceback_review_duplicate_exact_poll_conflict_is_secret_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    public_mismatch: bool,
+    expected_code: str,
+) -> None:
+    filename = (
+        "traceback-public-conflict.db" if public_mismatch else "traceback-private-conflict.db"
+    )
+    engine, sessions = await _session_factory(tmp_path, filename)
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=4)
+    stored_marker = f"stored-traceback-sentinel-{uuid4().hex}"
+    requested_marker = f"requested-traceback-sentinel-{uuid4().hex}"
+    workflow = {"origin": "LED", "destination": "CDG", "departure_date": "2026-09-01"}
+
+    async with sessions() as session:
+        scheduler = OperationScheduler(AgentOperationRepository(session))
+        root = await scheduler.materialize(_operation_spec(logical_input=workflow))
+        stored_spec = replace(
+            _operation_spec(
+                operation_id=UUID("81111111-9999-9999-9999-999999999999"),
+                kind=AgentOperationKind.EXACT_POLL,
+                immutable_input={**workflow, "poll_round": 1},
+                logical_input=workflow,
+                consumes_logical_unit=False,
+            ),
+            logical_root_operation_id=root.id,
+            private_continuation={"search_id": stored_marker, "cursor": 1},
+        )
+        await scheduler.materialize(stored_spec)
+        await session.commit()
+
+        repository = AgentOperationRepository(session)
+        real_lookup = repository._get_operation_by_fingerprint
+        lookup_calls = 0
+
+        async def stale_once(
+            household_id: UUID,
+            run_id: UUID,
+            fingerprint: str,
+        ) -> RowMapping | None:
+            nonlocal lookup_calls
+            lookup_calls += 1
+            if lookup_calls == 1:
+                return None
+            return await real_lookup(household_id, run_id, fingerprint)
+
+        monkeypatch.setattr(repository, "_get_operation_by_fingerprint", stale_once)
+        requested_spec = replace(
+            stored_spec,
+            id=UUID("82222222-9999-9999-9999-999999999999"),
+            max_attempts=(
+                stored_spec.max_attempts + 1 if public_mismatch else stored_spec.max_attempts
+            ),
+            private_continuation={"search_id": requested_marker, "cursor": 2},
+        )
+
+        with pytest.raises(AgentOperationConflict) as captured:
+            await OperationScheduler(repository).materialize(requested_spec)
+
+        assert lookup_calls == 2
+        assert captured.value.code == expected_code
+        _assert_secret_safe_materialization_diagnostics(
+            _materialization_error_secrecy_diagnostics(
+                captured.value,
+                stored_marker=stored_marker,
+                requested_marker=requested_marker,
+            )
+        )
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_traceback_review_unclassified_duplicate_insert_is_stable_and_secret_safe(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "traceback-unclassified-conflict.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=4)
+    stored_marker = f"stored-unclassified-sentinel-{uuid4().hex}"
+    requested_marker = f"requested-unclassified-sentinel-{uuid4().hex}"
+    workflow = {"origin": "LED", "destination": "CDG", "departure_date": "2026-09-01"}
+
+    async with sessions() as session:
+        scheduler = OperationScheduler(AgentOperationRepository(session))
+        root = await scheduler.materialize(_operation_spec(logical_input=workflow))
+        stored_spec = replace(
+            _operation_spec(
+                operation_id=UUID("83333333-9999-9999-9999-999999999999"),
+                kind=AgentOperationKind.EXACT_POLL,
+                immutable_input={**workflow, "poll_round": 1},
+                logical_input=workflow,
+                consumes_logical_unit=False,
+            ),
+            logical_root_operation_id=root.id,
+            private_continuation={"search_id": stored_marker, "cursor": 1},
+        )
+        await scheduler.materialize(stored_spec)
+        await session.commit()
+
+        collision_spec = replace(
+            stored_spec,
+            immutable_input={**workflow, "poll_round": 2},
+            private_continuation={"search_id": requested_marker, "cursor": 2},
+        )
+        caught: BaseException | None = None
+        try:
+            await scheduler.materialize(collision_spec)
+        except BaseException as error:
+            caught = error
+
+        if not isinstance(caught, AgentOperationConflict):
+            pytest.fail("unclassified operation INSERT collision escaped as a raw database error")
+        assert caught.code == "agent_operation_fingerprint_conflict"
+        _assert_secret_safe_materialization_diagnostics(
+            _materialization_error_secrecy_diagnostics(
+                caught,
+                stored_marker=stored_marker,
+                requested_marker=requested_marker,
+            )
+        )
+        row_count = (
+            await session.execute(select(func.count()).select_from(agent_run_operations_table))
+        ).scalar_one()
+        assert row_count == 2
+
+    await engine.dispose()
+
+
+def _materialization_error_secrecy_diagnostics(
+    error: AgentOperationConflict,
+    *,
+    stored_marker: str,
+    requested_marker: str,
+) -> tuple[bool, bool, bool, bool, bool]:
+    public_text_exposed = any(
+        stored_marker in surface or requested_marker in surface
+        for surface in (str(error), repr(error))
+    )
+    formatted = "".join(traceback.format_exception(error))
+    stored_exposed = stored_marker in formatted
+    requested_exposed = requested_marker in formatted
+    chain: list[BaseException] = []
+    pending = [error.__cause__, error.__context__]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        chain.append(current)
+        pending.extend((current.__cause__, current.__context__))
+    integrity_context = any(isinstance(item, IntegrityError) for item in chain)
+    return (
+        public_text_exposed,
+        stored_exposed,
+        requested_exposed,
+        bool(chain),
+        integrity_context,
+    )
+
+
+def _assert_secret_safe_materialization_diagnostics(
+    diagnostics: tuple[bool, bool, bool, bool, bool],
+) -> None:
+    (
+        public_text_exposed,
+        stored_exposed,
+        requested_exposed,
+        chain_present,
+        integrity_context,
+    ) = diagnostics
+    if public_text_exposed or stored_exposed or requested_exposed or chain_present:
+        pytest.fail(
+            "secret-safe materialization traceback invariant failed: "
+            f"public_text_exposed={public_text_exposed}, "
+            f"stored_exposed={stored_exposed}, "
+            f"requested_exposed={requested_exposed}, "
+            f"chain_present={chain_present}, "
+            f"integrity_context={integrity_context}"
+        )
 
 
 async def _reserved_network_attempt(

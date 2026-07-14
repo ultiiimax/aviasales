@@ -331,3 +331,58 @@ by absolute file path fixed the harness without changing production behavior.
 
 No provider network I/O was performed. Task 7 remains pending independent
 re-review and is not accepted by this report.
+
+## Traceback secrecy re-review RED evidence
+
+The traceback finding was reproduced from clean base `97f2ac2` with tests only;
+no production or migration file had changed. The focused command was:
+
+```text
+uv run pytest tests/unit/persistence/test_agent_operation_repository.py -k traceback_review -q
+
+3 failed, 90 deselected in 2.18s; exit code 1
+```
+
+Both the private-continuation and public-fingerprint stale-read cases exercised
+a real duplicate `exact_poll` INSERT followed by retry lookup. Their public error
+codes were already stable and ordinary `repr` was clean, but the formatted
+exception reported `requested_exposed=True`, `chain_present=True`, and
+`integrity_context=True`. The third case proved that an unclassified duplicate
+INSERT still escaped as a raw database error. Synthetic private sentinels were
+kept out of test names, assertion messages, and this report. No provider network
+request was made.
+
+## Traceback secrecy re-review fix decisions
+
+- The duplicate-INSERT handler now resolves the winning row and computes only a
+  non-sensitive conflict code. Idempotent reuse or a fresh stable conflict is
+  handled after the `except IntegrityError` block has ended, so the public error
+  cannot retain the database exception as implicit context.
+- Public fingerprint and private continuation precedence is shared by a pure
+  conflict-code classifier. The ordinary no-race path retains its existing
+  behavior, while the race path no longer raises from inside the SQL handler.
+- A duplicate INSERT with no matching fingerprint row and no competing logical
+  root is classified as `agent_operation_fingerprint_conflict`; raw SQL errors
+  and their parameter payloads do not cross the repository boundary.
+
+## Traceback secrecy re-review GREEN evidence
+
+The new real-collision regression and every required sequential gate are green:
+
+```text
+traceback regression:                    3 passed, 90 deselected in 1.53s
+dedicated second re-review suite:       27 passed, 77 deselected in 5.91s
+Task 7 combined gate:                  163 passed in 26.82s
+Task 4-6 lifecycle/API/UI gate:         77 passed in 14.46s
+full unit suite:                       912 passed, 2 warnings in 98.67s
+separate integration suite:             4 passed in 3.36s
+actual 0024 PostgreSQL DDL test:         1 passed in 0.64s
+affected source mypy:                    no issues in 1 source file
+global ruff format --check:            281 files already formatted
+global ruff check:                      all checks passed
+git diff --check:                       clean
+```
+
+The two unit warnings are unrelated third-party `lxml` deprecations. No provider
+network I/O was performed, Task 8 was not started, and Task 7 remains pending
+independent re-review rather than accepted by this report.

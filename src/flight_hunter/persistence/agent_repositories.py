@@ -1784,6 +1784,8 @@ class AgentOperationRepository:
             if not _logical_root_matches_child(logical_root, operation):
                 raise AgentOperationConflict("agent_logical_operation_root_mismatch")
 
+        collision_existing: AgentRunOperationRecord | None = None
+        collision_conflict_code: str | None = None
         try:
             async with self._session.begin_nested():
                 if operation.consumes_logical_unit:
@@ -1851,24 +1853,31 @@ class AgentOperationRepository:
                 operation.operation_fingerprint,
             )
             if existing_row is not None:
-                existing = _operation_record(existing_row)
-                _require_materialization_match(
-                    existing,
+                collision_existing = _operation_record(existing_row)
+                collision_conflict_code = _materialization_conflict_code(
+                    collision_existing,
                     operation,
                     existing_private_continuation_json=_optional_text(
                         existing_row["private_continuation_json"]
                     ),
                     requested_private_continuation_json=private_continuation_json,
                 )
-                return existing
-            logical_root = await self._get_logical_root(
-                operation.household_id,
-                operation.run_id,
-                operation.logical_operation_fingerprint,
-            )
-            if operation.consumes_logical_unit and logical_root is not None:
-                raise AgentOperationConflict("agent_logical_operation_exists") from None
-            raise
+            else:
+                logical_root = await self._get_logical_root(
+                    operation.household_id,
+                    operation.run_id,
+                    operation.logical_operation_fingerprint,
+                )
+                collision_conflict_code = (
+                    "agent_logical_operation_exists"
+                    if operation.consumes_logical_unit and logical_root is not None
+                    else "agent_operation_fingerprint_conflict"
+                )
+
+        if collision_existing is not None and collision_conflict_code is None:
+            return collision_existing
+        if collision_conflict_code is not None:
+            raise AgentOperationConflict(collision_conflict_code)
 
         stored = await self.get_operation(operation.household_id, operation.id)
         if stored is None:
@@ -4654,6 +4663,23 @@ def _require_materialization_match(
     existing_private_continuation_json: str | None,
     requested_private_continuation_json: str | None,
 ) -> None:
+    conflict_code = _materialization_conflict_code(
+        existing,
+        requested,
+        existing_private_continuation_json=existing_private_continuation_json,
+        requested_private_continuation_json=requested_private_continuation_json,
+    )
+    if conflict_code is not None:
+        raise AgentOperationConflict(conflict_code)
+
+
+def _materialization_conflict_code(
+    existing: AgentRunOperationRecord,
+    requested: NewAgentRunOperation,
+    *,
+    existing_private_continuation_json: str | None,
+    requested_private_continuation_json: str | None,
+) -> str | None:
     if (
         existing.household_id != requested.household_id
         or existing.run_id != requested.run_id
@@ -4667,9 +4693,10 @@ def _require_materialization_match(
         != canonical_operation_input_json(requested.immutable_input)
         or existing.max_attempts != requested.max_attempts
     ):
-        raise AgentOperationConflict("agent_operation_fingerprint_conflict")
+        return "agent_operation_fingerprint_conflict"
     if existing_private_continuation_json != requested_private_continuation_json:
-        raise AgentOperationConflict("agent_operation_private_continuation_conflict")
+        return "agent_operation_private_continuation_conflict"
+    return None
 
 
 def _optional_text(value: object) -> str | None:
