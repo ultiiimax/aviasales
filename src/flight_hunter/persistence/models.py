@@ -4,6 +4,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -672,6 +673,10 @@ agent_plan_runs_table = Table(
     Column("finished_at", DateTime(timezone=True), nullable=True),
     Column("error_code", String(80), nullable=True),
     Column("error_message", String(500), nullable=True),
+    Column("logical_operation_budget", Integer, nullable=False, server_default=text("0")),
+    Column("logical_operations_consumed", Integer, nullable=False, server_default=text("0")),
+    Column("http_attempt_budget", Integer, nullable=False, server_default=text("0")),
+    Column("http_attempts_consumed", Integer, nullable=False, server_default=text("0")),
     UniqueConstraint(
         "household_id",
         "execute_idempotency_key",
@@ -694,6 +699,13 @@ agent_plan_runs_table = Table(
         "finished_at >= cancel_requested_at)",
         name="ck_agent_plan_run_chronology",
     ),
+    CheckConstraint(
+        "logical_operation_budget >= 0 AND logical_operations_consumed >= 0 AND "
+        "logical_operations_consumed <= logical_operation_budget AND "
+        "http_attempt_budget >= 0 AND http_attempts_consumed >= 0 AND "
+        "http_attempts_consumed <= http_attempt_budget",
+        name="ck_agent_plan_run_budgets",
+    ),
 )
 
 Index(
@@ -702,4 +714,490 @@ Index(
     unique=True,
     sqlite_where=text("status IN ('queued', 'running', 'cancel_requested')"),
     postgresql_where=text("status IN ('queued', 'running', 'cancel_requested')"),
+)
+
+
+agent_plan_stages_table = Table(
+    "agent_plan_stages",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column(
+        "run_id",
+        String(36),
+        ForeignKey("agent_plan_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("stage_kind", String(40), nullable=False),
+    Column("status", String(40), nullable=False, index=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("run_id", "stage_kind", name="uq_agent_plan_stage_kind"),
+    CheckConstraint(
+        "stage_kind IN ('scope', 'calendar_discovery', 'exact_search', "
+        "'composition', 'ranking', 'analysis')",
+        name="ck_agent_plan_stage_kind",
+    ),
+    CheckConstraint(
+        "status IN ('pending', 'running', 'completed', 'partial', "
+        "'failed', 'skipped', 'cancelled')",
+        name="ck_agent_plan_stage_status",
+    ),
+    CheckConstraint(
+        "updated_at >= created_at",
+        name="ck_agent_plan_stage_chronology",
+    ),
+)
+
+
+agent_run_operations_table = Table(
+    "agent_run_operations",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column(
+        "run_id",
+        String(36),
+        ForeignKey("agent_plan_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "stage_id",
+        String(36),
+        ForeignKey("agent_plan_stages.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("provider_id", String(80), nullable=True, index=True),
+    Column("operation_kind", String(40), nullable=False),
+    Column("operation_fingerprint", String(71), nullable=False),
+    Column("logical_operation_fingerprint", String(71), nullable=False),
+    Column("consumes_logical_unit", Boolean, nullable=False),
+    Column("immutable_input_json", Text, nullable=False),
+    Column("private_continuation_json", Text, nullable=True),
+    Column("status", String(40), nullable=False, index=True),
+    Column("lease_owner", String(160), nullable=True),
+    Column("lease_expires_at", DateTime(timezone=True), nullable=True),
+    Column("attempt_count", Integer, nullable=False, server_default=text("0")),
+    Column("max_attempts", Integer, nullable=False),
+    Column("next_retry_at", DateTime(timezone=True), nullable=True),
+    Column("http_attempts_consumed", Integer, nullable=False, server_default=text("0")),
+    Column("result_type", String(40), nullable=True),
+    Column("result_id", String(36), nullable=True),
+    Column("error_code", String(80), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint(
+        "run_id",
+        "operation_fingerprint",
+        name="uq_agent_run_operation_fingerprint",
+    ),
+    CheckConstraint(
+        "operation_kind IN ('scope_freeze', 'calendar_search', 'exact_start', "
+        "'exact_poll', 'suggest_discovery', 'comparison', 'composition', "
+        "'ranking', 'analysis')",
+        name="ck_agent_run_operation_kind",
+    ),
+    CheckConstraint(
+        "operation_kind NOT IN ('calendar_search', 'exact_start', 'exact_poll', "
+        "'suggest_discovery') OR provider_id IS NOT NULL",
+        name="ck_agent_run_operation_provider",
+    ),
+    CheckConstraint(
+        "status IN ('pending', 'leased', 'retry_wait', 'succeeded', 'failed', 'skipped')",
+        name="ck_agent_run_operation_status",
+    ),
+    CheckConstraint(
+        "result_type IS NULL OR result_type IN ('scope_snapshot', 'discovery_signal', "
+        "'confirmed_offer', 'composed_candidate', 'ranking_snapshot')",
+        name="ck_agent_run_operation_result_type",
+    ),
+    CheckConstraint(
+        "attempt_count >= 0 AND max_attempts > 0 AND attempt_count <= max_attempts AND "
+        "http_attempts_consumed >= 0",
+        name="ck_agent_run_operation_counters",
+    ),
+    CheckConstraint(
+        "(status = 'leased' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL "
+        "AND next_retry_at IS NULL AND result_type IS NULL AND result_id IS NULL "
+        "AND error_code IS NULL AND completed_at IS NULL) OR "
+        "(status = 'retry_wait' AND lease_owner IS NULL AND lease_expires_at IS NULL "
+        "AND next_retry_at IS NOT NULL AND result_type IS NULL AND result_id IS NULL "
+        "AND error_code IS NOT NULL AND completed_at IS NULL) OR "
+        "(status = 'pending' AND lease_owner IS NULL AND lease_expires_at IS NULL "
+        "AND next_retry_at IS NULL AND result_type IS NULL AND result_id IS NULL "
+        "AND error_code IS NULL AND completed_at IS NULL) OR "
+        "(status = 'succeeded' AND lease_owner IS NULL AND lease_expires_at IS NULL "
+        "AND next_retry_at IS NULL AND completed_at IS NOT NULL "
+        "AND result_type IS NOT NULL AND result_id IS NOT NULL AND error_code IS NULL) OR "
+        "(status IN ('failed', 'skipped') AND lease_owner IS NULL "
+        "AND lease_expires_at IS NULL AND next_retry_at IS NULL "
+        "AND result_type IS NULL AND result_id IS NULL "
+        "AND completed_at IS NOT NULL AND error_code IS NOT NULL)",
+        name="ck_agent_run_operation_shape",
+    ),
+    CheckConstraint(
+        "updated_at >= created_at AND (completed_at IS NULL OR completed_at >= updated_at) "
+        "AND (lease_expires_at IS NULL OR lease_expires_at > updated_at) "
+        "AND (next_retry_at IS NULL OR next_retry_at > updated_at)",
+        name="ck_agent_run_operation_chronology",
+    ),
+)
+
+Index(
+    "uq_agent_run_logical_root",
+    agent_run_operations_table.c.run_id,
+    agent_run_operations_table.c.logical_operation_fingerprint,
+    unique=True,
+    sqlite_where=text("consumes_logical_unit = 1"),
+    postgresql_where=text("consumes_logical_unit = 1"),
+)
+Index(
+    "ix_agent_operation_claim",
+    agent_run_operations_table.c.status,
+    agent_run_operations_table.c.next_retry_at,
+    agent_run_operations_table.c.lease_expires_at,
+    agent_run_operations_table.c.created_at,
+)
+
+
+agent_provider_rate_locks_table = Table(
+    "agent_provider_rate_locks",
+    metadata,
+    Column("provider_id", String(80), primary_key=True),
+    Column("touched_at", DateTime(timezone=True), nullable=False),
+)
+
+
+agent_provider_http_attempts_table = Table(
+    "agent_provider_http_attempts",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column("provider_id", String(80), nullable=False),
+    Column(
+        "run_id",
+        String(36),
+        ForeignKey("agent_plan_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "operation_id",
+        String(36),
+        ForeignKey("agent_run_operations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("attempt_kind", String(20), nullable=False),
+    Column("reserved_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "attempt_kind IN ('start', 'poll', 'retry')",
+        name="ck_agent_provider_http_attempt_kind",
+    ),
+)
+
+Index(
+    "ix_agent_provider_http_attempt_provider_reserved",
+    agent_provider_http_attempts_table.c.provider_id,
+    agent_provider_http_attempts_table.c.reserved_at,
+)
+
+
+agent_provider_circuit_state_table = Table(
+    "agent_provider_circuit_state",
+    metadata,
+    Column("provider_id", String(80), primary_key=True),
+    Column("state", String(20), nullable=False),
+    Column("consecutive_transient_failures", Integer, nullable=False),
+    Column("opened_at", DateTime(timezone=True), nullable=True),
+    Column("cooldown_until", DateTime(timezone=True), nullable=True),
+    Column("half_open_probe_owner", String(160), nullable=True),
+    Column("half_open_probe_expires_at", DateTime(timezone=True), nullable=True),
+    Column("version", Integer, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "state IN ('closed', 'open', 'half_open')",
+        name="ck_agent_provider_circuit_state",
+    ),
+    CheckConstraint(
+        "consecutive_transient_failures >= 0 AND version >= 0",
+        name="ck_agent_provider_circuit_counters",
+    ),
+    CheckConstraint(
+        "(state = 'closed' AND opened_at IS NULL AND cooldown_until IS NULL "
+        "AND half_open_probe_owner IS NULL AND half_open_probe_expires_at IS NULL) OR "
+        "(state = 'open' AND opened_at IS NOT NULL AND cooldown_until IS NOT NULL "
+        "AND half_open_probe_owner IS NULL AND half_open_probe_expires_at IS NULL) OR "
+        "(state = 'half_open' AND opened_at IS NOT NULL AND cooldown_until IS NOT NULL "
+        "AND half_open_probe_owner IS NOT NULL AND half_open_probe_expires_at IS NOT NULL)",
+        name="ck_agent_provider_circuit_shape",
+    ),
+)
+
+
+agent_run_scope_snapshots_table = Table(
+    "agent_run_scope_snapshots",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column(
+        "run_id",
+        String(36),
+        ForeignKey("agent_plan_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("fingerprint", String(71), nullable=False),
+    Column("snapshot_json", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("run_id", "fingerprint", name="uq_agent_run_scope_fingerprint"),
+)
+
+
+agent_discovery_signals_table = Table(
+    "agent_discovery_signals",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column(
+        "run_id",
+        String(36),
+        ForeignKey("agent_plan_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "stage_id",
+        String(36),
+        ForeignKey("agent_plan_stages.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("provider_id", String(80), nullable=False),
+    Column("origin", String(3), nullable=False),
+    Column("destination", String(3), nullable=False),
+    Column("departure_date", Date, nullable=False),
+    Column("return_date", Date, nullable=True),
+    Column("amount_minor", Integer, nullable=True),
+    Column("currency", String(3), nullable=True),
+    Column("passengers", Integer, nullable=False),
+    Column("passenger_basis", String(50), nullable=False),
+    Column("source_kind", String(30), nullable=False),
+    Column("freshness", String(40), nullable=False),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("signal_evidence_json", Text, nullable=False),
+    Column("fingerprint", String(71), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("run_id", "fingerprint", name="uq_agent_discovery_fingerprint"),
+    CheckConstraint(
+        "(amount_minor IS NULL AND currency IS NULL) OR (amount_minor IS NOT NULL "
+        "AND amount_minor >= 0 AND currency IS NOT NULL AND length(currency) = 3 "
+        "AND currency = upper(currency))",
+        name="ck_agent_discovery_amount",
+    ),
+    CheckConstraint(
+        "length(trim(provider_id)) > 0 AND length(origin) = 3 AND origin = upper(origin) "
+        "AND length(destination) = 3 AND destination = upper(destination)",
+        name="ck_agent_discovery_identity",
+    ),
+    CheckConstraint("passengers > 0", name="ck_agent_discovery_passengers"),
+    CheckConstraint(
+        "passenger_basis IN ('total_for_passengers', 'provider_single_adult_ticket')",
+        name="ck_agent_discovery_passenger_basis",
+    ),
+    CheckConstraint(
+        "source_kind IN ('calendar', 'hot_offer', 'reference')",
+        name="ck_agent_discovery_source_kind",
+    ),
+    CheckConstraint(
+        "freshness IN ('live_observed', 'user_confirmed', 'browser_observed', "
+        "'api_cached', 'live', 'recent', 'cached', 'stale', 'unknown_external')",
+        name="ck_agent_discovery_freshness",
+    ),
+    CheckConstraint(
+        "return_date IS NULL OR return_date >= departure_date",
+        name="ck_agent_discovery_dates",
+    ),
+    CheckConstraint(
+        "created_at >= observed_at",
+        name="ck_agent_discovery_chronology",
+    ),
+)
+
+
+agent_confirmed_offer_evidence_table = Table(
+    "agent_confirmed_offer_evidence",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column(
+        "run_id",
+        String(36),
+        ForeignKey("agent_plan_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "stage_id",
+        String(36),
+        ForeignKey("agent_plan_stages.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("provider_id", String(80), nullable=False),
+    Column("source", String(40), nullable=False),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("freshness", String(40), nullable=False),
+    Column("passengers", Integer, nullable=False),
+    Column("passenger_basis", String(50), nullable=False),
+    Column("amount_minor", Integer, nullable=True),
+    Column("currency", String(3), nullable=True),
+    Column("itinerary_evidence_json", Text, nullable=False),
+    Column("protection_status", String(40), nullable=False),
+    Column("baggage_status", String(30), nullable=True),
+    Column("transfer_status", String(30), nullable=True),
+    Column("visa_status", String(30), nullable=True),
+    Column("fingerprint", String(71), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("run_id", "fingerprint", name="uq_agent_confirmed_evidence_fingerprint"),
+    CheckConstraint(
+        "passengers > 0 AND (amount_minor IS NULL OR amount_minor >= 0) AND "
+        "((amount_minor IS NULL AND currency IS NULL) OR "
+        "(amount_minor IS NOT NULL AND currency IS NOT NULL AND length(currency) = 3 "
+        "AND currency = upper(currency)))",
+        name="ck_agent_confirmed_evidence_money",
+    ),
+    CheckConstraint(
+        "length(trim(provider_id)) > 0 AND length(trim(source)) > 0",
+        name="ck_agent_confirmed_evidence_identity",
+    ),
+    CheckConstraint(
+        "created_at >= observed_at",
+        name="ck_agent_confirmed_evidence_chronology",
+    ),
+    CheckConstraint(
+        "passenger_basis IN ('total_for_passengers', 'provider_single_adult_ticket')",
+        name="ck_agent_confirmed_evidence_passenger_basis",
+    ),
+    CheckConstraint(
+        "protection_status IN ('explicitly_protected', 'self_transfer', 'unknown')",
+        name="ck_agent_confirmed_evidence_protection",
+    ),
+    CheckConstraint(
+        "freshness IN ('live_observed', 'user_confirmed', 'browser_observed', "
+        "'api_cached', 'live', 'recent', 'cached', 'stale', 'unknown_external')",
+        name="ck_agent_confirmed_evidence_freshness",
+    ),
+    CheckConstraint(
+        "baggage_status IS NULL OR baggage_status IN ('included', 'not_included', 'unknown')",
+        name="ck_agent_confirmed_evidence_baggage",
+    ),
+    CheckConstraint(
+        "transfer_status IS NULL OR transfer_status IN ('protected', 'self_transfer', 'unknown')",
+        name="ck_agent_confirmed_evidence_transfer",
+    ),
+    CheckConstraint(
+        "visa_status IS NULL OR visa_status IN ('required', 'not_required', 'unknown')",
+        name="ck_agent_confirmed_evidence_visa",
+    ),
+)
+
+
+agent_composed_route_candidates_table = Table(
+    "agent_composed_route_candidates",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column(
+        "run_id",
+        String(36),
+        ForeignKey("agent_plan_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "stage_id",
+        String(36),
+        ForeignKey("agent_plan_stages.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("component_evidence_ids_json", Text, nullable=False),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("passengers", Integer, nullable=False),
+    Column("passenger_basis", String(50), nullable=False),
+    Column("amount_minor", Integer, nullable=True),
+    Column("currency", String(3), nullable=True),
+    Column("itinerary_evidence_json", Text, nullable=False),
+    Column("protection_status", String(40), nullable=False),
+    Column("baggage_status", String(30), nullable=True),
+    Column("transfer_status", String(30), nullable=True),
+    Column("visa_status", String(30), nullable=True),
+    Column("fingerprint", String(71), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("run_id", "fingerprint", name="uq_agent_composed_candidate_fingerprint"),
+    CheckConstraint(
+        "passengers > 0 AND (amount_minor IS NULL OR amount_minor >= 0) AND "
+        "((amount_minor IS NULL AND currency IS NULL) OR "
+        "(amount_minor IS NOT NULL AND currency IS NOT NULL AND length(currency) = 3 "
+        "AND currency = upper(currency)))",
+        name="ck_agent_composed_candidate_money",
+    ),
+    CheckConstraint(
+        "component_evidence_ids_json <> '[]'",
+        name="ck_agent_composed_candidate_components",
+    ),
+    CheckConstraint(
+        "created_at >= observed_at",
+        name="ck_agent_composed_candidate_chronology",
+    ),
+    CheckConstraint(
+        "passenger_basis IN ('total_for_passengers', 'provider_single_adult_ticket')",
+        name="ck_agent_composed_candidate_passenger_basis",
+    ),
+    CheckConstraint(
+        "protection_status IN ('explicitly_protected', 'self_transfer', 'unknown')",
+        name="ck_agent_composed_candidate_protection",
+    ),
+    CheckConstraint(
+        "baggage_status IS NULL OR baggage_status IN ('included', 'not_included', 'unknown')",
+        name="ck_agent_composed_candidate_baggage",
+    ),
+    CheckConstraint(
+        "transfer_status IS NULL OR transfer_status IN ('protected', 'self_transfer', 'unknown')",
+        name="ck_agent_composed_candidate_transfer",
+    ),
+    CheckConstraint(
+        "visa_status IS NULL OR visa_status IN ('required', 'not_required', 'unknown')",
+        name="ck_agent_composed_candidate_visa",
+    ),
+)
+
+
+agent_ranking_snapshots_table = Table(
+    "agent_ranking_snapshots",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column(
+        "run_id",
+        String(36),
+        ForeignKey("agent_plan_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("confirmed_evidence_ids_json", Text, nullable=False),
+    Column("composed_candidate_ids_json", Text, nullable=False),
+    Column("ranking_json", Text, nullable=False),
+    Column("fingerprint", String(71), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("run_id", "fingerprint", name="uq_agent_ranking_fingerprint"),
+    CheckConstraint(
+        "confirmed_evidence_ids_json <> '[]' OR composed_candidate_ids_json <> '[]'",
+        name="ck_agent_ranking_references",
+    ),
 )

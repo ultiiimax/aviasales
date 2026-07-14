@@ -199,6 +199,16 @@ def test_upgrade_from_immediate_pre_v1_preserves_local_data(tmp_path: Path) -> N
             "agent_search_plan_revisions",
             "agent_plan_execution_approvals",
             "agent_plan_runs",
+            "agent_plan_stages",
+            "agent_run_operations",
+            "agent_provider_rate_locks",
+            "agent_provider_http_attempts",
+            "agent_provider_circuit_state",
+            "agent_run_scope_snapshots",
+            "agent_discovery_signals",
+            "agent_confirmed_offer_evidence",
+            "agent_composed_route_candidates",
+            "agent_ranking_snapshots",
         }.issubset(new_agent_tables)
         database_revision = connection.execute(text("SELECT version_num FROM alembic_version"))
         assert (

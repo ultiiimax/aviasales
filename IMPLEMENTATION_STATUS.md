@@ -125,6 +125,20 @@ tests and 4 integration tests pass, rendered web JavaScript parses, mypy checks
 114 source files, and Ruff format/check remain clean across 276 files. Final
 independent re-review accepted the slice at `8f7b39b` with no findings.
 
+Task 7 implementation is complete and pending independent review; its acceptance
+checkbox remains unchecked. Forward-only migration 0024 and matching Core
+metadata add the ten durable ledger/evidence tables and exact approved logical / HTTP
+budgets. Historical runs receive honest zero budgets, so upgrades cannot authorize
+new I/O. Household-scoped stages, operations, leases, worker-CAS reservations,
+global provider RPM, persistent circuit/half-open state, sanitized evidence,
+append-only composed candidates and idempotent ranking snapshots are implemented.
+Expired final-attempt leases recover terminally, inactive/deadline-expired runs
+cannot claim or reserve, and the 60-second RPM boundary is half-open. Public records
+structurally omit provider continuation state. Fresh focused tests pass 77/77,
+Task 4-6 regressions pass 114/114, all 826 unit tests and 4 integration tests pass,
+targeted mypy passes, and global Ruff format/check is clean across 281 files. No
+provider call was made and Task 8 was not started.
+
 Task 4 hardening is complete and accepted by independent review. Forward-only
 migration 0023 and matching Core metadata persist household-scoped immutable
 plan revisions, approval snapshots, and runs without raw prompts. The rejected
