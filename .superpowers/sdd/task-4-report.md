@@ -114,6 +114,7 @@ active-run, and successor race selection passed eight tests without a lock leak.
 - Full integration suite: `4 passed in 2.99s`.
 - Global format: `271 files already formatted`; global Ruff: `All checks passed`.
 - Global mypy: `Success: no issues found in 111 source files`.
+
 - `git diff --check`: clean.
 
 ## Second re-review hardening addendum (2026-07-14)
@@ -155,3 +156,25 @@ chronology checks.
 - Full integration suite: `4 passed in 3.31s`.
 - Global format: `271 files already formatted`; global Ruff: `All checks passed`.
 - Global mypy: `Success: no issues found in 111 source files`.
+
+## Final cancellation-chronology addendum (2026-07-14)
+
+The remaining Minor finding was reproduced test-first. With tests changed and production untouched,
+the exact focused repository/migration/pre-v1 upgrade command produced `4 failed, 77 passed in
+9.21s`: the repository accepted a cancellation request before the run start, a direct database
+write accepted the same invalid chronology, and the exact Core/migrated check definitions lacked
+the clause. A direct database equality case already passed.
+
+The running-to-cancel-requested compare-and-swap now requires
+`started_at <= cancel_requested_at`; queued cancellation remains valid because `started_at` is
+null. Core metadata and unreleased migration 0023 contain the exact matching clause
+`cancel_requested_at IS NULL OR started_at IS NULL OR cancel_requested_at >= started_at`.
+Repository and direct database tests reject a request one minute before start and accept equality.
+Migration 0022 remains unchanged. Task 4 remains pending final independent re-review.
+
+### Localized verification
+
+- Exact focused repository/migration/pre-v1 upgrade gate: `81 passed in 9.25s` (fresh pre-commit rerun).
+- Targeted Ruff format/check: clean.
+- Targeted mypy: `Success: no issues found in 2 source files`.
+- `git diff --check`: clean.

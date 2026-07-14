@@ -195,6 +195,8 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "(started_at IS NULL OR started_at >= created_at) AND "
             "(cancel_requested_at IS NULL OR cancel_requested_at >= created_at) AND "
+            "(cancel_requested_at IS NULL OR started_at IS NULL OR "
+            "cancel_requested_at >= started_at) AND "
             "(finished_at IS NULL OR finished_at >= created_at) AND "
             "(finished_at IS NULL OR started_at IS NULL OR finished_at >= started_at) AND "
             "(finished_at IS NULL OR cancel_requested_at IS NULL OR "

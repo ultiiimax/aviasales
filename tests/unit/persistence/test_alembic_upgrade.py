@@ -64,6 +64,8 @@ def test_agent_core_metadata_has_reviewed_checks_and_approval_snapshot() -> None
     assert run_checks["ck_agent_plan_run_chronology"] == (
         "(started_at IS NULL OR started_at >= created_at) AND "
         "(cancel_requested_at IS NULL OR cancel_requested_at >= created_at) AND "
+        "(cancel_requested_at IS NULL OR started_at IS NULL OR "
+        "cancel_requested_at >= started_at) AND "
         "(finished_at IS NULL OR finished_at >= created_at) AND "
         "(finished_at IS NULL OR started_at IS NULL OR finished_at >= started_at) AND "
         "(finished_at IS NULL OR cancel_requested_at IS NULL OR "
@@ -365,6 +367,8 @@ def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
     assert (
         "(started_at IS NULL OR started_at >= created_at) AND "
         "(cancel_requested_at IS NULL OR cancel_requested_at >= created_at) AND "
+        "(cancel_requested_at IS NULL OR started_at IS NULL OR "
+        "cancel_requested_at >= started_at) AND "
         "(finished_at IS NULL OR finished_at >= created_at) AND "
         "(finished_at IS NULL OR started_at IS NULL OR finished_at >= started_at) AND "
         "(finished_at IS NULL OR cancel_requested_at IS NULL OR "

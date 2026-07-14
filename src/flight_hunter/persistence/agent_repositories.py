@@ -796,6 +796,11 @@ class AgentRunRepository:
             statement = statement.where(
                 agent_plan_runs_table.c.cancel_requested_at.is_not(None)
             ).where(agent_plan_runs_table.c.cancel_requested_at <= normalized_changed_at)
+        elif status == "cancel_requested":
+            statement = statement.where(
+                (agent_plan_runs_table.c.started_at.is_(None))
+                | (agent_plan_runs_table.c.started_at <= normalized_changed_at)
+            )
 
         result = await self._session.execute(statement.values(**values))
         if cast(CursorResult[Any], result).rowcount != 1:

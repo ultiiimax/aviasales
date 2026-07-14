@@ -92,14 +92,18 @@ review findings are covered by immutable canonical approval evidence, UTC-only
 writes and reads, exact PostgreSQL/SQLite integrity classification, the reviewed
 run state machine, complete approval estimates, caller-owned rollback proofs,
 same-key concurrency tests, atomic chronology guards, and recursively immutable
-approval evidence. SQLite successor/execute writers acquire a local
+approval evidence. The final cancellation-chronology follow-up rejects a
+`running -> cancel_requested` transition before `started_at` in both the
+repository CAS and the matching Core/migration check while accepting equality.
+SQLite successor/execute writers acquire a local
 `BEGIN IMMEDIATE` only when no physical caller transaction exists. An already
 open SQLite savepoint is rejected before mutation with the stable
 `agent_sqlite_nested_transaction_unsupported` error; ordinary outer transactions
 and autobegin retain caller-owned rollback. PostgreSQL does not run this SQLite
 boundary SQL. No repository commits, rolls back, or retries the caller's
 transaction. Fresh focused, migration, persistence, mypy, Ruff, unit, and
-integration gates pass.
+integration gates pass; the localized cancellation follow-up adds an 81-test
+focused green gate and remains pending final independent re-review.
 
 Implementation status on 2026-07-13: the user-approved design and reviewed
 implementation plan are complete. Production implementation now includes the

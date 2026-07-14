@@ -964,6 +964,50 @@ async def test_terminal_transition_rejects_time_before_started_at(tmp_path: Path
 
 
 @pytest.mark.anyio
+async def test_running_cancel_request_rejects_time_before_start_and_accepts_equality(
+    tmp_path: Path,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "cancel-request-before-start.db")
+    started_at = NOW + timedelta(minutes=2)
+    async with session_factory() as session:
+        revision = await _create_plan(session)
+        repository = AgentRunRepository(session)
+        await repository.create_approval(_approval(revision.content_hash))
+        await repository.execute(
+            household_id=HOUSEHOLD_ID,
+            approval_id=APPROVAL_ID,
+            run=_run(),
+        )
+        await repository.set_status(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            status="running",
+            changed_at=started_at,
+        )
+
+        with pytest.raises(AgentPlanConflict) as captured:
+            await repository.set_status(
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                status="cancel_requested",
+                changed_at=NOW + timedelta(minutes=1),
+            )
+        assert captured.value.code == "agent_run_transition_conflict"
+
+        stored = await repository.set_status(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            status="cancel_requested",
+            changed_at=started_at,
+        )
+        assert stored.status == "cancel_requested"
+        assert stored.started_at == started_at
+        assert stored.cancel_requested_at == started_at
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_cancelled_transition_rejects_time_before_cancel_request(
     tmp_path: Path,
 ) -> None:
@@ -1058,6 +1102,13 @@ async def test_run_transition_accepts_equal_chronology_boundaries(
             NOW + timedelta(seconds=2),
             NOW + timedelta(seconds=1),
         ),
+        (
+            "cancel-request-before-started",
+            "cancel_requested",
+            NOW + timedelta(seconds=2),
+            NOW + timedelta(seconds=1),
+            None,
+        ),
     ],
 )
 async def test_database_rejects_invalid_run_chronology(
@@ -1090,6 +1141,41 @@ async def test_database_rejects_invalid_run_chronology(
                         finished_at=finished_at,
                     )
                 )
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_database_accepts_cancel_request_equal_to_started_at(tmp_path: Path) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "equal-cancel-start.db")
+    started_at = NOW + timedelta(minutes=2)
+    async with session_factory() as session:
+        revision = await _create_plan(session)
+        await AgentRunRepository(session).create_approval(_approval(revision.content_hash))
+        await session.execute(
+            insert(agent_plan_runs_table).values(
+                id=str(RUN_ID),
+                household_id=str(HOUSEHOLD_ID),
+                plan_id=str(PLAN_ID),
+                revision_id=str(REVISION_ID),
+                approval_id=str(APPROVAL_ID),
+                execute_idempotency_key="execute:equal-cancel-start",
+                status="cancel_requested",
+                created_at=NOW,
+                deadline_at=NOW + timedelta(minutes=10),
+                started_at=started_at,
+                cancel_requested_at=started_at,
+                finished_at=None,
+            )
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        stored = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
+        assert stored is not None
+        assert stored.status == "cancel_requested"
+        assert stored.started_at == started_at
+        assert stored.cancel_requested_at == started_at
 
     await engine.dispose()
 
