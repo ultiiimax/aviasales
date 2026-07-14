@@ -118,6 +118,12 @@ def upgrade() -> None:
         sa.Column("operation_kind", sa.String(length=40), nullable=False),
         sa.Column("operation_fingerprint", sa.String(length=71), nullable=False),
         sa.Column("logical_operation_fingerprint", sa.String(length=71), nullable=False),
+        sa.Column(
+            "logical_root_operation_id",
+            sa.String(length=36),
+            sa.ForeignKey("agent_run_operations.id", ondelete="CASCADE"),
+            nullable=True,
+        ),
         sa.Column("consumes_logical_unit", sa.Boolean(), nullable=False),
         sa.Column("immutable_input_json", sa.Text(), nullable=False),
         sa.Column("private_continuation_json", sa.Text(), nullable=True),
@@ -128,6 +134,12 @@ def upgrade() -> None:
         sa.Column("max_attempts", sa.Integer(), nullable=False),
         sa.Column("next_retry_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("http_attempts_consumed", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("circuit_permit_token_digest", sa.String(length=71), nullable=True),
+        sa.Column("circuit_permit_generation", sa.Integer(), nullable=True),
+        sa.Column("circuit_permit_mode", sa.String(length=20), nullable=True),
+        sa.Column("circuit_permit_attempt_number", sa.Integer(), nullable=True),
+        sa.Column("circuit_permit_expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("circuit_permit_consumed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("result_type", sa.String(length=40), nullable=True),
         sa.Column("result_id", sa.String(length=36), nullable=True),
         sa.Column("error_code", sa.String(length=80), nullable=True),
@@ -141,14 +153,26 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "operation_kind IN ('scope_freeze', 'calendar_search', 'exact_start', "
-            "'exact_poll', 'suggest_discovery', 'comparison', 'composition', "
+            "'exact_poll', 'comparison', 'composition', "
             "'ranking', 'analysis')",
             name="ck_agent_run_operation_kind",
         ),
         sa.CheckConstraint(
-            "operation_kind NOT IN ('calendar_search', 'exact_start', 'exact_poll', "
-            "'suggest_discovery') OR provider_id IS NOT NULL",
+            "(operation_kind IN ('calendar_search', 'exact_start', 'exact_poll') "
+            "AND provider_id IS NOT NULL) OR "
+            "(operation_kind IN ('scope_freeze', 'comparison', 'composition', "
+            "'ranking', 'analysis') AND provider_id IS NULL)",
             name="ck_agent_run_operation_provider",
+        ),
+        sa.CheckConstraint(
+            "(operation_kind IN ('calendar_search', 'exact_start') "
+            "AND consumes_logical_unit = 1 AND logical_root_operation_id IS NULL) OR "
+            "(operation_kind = 'exact_poll' AND consumes_logical_unit = 0 "
+            "AND logical_root_operation_id IS NOT NULL) OR "
+            "(operation_kind IN ('scope_freeze', 'comparison', 'composition', "
+            "'ranking', 'analysis') AND consumes_logical_unit = 0 "
+            "AND logical_root_operation_id IS NULL)",
+            name="ck_agent_run_operation_logical_shape",
         ),
         sa.CheckConstraint(
             "status IN ('pending', 'leased', 'retry_wait', 'succeeded', 'failed', 'skipped')",
@@ -156,13 +180,30 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "result_type IS NULL OR result_type IN ('scope_snapshot', 'discovery_signal', "
-            "'confirmed_offer', 'composed_candidate', 'ranking_snapshot')",
+            "'confirmed_offer', 'composed_candidate', 'ranking_snapshot', 'operation')",
             name="ck_agent_run_operation_result_type",
         ),
         sa.CheckConstraint(
             "attempt_count >= 0 AND max_attempts > 0 AND attempt_count <= max_attempts AND "
             "http_attempts_consumed >= 0",
             name="ck_agent_run_operation_counters",
+        ),
+        sa.CheckConstraint(
+            "(circuit_permit_token_digest IS NULL "
+            "AND circuit_permit_generation IS NULL AND circuit_permit_mode IS NULL "
+            "AND circuit_permit_attempt_number IS NULL "
+            "AND circuit_permit_expires_at IS NULL "
+            "AND circuit_permit_consumed_at IS NULL) OR "
+            "(provider_id IS NOT NULL AND circuit_permit_token_digest IS NOT NULL "
+            "AND length(circuit_permit_token_digest) = 71 "
+            "AND circuit_permit_generation >= 0 "
+            "AND circuit_permit_mode IN ('closed', 'half_open') "
+            "AND circuit_permit_attempt_number > 0 "
+            "AND circuit_permit_attempt_number = attempt_count "
+            "AND circuit_permit_expires_at IS NOT NULL "
+            "AND (circuit_permit_consumed_at IS NULL "
+            "OR circuit_permit_consumed_at <= circuit_permit_expires_at))",
+            name="ck_agent_run_operation_permit_shape",
         ),
         sa.CheckConstraint(
             "(status = 'leased' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL "
@@ -197,6 +238,11 @@ def upgrade() -> None:
     )
     op.create_index("ix_agent_run_operations_run_id", "agent_run_operations", ["run_id"])
     op.create_index("ix_agent_run_operations_stage_id", "agent_run_operations", ["stage_id"])
+    op.create_index(
+        "ix_agent_run_operation_logical_root_id",
+        "agent_run_operations",
+        ["logical_root_operation_id"],
+    )
     op.create_index(
         "ix_agent_run_operations_provider_id",
         "agent_run_operations",
@@ -241,10 +287,23 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("attempt_kind", sa.String(length=20), nullable=False),
+        sa.Column("operation_attempt_number", sa.Integer(), nullable=False),
+        sa.Column("circuit_permit_generation", sa.Integer(), nullable=False),
+        sa.Column("circuit_permit_token_digest", sa.String(length=71), nullable=False),
         sa.Column("reserved_at", sa.DateTime(timezone=True), nullable=False),
+        sa.UniqueConstraint(
+            "operation_id",
+            "operation_attempt_number",
+            name="uq_agent_provider_http_operation_attempt",
+        ),
         sa.CheckConstraint(
             "attempt_kind IN ('start', 'poll', 'retry')",
             name="ck_agent_provider_http_attempt_kind",
+        ),
+        sa.CheckConstraint(
+            "operation_attempt_number > 0 AND circuit_permit_generation >= 0 "
+            "AND length(circuit_permit_token_digest) = 71",
+            name="ck_agent_provider_http_attempt_binding",
         ),
     )
     op.create_index(
@@ -275,8 +334,11 @@ def upgrade() -> None:
         sa.Column("consecutive_transient_failures", sa.Integer(), nullable=False),
         sa.Column("opened_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("cooldown_until", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("half_open_probe_owner", sa.String(length=160), nullable=True),
+        sa.Column("half_open_probe_operation_id", sa.String(length=36), nullable=True),
+        sa.Column("half_open_probe_attempt_number", sa.Integer(), nullable=True),
+        sa.Column("half_open_probe_token_digest", sa.String(length=71), nullable=True),
         sa.Column("half_open_probe_expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("generation", sa.Integer(), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
@@ -284,16 +346,26 @@ def upgrade() -> None:
             name="ck_agent_provider_circuit_state",
         ),
         sa.CheckConstraint(
-            "consecutive_transient_failures >= 0 AND version >= 0",
+            "consecutive_transient_failures >= 0 AND generation >= 0 AND version >= 0",
             name="ck_agent_provider_circuit_counters",
         ),
         sa.CheckConstraint(
             "(state = 'closed' AND opened_at IS NULL AND cooldown_until IS NULL "
-            "AND half_open_probe_owner IS NULL AND half_open_probe_expires_at IS NULL) OR "
+            "AND half_open_probe_operation_id IS NULL "
+            "AND half_open_probe_attempt_number IS NULL "
+            "AND half_open_probe_token_digest IS NULL "
+            "AND half_open_probe_expires_at IS NULL) OR "
             "(state = 'open' AND opened_at IS NOT NULL AND cooldown_until IS NOT NULL "
-            "AND half_open_probe_owner IS NULL AND half_open_probe_expires_at IS NULL) OR "
+            "AND half_open_probe_operation_id IS NULL "
+            "AND half_open_probe_attempt_number IS NULL "
+            "AND half_open_probe_token_digest IS NULL "
+            "AND half_open_probe_expires_at IS NULL) OR "
             "(state = 'half_open' AND opened_at IS NOT NULL AND cooldown_until IS NOT NULL "
-            "AND half_open_probe_owner IS NOT NULL AND half_open_probe_expires_at IS NOT NULL)",
+            "AND half_open_probe_operation_id IS NOT NULL "
+            "AND half_open_probe_attempt_number > 0 "
+            "AND half_open_probe_token_digest IS NOT NULL "
+            "AND length(half_open_probe_token_digest) = 71 "
+            "AND half_open_probe_expires_at IS NOT NULL)",
             name="ck_agent_provider_circuit_shape",
         ),
     )
@@ -311,7 +383,7 @@ def upgrade() -> None:
         sa.Column("fingerprint", sa.String(length=71), nullable=False),
         sa.Column("snapshot_json", sa.Text(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.UniqueConstraint("run_id", "fingerprint", name="uq_agent_run_scope_fingerprint"),
+        sa.UniqueConstraint("run_id", name="uq_agent_run_scope"),
     )
     op.create_index(
         "ix_agent_run_scope_snapshots_household_id",

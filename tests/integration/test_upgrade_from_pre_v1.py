@@ -16,7 +16,7 @@ DEAL_JOB_ID = "44444444-4444-4444-4444-444444444444"
 NOW = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
 
 
-def test_upgrade_from_immediate_pre_v1_preserves_local_data(tmp_path: Path) -> None:
+def test_review_upgrade_from_immediate_pre_v1_preserves_local_data(tmp_path: Path) -> None:
     database_path = tmp_path / "pre-v1.db"
     config = _alembic_config(database_path)
     command.upgrade(config, "0021_worker_drain_control")
@@ -210,6 +210,53 @@ def test_upgrade_from_immediate_pre_v1_preserves_local_data(tmp_path: Path) -> N
             "agent_composed_route_candidates",
             "agent_ranking_snapshots",
         }.issubset(new_agent_tables)
+        operation_columns = {
+            row[1] for row in connection.execute(text("PRAGMA table_info(agent_run_operations)"))
+        }
+        attempt_columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(agent_provider_http_attempts)"))
+        }
+        circuit_columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(agent_provider_circuit_state)"))
+        }
+        operation_table_sql = connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'agent_run_operations'"
+            )
+        ).scalar_one()
+        scope_table_sql = connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'agent_run_scope_snapshots'"
+            )
+        ).scalar_one()
+        assert {
+            "logical_root_operation_id",
+            "circuit_permit_token_digest",
+            "circuit_permit_generation",
+            "circuit_permit_mode",
+            "circuit_permit_attempt_number",
+            "circuit_permit_expires_at",
+            "circuit_permit_consumed_at",
+        }.issubset(operation_columns)
+        assert {
+            "operation_attempt_number",
+            "circuit_permit_generation",
+            "circuit_permit_token_digest",
+        }.issubset(attempt_columns)
+        assert {
+            "generation",
+            "half_open_probe_operation_id",
+            "half_open_probe_attempt_number",
+            "half_open_probe_token_digest",
+        }.issubset(circuit_columns)
+        assert "half_open_probe_owner" not in circuit_columns
+        assert "ck_agent_run_operation_logical_shape" in operation_table_sql
+        assert "uq_agent_run_scope" in scope_table_sql
+        assert "uq_agent_run_scope_fingerprint" not in scope_table_sql
         database_revision = connection.execute(text("SELECT version_num FROM alembic_version"))
         assert (
             database_revision.scalar_one() == ScriptDirectory.from_config(config).get_current_head()

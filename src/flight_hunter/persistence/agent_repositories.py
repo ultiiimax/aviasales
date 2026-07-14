@@ -4,15 +4,16 @@ import hashlib
 import json
 import math
 import re
+import secrets
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import case, func, insert, or_, select, update
+from sqlalchemy import Table, case, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult, RowMapping
@@ -334,6 +335,7 @@ class AgentOperationResultType(StrEnum):
     CONFIRMED_OFFER = "confirmed_offer"
     COMPOSED_CANDIDATE = "composed_candidate"
     RANKING_SNAPSHOT = "ranking_snapshot"
+    OPERATION = "operation"
 
 
 class BaggageEvidenceStatus(StrEnum):
@@ -378,6 +380,11 @@ class CircuitPermitStatus(StrEnum):
     HALF_OPEN_PROBE = "half_open_probe"
 
 
+class CircuitPermitMode(StrEnum):
+    CLOSED = "closed"
+    HALF_OPEN = "half_open"
+
+
 class AgentOperationError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
@@ -398,22 +405,62 @@ class AgentEvidenceError(RuntimeError):
 class AttemptReservationResult:
     status: AttemptReservationStatus
     retry_at: datetime | None = None
+    reservation_id: UUID | None = None
+    reused: bool = False
 
     def __post_init__(self) -> None:
         status = AttemptReservationStatus(self.status)
-        if status is AttemptReservationStatus.RATE_LIMITED:
+        if type(self.reused) is not bool:
+            raise TypeError("reused must be bool")
+        if status is AttemptReservationStatus.RESERVED:
+            if not isinstance(self.reservation_id, UUID):
+                raise ValueError("reserved attempt requires reservation_id")
+            if self.retry_at is not None:
+                raise ValueError("retry_at is only valid for rate_limited reservations")
+        elif status is AttemptReservationStatus.RATE_LIMITED:
             if self.retry_at is None:
                 raise ValueError("rate_limited reservation requires retry_at")
             _require_aware(self.retry_at, "retry_at")
-        elif self.retry_at is not None:
-            raise ValueError("retry_at is only valid for rate_limited reservations")
+            if self.reservation_id is not None or self.reused:
+                raise ValueError("denied reservation cannot have an identity")
+        else:
+            if self.retry_at is not None:
+                raise ValueError("retry_at is only valid for rate_limited reservations")
+            if self.reservation_id is not None or self.reused:
+                raise ValueError("denied reservation cannot have an identity")
         object.__setattr__(self, "status", status)
+
+
+@dataclass(frozen=True, slots=True)
+class ServerPrivateCircuitPermit:
+    provider_id: str
+    operation_id: UUID
+    operation_attempt_number: int
+    generation: int
+    mode: CircuitPermitMode
+    token: str = field(repr=False)
+    expires_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.provider_id, str) or not self.provider_id.strip():
+            raise ValueError("provider_id must not be blank")
+        if not isinstance(self.operation_id, UUID):
+            raise TypeError("operation_id must be UUID")
+        if type(self.operation_attempt_number) is not int or self.operation_attempt_number <= 0:
+            raise ValueError("operation_attempt_number must be positive")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("generation must be non-negative")
+        if not isinstance(self.token, str) or not self.token:
+            raise ValueError("permit token must not be blank")
+        _require_aware(self.expires_at, "expires_at")
+        object.__setattr__(self, "mode", CircuitPermitMode(self.mode))
 
 
 @dataclass(frozen=True, slots=True)
 class CircuitPermitResult:
     status: CircuitPermitStatus
     retry_at: datetime | None = None
+    permit: ServerPrivateCircuitPermit | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         status = CircuitPermitStatus(self.status)
@@ -421,8 +468,20 @@ class CircuitPermitResult:
             if self.retry_at is None:
                 raise ValueError("open circuit permit requires retry_at")
             _require_aware(self.retry_at, "retry_at")
-        elif self.retry_at is not None:
-            raise ValueError("retry_at is only valid for an open circuit permit")
+            if self.permit is not None:
+                raise ValueError("open circuit result cannot include permit")
+        else:
+            if self.retry_at is not None:
+                raise ValueError("retry_at is only valid for an open circuit permit")
+            if self.permit is None:
+                raise ValueError("allowed circuit result requires permit")
+            expected_mode = (
+                CircuitPermitMode.CLOSED
+                if status is CircuitPermitStatus.ALLOWED
+                else CircuitPermitMode.HALF_OPEN
+            )
+            if self.permit.mode is not expected_mode:
+                raise ValueError("circuit permit mode does not match status")
         object.__setattr__(self, "status", status)
 
 
@@ -471,9 +530,10 @@ class NewAgentRunOperation:
     logical_operation_fingerprint: str
     consumes_logical_unit: bool
     immutable_input: Mapping[str, object]
-    private_continuation: Mapping[str, object] | None
+    private_continuation: Mapping[str, object] | None = field(repr=False)
     max_attempts: int
     created_at: datetime
+    logical_root_operation_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,6 +546,7 @@ class AgentRunOperationRecord:
     kind: AgentOperationKind
     operation_fingerprint: str
     logical_operation_fingerprint: str
+    logical_root_operation_id: UUID | None
     consumes_logical_unit: bool
     immutable_input: Mapping[str, object]
     status: AgentOperationStatus
@@ -513,7 +574,7 @@ class AgentRunOperationRecord:
 @dataclass(frozen=True, slots=True)
 class ServerPrivateOperationLease:
     operation: AgentRunOperationRecord
-    private_continuation: Mapping[str, object] | None
+    private_continuation: Mapping[str, object] | None = field(repr=False)
 
     def __post_init__(self) -> None:
         if self.private_continuation is not None:
@@ -558,8 +619,10 @@ class AgentCircuitStateRecord:
     consecutive_transient_failures: int
     opened_at: datetime | None
     cooldown_until: datetime | None
-    half_open_probe_owner: str | None
+    half_open_probe_operation_id: UUID | None
+    half_open_probe_attempt_number: int | None
     half_open_probe_expires_at: datetime | None
+    generation: int
     version: int
     updated_at: datetime
 
@@ -1653,6 +1716,7 @@ class AgentOperationRepository:
             operation.operation_fingerprint,
         )
         if existing is not None:
+            _require_materialization_match(existing, operation)
             return existing
         if not await self._run_allows_io(
             operation.household_id,
@@ -1665,18 +1729,30 @@ class AgentOperationRepository:
             operation.run_id,
             operation.stage_id,
         )
-        logical_root = await self._get_logical_root(
-            operation.household_id,
-            operation.run_id,
-            operation.logical_operation_fingerprint,
-        )
+        logical_root: AgentRunOperationRecord | None = None
         if operation.consumes_logical_unit:
+            logical_root = await self._get_logical_root(
+                operation.household_id,
+                operation.run_id,
+                operation.logical_operation_fingerprint,
+            )
             if logical_root is not None:
                 if logical_root.operation_fingerprint == operation.operation_fingerprint:
+                    _require_materialization_match(logical_root, operation)
                     return logical_root
                 raise AgentOperationConflict("agent_logical_operation_exists")
-        elif logical_root is None:
-            raise AgentOperationConflict("agent_logical_operation_root_missing")
+        elif operation.kind is AgentOperationKind.EXACT_POLL:
+            if operation.logical_root_operation_id is None:
+                raise AgentOperationConflict("agent_logical_operation_root_missing")
+            logical_root = await self._get_logical_root_by_id(
+                operation.household_id,
+                operation.run_id,
+                operation.logical_root_operation_id,
+            )
+            if logical_root is None:
+                raise AgentOperationConflict("agent_logical_operation_root_not_found")
+            if not _logical_root_matches_child(logical_root, operation):
+                raise AgentOperationConflict("agent_logical_operation_root_mismatch")
 
         try:
             async with self._session.begin_nested():
@@ -1708,6 +1784,11 @@ class AgentOperationRepository:
                         operation_kind=operation.kind.value,
                         operation_fingerprint=operation.operation_fingerprint,
                         logical_operation_fingerprint=(operation.logical_operation_fingerprint),
+                        logical_root_operation_id=(
+                            str(operation.logical_root_operation_id)
+                            if operation.logical_root_operation_id is not None
+                            else None
+                        ),
                         consumes_logical_unit=operation.consumes_logical_unit,
                         immutable_input_json=immutable_input_json,
                         private_continuation_json=private_continuation_json,
@@ -1718,6 +1799,12 @@ class AgentOperationRepository:
                         max_attempts=operation.max_attempts,
                         next_retry_at=None,
                         http_attempts_consumed=0,
+                        circuit_permit_token_digest=None,
+                        circuit_permit_generation=None,
+                        circuit_permit_mode=None,
+                        circuit_permit_attempt_number=None,
+                        circuit_permit_expires_at=None,
+                        circuit_permit_consumed_at=None,
                         result_type=None,
                         result_id=None,
                         error_code=None,
@@ -1733,6 +1820,7 @@ class AgentOperationRepository:
                 operation.operation_fingerprint,
             )
             if existing is not None:
+                _require_materialization_match(existing, operation)
                 return existing
             logical_root = await self._get_logical_root(
                 operation.household_id,
@@ -1800,7 +1888,19 @@ class AgentOperationRepository:
             raise ValueError("lease_seconds must be a positive integer")
         await self._acquire_write_transaction()
         normalized_now = _utc_datetime(now)
-        if not await self._run_allows_io(household_id, run_id, normalized_now):
+        run_state = await self._locked_run_execution_state(household_id, run_id)
+        if run_state is None:
+            return None
+        inactive_error = _inactive_run_error(run_state, normalized_now)
+        if inactive_error is not None:
+            await self._reconcile_inactive_run_operations(
+                household_id,
+                run_id,
+                inactive_error,
+                normalized_now,
+            )
+            return None
+        if not _run_state_allows_io(run_state, normalized_now):
             return None
         await self._terminally_recover_expired_final_attempts(
             household_id,
@@ -1852,6 +1952,12 @@ class AgentOperationRepository:
                 attempt_count=agent_run_operations_table.c.attempt_count + 1,
                 next_retry_at=None,
                 error_code=None,
+                circuit_permit_token_digest=None,
+                circuit_permit_generation=None,
+                circuit_permit_mode=None,
+                circuit_permit_attempt_number=None,
+                circuit_permit_expires_at=None,
+                circuit_permit_consumed_at=None,
                 updated_at=normalized_now,
             )
         )
@@ -1919,13 +2025,28 @@ class AgentOperationRepository:
     ) -> AgentRunOperationRecord:
         _validate_operation_completion(worker_id, "result", now)
         normalized_result_type = AgentOperationResultType(result_type)
+        normalized_now = _utc_datetime(now)
+        await self._acquire_write_transaction()
+        claimed = await self._locked_claimed_operation(
+            household_id,
+            operation_id,
+            worker_id,
+            normalized_now,
+        )
+        if claimed is None:
+            await self._raise_operation_transition_conflict(household_id, operation_id)
+        await self._validate_operation_result_reference(
+            cast(RowMapping, claimed),
+            normalized_result_type,
+            result_id,
+        )
         result = await self._session.execute(
             update(agent_run_operations_table)
             .where(agent_run_operations_table.c.id == str(operation_id))
             .where(agent_run_operations_table.c.household_id == str(household_id))
             .where(agent_run_operations_table.c.status == AgentOperationStatus.LEASED.value)
             .where(agent_run_operations_table.c.lease_owner == worker_id)
-            .where(agent_run_operations_table.c.lease_expires_at >= _utc_datetime(now))
+            .where(agent_run_operations_table.c.lease_expires_at >= normalized_now)
             .values(
                 status=AgentOperationStatus.SUCCEEDED.value,
                 lease_owner=None,
@@ -1934,8 +2055,8 @@ class AgentOperationRepository:
                 result_type=normalized_result_type.value,
                 result_id=str(result_id),
                 error_code=None,
-                updated_at=_utc_datetime(now),
-                completed_at=_utc_datetime(now),
+                updated_at=normalized_now,
+                completed_at=normalized_now,
             )
         )
         await self._require_operation_transition(result, household_id, operation_id)
@@ -2008,6 +2129,48 @@ class AgentOperationRepository:
         await self._require_operation_transition(result, household_id, operation_id)
         return await self._required_operation(household_id, operation_id)
 
+    async def mark_claimed_operation_skipped(
+        self,
+        *,
+        household_id: UUID,
+        operation_id: UUID,
+        worker_id: str,
+        error_code: str,
+        now: datetime,
+    ) -> AgentRunOperationRecord:
+        """Release a live lease after its owner observes that the run became inactive."""
+
+        _validate_operation_completion(worker_id, error_code, now)
+        normalized_now = _utc_datetime(now)
+        await self._acquire_write_transaction()
+        row = await self._locked_operation_with_run(household_id, operation_id)
+        if row is None:
+            raise AgentOperationConflict("agent_operation_not_found")
+        inactive_error = _inactive_run_error(row, normalized_now)
+        if inactive_error is None or inactive_error != error_code:
+            raise AgentOperationConflict("agent_operation_skip_reason_invalid")
+        result = await self._session.execute(
+            update(agent_run_operations_table)
+            .where(agent_run_operations_table.c.id == str(operation_id))
+            .where(agent_run_operations_table.c.household_id == str(household_id))
+            .where(agent_run_operations_table.c.status == AgentOperationStatus.LEASED.value)
+            .where(agent_run_operations_table.c.lease_owner == worker_id)
+            .where(agent_run_operations_table.c.lease_expires_at >= normalized_now)
+            .values(
+                status=AgentOperationStatus.SKIPPED.value,
+                lease_owner=None,
+                lease_expires_at=None,
+                next_retry_at=None,
+                result_type=None,
+                result_id=None,
+                error_code=error_code,
+                updated_at=normalized_now,
+                completed_at=normalized_now,
+            )
+        )
+        await self._require_operation_transition(result, household_id, operation_id)
+        return await self._required_operation(household_id, operation_id)
+
     async def reserve_http_attempt(
         self,
         *,
@@ -2019,6 +2182,7 @@ class AgentOperationRepository:
         attempt_kind: AttemptKind,
         provider_rpm: int,
         now: datetime,
+        circuit_permit: ServerPrivateCircuitPermit,
     ) -> AttemptReservationResult:
         _require_aware(now, "now")
         if type(provider_rpm) is not int or provider_rpm <= 0:
@@ -2028,12 +2192,46 @@ class AgentOperationRepository:
         normalized_kind = AttemptKind(attempt_kind)
         normalized_now = _utc_datetime(now)
         await self._acquire_write_transaction()
-        await self._require_reservable_operation(
+        operation = await self._require_reservable_operation(
             household_id,
             run_id,
             operation_id,
             provider_id,
             worker_id,
+            normalized_now,
+        )
+        expected_kind = _expected_attempt_kind(operation)
+        if normalized_kind is not expected_kind:
+            raise AgentOperationConflict("agent_attempt_kind_invalid")
+        permit_digest = _permit_digest(circuit_permit.token)
+        _require_permit_call_binding(
+            circuit_permit,
+            permit_digest=permit_digest,
+            operation=operation,
+            provider_id=provider_id,
+        )
+
+        existing = await self._get_http_reservation(
+            operation_id,
+            int(operation["attempt_count"]),
+        )
+        if existing is not None:
+            if (
+                existing["attempt_kind"] != expected_kind.value
+                or existing["circuit_permit_generation"] != circuit_permit.generation
+                or existing["circuit_permit_token_digest"] != permit_digest
+            ):
+                raise AgentOperationConflict("agent_http_reservation_conflict")
+            return AttemptReservationResult(
+                status=AttemptReservationStatus.RESERVED,
+                reservation_id=UUID(str(existing["id"])),
+                reused=True,
+            )
+
+        await self._validate_unconsumed_circuit_permit(
+            operation,
+            circuit_permit,
+            permit_digest,
             normalized_now,
         )
         await self._ensure_provider_lock(provider_id, normalized_now)
@@ -2059,68 +2257,114 @@ class AgentOperationRepository:
                 retry_at=oldest + timedelta(minutes=1),
             )
 
-        async with self._session.begin_nested():
-            budget_result = await self._session.execute(
-                update(agent_plan_runs_table)
-                .where(agent_plan_runs_table.c.id == str(run_id))
-                .where(agent_plan_runs_table.c.household_id == str(household_id))
-                .where(agent_plan_runs_table.c.status.in_(("queued", "running")))
-                .where(agent_plan_runs_table.c.deadline_at > normalized_now)
-                .where(
-                    agent_plan_runs_table.c.http_attempts_consumed
-                    < agent_plan_runs_table.c.http_attempt_budget
+        reservation_id = uuid4()
+        try:
+            async with self._session.begin_nested():
+                budget_result = await self._session.execute(
+                    update(agent_plan_runs_table)
+                    .where(agent_plan_runs_table.c.id == str(run_id))
+                    .where(agent_plan_runs_table.c.household_id == str(household_id))
+                    .where(agent_plan_runs_table.c.status.in_(("queued", "running")))
+                    .where(agent_plan_runs_table.c.deadline_at > normalized_now)
+                    .where(
+                        agent_plan_runs_table.c.http_attempts_consumed
+                        < agent_plan_runs_table.c.http_attempt_budget
+                    )
+                    .values(
+                        http_attempts_consumed=agent_plan_runs_table.c.http_attempts_consumed + 1
+                    )
                 )
-                .values(http_attempts_consumed=agent_plan_runs_table.c.http_attempts_consumed + 1)
-            )
-            if cast(CursorResult[Any], budget_result).rowcount != 1:
-                return AttemptReservationResult(status=AttemptReservationStatus.BUDGET_EXHAUSTED)
-            await self._session.execute(
-                insert(agent_provider_http_attempts_table).values(
-                    id=str(uuid4()),
-                    household_id=str(household_id),
-                    provider_id=provider_id,
-                    run_id=str(run_id),
-                    operation_id=str(operation_id),
-                    attempt_kind=normalized_kind.value,
-                    reserved_at=normalized_now,
+                if cast(CursorResult[Any], budget_result).rowcount != 1:
+                    return AttemptReservationResult(
+                        status=AttemptReservationStatus.BUDGET_EXHAUSTED
+                    )
+                await self._session.execute(
+                    insert(agent_provider_http_attempts_table).values(
+                        id=str(reservation_id),
+                        household_id=str(household_id),
+                        provider_id=provider_id,
+                        run_id=str(run_id),
+                        operation_id=str(operation_id),
+                        attempt_kind=expected_kind.value,
+                        operation_attempt_number=int(operation["attempt_count"]),
+                        circuit_permit_generation=circuit_permit.generation,
+                        circuit_permit_token_digest=permit_digest,
+                        reserved_at=normalized_now,
+                    )
                 )
-            )
-            operation_result = await self._session.execute(
-                update(agent_run_operations_table)
-                .where(agent_run_operations_table.c.id == str(operation_id))
-                .where(agent_run_operations_table.c.household_id == str(household_id))
-                .where(agent_run_operations_table.c.run_id == str(run_id))
-                .where(agent_run_operations_table.c.provider_id == provider_id)
-                .where(agent_run_operations_table.c.status == AgentOperationStatus.LEASED.value)
-                .where(agent_run_operations_table.c.lease_owner == worker_id)
-                .where(agent_run_operations_table.c.lease_expires_at > normalized_now)
-                .values(
-                    http_attempts_consumed=(
-                        agent_run_operations_table.c.http_attempts_consumed + 1
-                    ),
-                    updated_at=normalized_now,
+                operation_result = await self._session.execute(
+                    update(agent_run_operations_table)
+                    .where(agent_run_operations_table.c.id == str(operation_id))
+                    .where(agent_run_operations_table.c.household_id == str(household_id))
+                    .where(agent_run_operations_table.c.run_id == str(run_id))
+                    .where(agent_run_operations_table.c.provider_id == provider_id)
+                    .where(agent_run_operations_table.c.status == AgentOperationStatus.LEASED.value)
+                    .where(agent_run_operations_table.c.lease_owner == worker_id)
+                    .where(agent_run_operations_table.c.lease_expires_at > normalized_now)
+                    .where(
+                        agent_run_operations_table.c.attempt_count
+                        == int(operation["attempt_count"])
+                    )
+                    .where(
+                        agent_run_operations_table.c.circuit_permit_token_digest == permit_digest
+                    )
+                    .where(
+                        agent_run_operations_table.c.circuit_permit_generation
+                        == circuit_permit.generation
+                    )
+                    .where(agent_run_operations_table.c.circuit_permit_consumed_at.is_(None))
+                    .values(
+                        http_attempts_consumed=(
+                            agent_run_operations_table.c.http_attempts_consumed + 1
+                        ),
+                        circuit_permit_consumed_at=normalized_now,
+                        updated_at=normalized_now,
+                    )
                 )
+                if cast(CursorResult[Any], operation_result).rowcount != 1:
+                    raise AgentOperationConflict("agent_circuit_permit_stale")
+        except IntegrityError:
+            existing = await self._get_http_reservation(
+                operation_id,
+                int(operation["attempt_count"]),
             )
-            if cast(CursorResult[Any], operation_result).rowcount != 1:
-                raise AgentOperationConflict("agent_operation_not_found")
-        return AttemptReservationResult(status=AttemptReservationStatus.RESERVED)
+            if existing is None:
+                raise
+            if (
+                existing["attempt_kind"] != expected_kind.value
+                or existing["circuit_permit_generation"] != circuit_permit.generation
+                or existing["circuit_permit_token_digest"] != permit_digest
+            ):
+                raise AgentOperationConflict("agent_http_reservation_conflict") from None
+            return AttemptReservationResult(
+                status=AttemptReservationStatus.RESERVED,
+                reservation_id=UUID(str(existing["id"])),
+                reused=True,
+            )
+        return AttemptReservationResult(
+            status=AttemptReservationStatus.RESERVED,
+            reservation_id=reservation_id,
+        )
 
     async def append_scope_snapshot(
         self,
         snapshot: NewAgentRunScopeSnapshot,
     ) -> AgentRunScopeSnapshotRecord:
+        if not all(
+            isinstance(value, UUID)
+            for value in (snapshot.id, snapshot.household_id, snapshot.run_id)
+        ):
+            raise TypeError("scope snapshot ownership ids must be UUID values")
         _require_aware(snapshot.created_at, "created_at")
         _validate_fingerprint(snapshot.fingerprint, "fingerprint")
-        snapshot_json = canonical_sanitized_json(snapshot.snapshot)
+        snapshot_json = _canonical_scope_snapshot_json(snapshot.snapshot)
         await self._acquire_write_transaction()
         await self._require_run(snapshot.household_id, snapshot.run_id)
-        existing = await self._get_scope_snapshot_by_fingerprint(
-            snapshot.household_id,
-            snapshot.run_id,
-            snapshot.fingerprint,
-        )
+        existing = await self._get_scope_snapshot_by_run(snapshot.household_id, snapshot.run_id)
         if existing is not None:
-            return existing
+            if existing.fingerprint == snapshot.fingerprint:
+                return existing
+            raise AgentOperationConflict("agent_run_scope_conflict")
         try:
             async with self._session.begin_nested():
                 await self._session.execute(
@@ -2134,13 +2378,11 @@ class AgentOperationRepository:
                     )
                 )
         except IntegrityError:
-            existing = await self._get_scope_snapshot_by_fingerprint(
-                snapshot.household_id,
-                snapshot.run_id,
-                snapshot.fingerprint,
-            )
+            existing = await self._get_scope_snapshot_by_run(snapshot.household_id, snapshot.run_id)
             if existing is not None:
-                return existing
+                if existing.fingerprint == snapshot.fingerprint:
+                    return existing
+                raise AgentOperationConflict("agent_run_scope_conflict") from None
             raise
         stored = await self.get_scope_snapshot(snapshot.household_id, snapshot.id)
         if stored is None:
@@ -2182,6 +2424,9 @@ class AgentOperationRepository:
     async def acquire_circuit_permit(
         self,
         *,
+        household_id: UUID,
+        run_id: UUID,
+        operation_id: UUID,
         provider_id: str,
         worker_id: str,
         now: datetime,
@@ -2194,75 +2439,140 @@ class AgentOperationRepository:
             raise ValueError("probe_lease_seconds must be positive")
         normalized_now = _utc_datetime(now)
         await self._acquire_write_transaction()
+        operation = await self._require_reservable_operation(
+            household_id,
+            run_id,
+            operation_id,
+            provider_id,
+            worker_id,
+            normalized_now,
+        )
+        kind = AgentOperationKind(str(operation["operation_kind"]))
+        if kind not in _NETWORK_OPERATION_KINDS:
+            raise AgentOperationConflict("agent_operation_not_networked")
+        if operation["circuit_permit_token_digest"] is not None:
+            raise AgentOperationConflict("agent_circuit_permit_already_issued")
+
         await self._ensure_circuit_row(provider_id, normalized_now)
-        state = await self._locked_circuit_state(provider_id)
-        if state.state is AgentCircuitState.CLOSED:
-            return CircuitPermitResult(CircuitPermitStatus.ALLOWED)
-        if state.state is AgentCircuitState.OPEN:
-            assert state.cooldown_until is not None
-            if normalized_now < state.cooldown_until:
+        state = await self._locked_circuit_row(provider_id)
+        state_value = AgentCircuitState(str(state["state"]))
+        if state_value is AgentCircuitState.OPEN:
+            cooldown_until = _aware_datetime(cast(datetime, state["cooldown_until"]))
+            if normalized_now < cooldown_until:
                 return CircuitPermitResult(
                     CircuitPermitStatus.OPEN,
-                    retry_at=state.cooldown_until,
+                    retry_at=cooldown_until,
                 )
-        elif state.state is AgentCircuitState.HALF_OPEN:
-            assert state.half_open_probe_expires_at is not None
-            if (
-                state.half_open_probe_owner == worker_id
-                and normalized_now < state.half_open_probe_expires_at
-            ):
-                return CircuitPermitResult(CircuitPermitStatus.HALF_OPEN_PROBE)
-            if normalized_now < state.half_open_probe_expires_at:
+        elif state_value is AgentCircuitState.HALF_OPEN:
+            probe_expires_at = _aware_datetime(cast(datetime, state["half_open_probe_expires_at"]))
+            if normalized_now < probe_expires_at:
                 return CircuitPermitResult(
                     CircuitPermitStatus.OPEN,
-                    retry_at=state.half_open_probe_expires_at,
+                    retry_at=probe_expires_at,
                 )
 
-        probe_expires_at = normalized_now + timedelta(seconds=probe_lease_seconds)
-        result = await self._session.execute(
-            update(agent_provider_circuit_state_table)
-            .where(agent_provider_circuit_state_table.c.provider_id == provider_id)
-            .where(agent_provider_circuit_state_table.c.version == state.version)
-            .values(
-                state=AgentCircuitState.HALF_OPEN.value,
-                half_open_probe_owner=worker_id,
-                half_open_probe_expires_at=probe_expires_at,
-                version=agent_provider_circuit_state_table.c.version + 1,
-                updated_at=normalized_now,
+        token = secrets.token_urlsafe(32)
+        token_digest = _permit_digest(token)
+        attempt_number = int(operation["attempt_count"])
+        lease_expires_at = _aware_datetime(cast(datetime, operation["lease_expires_at"]))
+        if state_value is AgentCircuitState.CLOSED:
+            mode = CircuitPermitMode.CLOSED
+            status = CircuitPermitStatus.ALLOWED
+            generation = int(state["generation"])
+            permit_expires_at = lease_expires_at
+        else:
+            mode = CircuitPermitMode.HALF_OPEN
+            status = CircuitPermitStatus.HALF_OPEN_PROBE
+            generation = int(state["generation"]) + 1
+            permit_expires_at = min(
+                lease_expires_at,
+                normalized_now + timedelta(seconds=probe_lease_seconds),
             )
+        async with self._session.begin_nested():
+            if mode is CircuitPermitMode.HALF_OPEN:
+                transition = await self._session.execute(
+                    update(agent_provider_circuit_state_table)
+                    .where(agent_provider_circuit_state_table.c.provider_id == provider_id)
+                    .where(agent_provider_circuit_state_table.c.version == int(state["version"]))
+                    .values(
+                        state=AgentCircuitState.HALF_OPEN.value,
+                        half_open_probe_operation_id=str(operation_id),
+                        half_open_probe_attempt_number=attempt_number,
+                        half_open_probe_token_digest=token_digest,
+                        half_open_probe_expires_at=permit_expires_at,
+                        generation=generation,
+                        version=agent_provider_circuit_state_table.c.version + 1,
+                        updated_at=normalized_now,
+                    )
+                )
+                if cast(CursorResult[Any], transition).rowcount != 1:
+                    raise AgentOperationConflict("agent_circuit_permit_stale")
+
+            operation_result = await self._session.execute(
+                update(agent_run_operations_table)
+                .where(agent_run_operations_table.c.id == str(operation_id))
+                .where(agent_run_operations_table.c.household_id == str(household_id))
+                .where(agent_run_operations_table.c.run_id == str(run_id))
+                .where(agent_run_operations_table.c.provider_id == provider_id)
+                .where(agent_run_operations_table.c.status == AgentOperationStatus.LEASED.value)
+                .where(agent_run_operations_table.c.lease_owner == worker_id)
+                .where(agent_run_operations_table.c.lease_expires_at > normalized_now)
+                .where(agent_run_operations_table.c.attempt_count == attempt_number)
+                .where(agent_run_operations_table.c.circuit_permit_token_digest.is_(None))
+                .values(
+                    circuit_permit_token_digest=token_digest,
+                    circuit_permit_generation=generation,
+                    circuit_permit_mode=mode.value,
+                    circuit_permit_attempt_number=attempt_number,
+                    circuit_permit_expires_at=permit_expires_at,
+                    circuit_permit_consumed_at=None,
+                    updated_at=normalized_now,
+                )
+            )
+            if cast(CursorResult[Any], operation_result).rowcount != 1:
+                raise AgentOperationConflict("agent_circuit_permit_already_issued")
+        return CircuitPermitResult(
+            status,
+            permit=ServerPrivateCircuitPermit(
+                provider_id=provider_id,
+                operation_id=operation_id,
+                operation_attempt_number=attempt_number,
+                generation=generation,
+                mode=mode,
+                token=token,
+                expires_at=permit_expires_at,
+            ),
         )
-        if cast(CursorResult[Any], result).rowcount != 1:
-            refreshed = await self._locked_circuit_state(provider_id)
-            retry_at = refreshed.half_open_probe_expires_at or refreshed.cooldown_until
-            if retry_at is None:
-                retry_at = normalized_now + timedelta(seconds=probe_lease_seconds)
-            return CircuitPermitResult(CircuitPermitStatus.OPEN, retry_at=retry_at)
-        return CircuitPermitResult(CircuitPermitStatus.HALF_OPEN_PROBE)
 
     async def record_circuit_failure(
         self,
         *,
-        provider_id: str,
+        circuit_permit: ServerPrivateCircuitPermit,
+        reservation_id: UUID,
         transient: bool,
         failure_threshold: int,
         cooldown_seconds: int,
         now: datetime,
     ) -> AgentCircuitStateRecord:
         _require_aware(now, "now")
-        if not provider_id.strip():
-            raise ValueError("provider_id must not be blank")
+        if not isinstance(reservation_id, UUID):
+            raise TypeError("reservation_id must be UUID")
         if type(failure_threshold) is not int or failure_threshold <= 0:
             raise ValueError("failure_threshold must be positive")
         if type(cooldown_seconds) is not int or cooldown_seconds <= 0:
             raise ValueError("cooldown_seconds must be positive")
         normalized_now = _utc_datetime(now)
         await self._acquire_write_transaction()
-        await self._ensure_circuit_row(provider_id, normalized_now)
-        state = await self._locked_circuit_state(provider_id)
+        state = await self._validate_consumed_circuit_permit(
+            circuit_permit,
+            reservation_id,
+            normalized_now,
+        )
         if not transient:
-            return state
-        failures = state.consecutive_transient_failures + 1
-        should_open = state.state is not AgentCircuitState.CLOSED or failures >= failure_threshold
+            return _circuit_record(state)
+        failures = int(state["consecutive_transient_failures"]) + 1
+        state_value = AgentCircuitState(str(state["state"]))
+        should_open = state_value is not AgentCircuitState.CLOSED or failures >= failure_threshold
         values: dict[str, object] = {
             "consecutive_transient_failures": failures,
             "version": agent_provider_circuit_state_table.c.version + 1,
@@ -2273,16 +2583,21 @@ class AgentOperationRepository:
                 state=AgentCircuitState.OPEN.value,
                 opened_at=normalized_now,
                 cooldown_until=normalized_now + timedelta(seconds=cooldown_seconds),
-                half_open_probe_owner=None,
+                half_open_probe_operation_id=None,
+                half_open_probe_attempt_number=None,
+                half_open_probe_token_digest=None,
                 half_open_probe_expires_at=None,
+                generation=int(state["generation"]) + 1,
             )
-        await self._session.execute(
+        result = await self._session.execute(
             update(agent_provider_circuit_state_table)
-            .where(agent_provider_circuit_state_table.c.provider_id == provider_id)
-            .where(agent_provider_circuit_state_table.c.version == state.version)
+            .where(agent_provider_circuit_state_table.c.provider_id == circuit_permit.provider_id)
+            .where(agent_provider_circuit_state_table.c.version == int(state["version"]))
             .values(**values)
         )
-        return await self._locked_circuit_state(provider_id)
+        if cast(CursorResult[Any], result).rowcount != 1:
+            raise AgentOperationConflict("agent_circuit_permit_stale")
+        return await self._locked_circuit_state(circuit_permit.provider_id)
 
     async def _acquire_write_transaction(self) -> None:
         try:
@@ -2296,6 +2611,14 @@ class AgentOperationRepository:
         run_id: UUID,
         now: datetime,
     ) -> bool:
+        row = await self._locked_run_execution_state(household_id, run_id)
+        return row is not None and _run_state_allows_io(row, now)
+
+    async def _locked_run_execution_state(
+        self,
+        household_id: UUID,
+        run_id: UUID,
+    ) -> RowMapping | None:
         statement = (
             select(
                 agent_plan_runs_table.c.status,
@@ -2307,13 +2630,68 @@ class AgentOperationRepository:
         )
         if self._session.get_bind().dialect.name != "sqlite":
             statement = statement.with_for_update()
-        row = (await self._session.execute(statement)).mappings().one_or_none()
-        if row is None:
-            return False
-        return (
-            str(row["status"]) in {"queued", "running"}
-            and _aware_datetime(row["created_at"]) <= now
-            and _aware_datetime(row["deadline_at"]) > now
+        return (await self._session.execute(statement)).mappings().one_or_none()
+
+    async def _locked_operation_with_run(
+        self,
+        household_id: UUID,
+        operation_id: UUID,
+    ) -> RowMapping | None:
+        statement = (
+            select(
+                agent_run_operations_table,
+                agent_plan_runs_table.c.status.label("run_status"),
+                agent_plan_runs_table.c.created_at.label("run_created_at"),
+                agent_plan_runs_table.c.deadline_at.label("run_deadline_at"),
+            )
+            .join(
+                agent_plan_runs_table,
+                agent_plan_runs_table.c.id == agent_run_operations_table.c.run_id,
+            )
+            .where(agent_run_operations_table.c.id == str(operation_id))
+            .where(agent_run_operations_table.c.household_id == str(household_id))
+            .where(agent_plan_runs_table.c.household_id == str(household_id))
+        )
+        if self._session.get_bind().dialect.name != "sqlite":
+            statement = statement.with_for_update()
+        return (await self._session.execute(statement)).mappings().one_or_none()
+
+    async def _reconcile_inactive_run_operations(
+        self,
+        household_id: UUID,
+        run_id: UUID,
+        error_code: str,
+        now: datetime,
+    ) -> None:
+        await self._session.execute(
+            update(agent_run_operations_table)
+            .where(agent_run_operations_table.c.household_id == str(household_id))
+            .where(agent_run_operations_table.c.run_id == str(run_id))
+            .where(
+                or_(
+                    agent_run_operations_table.c.status.in_(
+                        (
+                            AgentOperationStatus.PENDING.value,
+                            AgentOperationStatus.RETRY_WAIT.value,
+                        )
+                    ),
+                    (
+                        (agent_run_operations_table.c.status == AgentOperationStatus.LEASED.value)
+                        & (agent_run_operations_table.c.lease_expires_at <= now)
+                    ),
+                )
+            )
+            .values(
+                status=AgentOperationStatus.SKIPPED.value,
+                lease_owner=None,
+                lease_expires_at=None,
+                next_retry_at=None,
+                result_type=None,
+                result_id=None,
+                error_code=error_code,
+                updated_at=now,
+                completed_at=now,
+            )
         )
 
     async def _terminally_recover_expired_final_attempts(
@@ -2348,37 +2726,44 @@ class AgentOperationRepository:
     async def record_circuit_success(
         self,
         *,
-        provider_id: str,
-        worker_id: str,
+        circuit_permit: ServerPrivateCircuitPermit,
+        reservation_id: UUID,
         now: datetime,
     ) -> AgentCircuitStateRecord:
         _require_aware(now, "now")
-        if not provider_id.strip() or not worker_id.strip():
-            raise ValueError("provider_id and worker_id must not be blank")
+        if not isinstance(reservation_id, UUID):
+            raise TypeError("reservation_id must be UUID")
         normalized_now = _utc_datetime(now)
         await self._acquire_write_transaction()
-        await self._ensure_circuit_row(provider_id, normalized_now)
-        state = await self._locked_circuit_state(provider_id)
-        if state.state is AgentCircuitState.HALF_OPEN and state.half_open_probe_owner != worker_id:
-            raise AgentOperationConflict("agent_circuit_probe_not_owned")
-        if state.state is AgentCircuitState.OPEN:
-            raise AgentOperationConflict("agent_circuit_open")
-        await self._session.execute(
+        state = await self._validate_consumed_circuit_permit(
+            circuit_permit,
+            reservation_id,
+            normalized_now,
+        )
+        generation = int(state["generation"])
+        if CircuitPermitMode(circuit_permit.mode) is CircuitPermitMode.HALF_OPEN:
+            generation += 1
+        result = await self._session.execute(
             update(agent_provider_circuit_state_table)
-            .where(agent_provider_circuit_state_table.c.provider_id == provider_id)
-            .where(agent_provider_circuit_state_table.c.version == state.version)
+            .where(agent_provider_circuit_state_table.c.provider_id == circuit_permit.provider_id)
+            .where(agent_provider_circuit_state_table.c.version == int(state["version"]))
             .values(
                 state=AgentCircuitState.CLOSED.value,
                 consecutive_transient_failures=0,
                 opened_at=None,
                 cooldown_until=None,
-                half_open_probe_owner=None,
+                half_open_probe_operation_id=None,
+                half_open_probe_attempt_number=None,
+                half_open_probe_token_digest=None,
                 half_open_probe_expires_at=None,
+                generation=generation,
                 version=agent_provider_circuit_state_table.c.version + 1,
                 updated_at=normalized_now,
             )
         )
-        return await self._locked_circuit_state(provider_id)
+        if cast(CursorResult[Any], result).rowcount != 1:
+            raise AgentOperationConflict("agent_circuit_permit_stale")
+        return await self._locked_circuit_state(circuit_permit.provider_id)
 
     async def _require_run(self, household_id: UUID, run_id: UUID) -> None:
         exists = (
@@ -2421,9 +2806,9 @@ class AgentOperationRepository:
         provider_id: str,
         worker_id: str,
         now: datetime,
-    ) -> None:
+    ) -> RowMapping:
         statement = (
-            select(agent_run_operations_table.c.id)
+            select(agent_run_operations_table)
             .join(
                 agent_plan_stages_table,
                 agent_plan_stages_table.c.id == agent_run_operations_table.c.stage_id,
@@ -2435,7 +2820,6 @@ class AgentOperationRepository:
             .where(agent_run_operations_table.c.id == str(operation_id))
             .where(agent_run_operations_table.c.run_id == str(run_id))
             .where(agent_run_operations_table.c.household_id == str(household_id))
-            .where(agent_run_operations_table.c.provider_id == provider_id)
             .where(agent_run_operations_table.c.status == AgentOperationStatus.LEASED.value)
             .where(agent_run_operations_table.c.lease_owner == worker_id)
             .where(agent_run_operations_table.c.lease_expires_at > now)
@@ -2446,9 +2830,211 @@ class AgentOperationRepository:
         )
         if self._session.get_bind().dialect.name != "sqlite":
             statement = statement.with_for_update()
+        row = (await self._session.execute(statement)).mappings().one_or_none()
+        if row is None:
+            raise AgentOperationConflict("agent_operation_not_reservable")
+        kind = AgentOperationKind(str(row["operation_kind"]))
+        if row["provider_id"] is None or kind not in _NETWORK_OPERATION_KINDS:
+            raise AgentOperationConflict("agent_operation_not_networked")
+        if row["provider_id"] != provider_id:
+            raise AgentOperationConflict("agent_operation_provider_mismatch")
+        return row
+
+    async def _get_http_reservation(
+        self,
+        operation_id: UUID,
+        operation_attempt_number: int,
+    ) -> RowMapping | None:
+        return (
+            (
+                await self._session.execute(
+                    select(agent_provider_http_attempts_table)
+                    .where(agent_provider_http_attempts_table.c.operation_id == str(operation_id))
+                    .where(
+                        agent_provider_http_attempts_table.c.operation_attempt_number
+                        == operation_attempt_number
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+
+    async def _validate_unconsumed_circuit_permit(
+        self,
+        operation: RowMapping,
+        permit: ServerPrivateCircuitPermit,
+        permit_digest: str,
+        now: datetime,
+    ) -> None:
+        stored_expiry = operation["circuit_permit_expires_at"]
+        if (
+            operation["circuit_permit_token_digest"] != permit_digest
+            or operation["circuit_permit_generation"] != permit.generation
+            or operation["circuit_permit_mode"] != permit.mode.value
+            or operation["circuit_permit_attempt_number"] != permit.operation_attempt_number
+            or stored_expiry is None
+            or _aware_datetime(cast(datetime, stored_expiry)) != permit.expires_at
+            or operation["circuit_permit_consumed_at"] is not None
+            or now >= permit.expires_at
+        ):
+            raise AgentOperationConflict("agent_circuit_permit_stale")
+        state = await self._locked_circuit_row(permit.provider_id)
+        _require_current_circuit_binding(state, permit, permit_digest, now=now)
+
+    async def _validate_consumed_circuit_permit(
+        self,
+        permit: ServerPrivateCircuitPermit,
+        reservation_id: UUID,
+        now: datetime,
+    ) -> RowMapping:
+        permit_digest = _permit_digest(permit.token)
+        reservation = (
+            (
+                await self._session.execute(
+                    select(agent_provider_http_attempts_table)
+                    .where(agent_provider_http_attempts_table.c.id == str(reservation_id))
+                    .where(
+                        agent_provider_http_attempts_table.c.operation_id
+                        == str(permit.operation_id)
+                    )
+                    .where(agent_provider_http_attempts_table.c.provider_id == permit.provider_id)
+                    .where(
+                        agent_provider_http_attempts_table.c.operation_attempt_number
+                        == permit.operation_attempt_number
+                    )
+                    .where(
+                        agent_provider_http_attempts_table.c.circuit_permit_generation
+                        == permit.generation
+                    )
+                    .where(
+                        agent_provider_http_attempts_table.c.circuit_permit_token_digest
+                        == permit_digest
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if reservation is None:
+            raise AgentOperationConflict("agent_circuit_permit_stale")
+        reserved_at = _aware_datetime(cast(datetime, reservation["reserved_at"]))
+        if reserved_at > permit.expires_at or now < reserved_at:
+            raise AgentOperationConflict("agent_circuit_permit_stale")
+        operation = (
+            (
+                await self._session.execute(
+                    select(agent_run_operations_table)
+                    .where(agent_run_operations_table.c.id == str(permit.operation_id))
+                    .where(
+                        agent_run_operations_table.c.circuit_permit_token_digest == permit_digest
+                    )
+                    .where(
+                        agent_run_operations_table.c.circuit_permit_generation == permit.generation
+                    )
+                    .where(
+                        agent_run_operations_table.c.circuit_permit_attempt_number
+                        == permit.operation_attempt_number
+                    )
+                    .where(agent_run_operations_table.c.circuit_permit_consumed_at.is_not(None))
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if operation is None:
+            raise AgentOperationConflict("agent_circuit_permit_stale")
+        state = await self._locked_circuit_row(permit.provider_id)
+        _require_current_circuit_binding(state, permit, permit_digest, now=None)
+        return state
+
+    async def _locked_claimed_operation(
+        self,
+        household_id: UUID,
+        operation_id: UUID,
+        worker_id: str,
+        now: datetime,
+    ) -> RowMapping | None:
+        statement = (
+            select(agent_run_operations_table)
+            .where(agent_run_operations_table.c.id == str(operation_id))
+            .where(agent_run_operations_table.c.household_id == str(household_id))
+            .where(agent_run_operations_table.c.status == AgentOperationStatus.LEASED.value)
+            .where(agent_run_operations_table.c.lease_owner == worker_id)
+            .where(agent_run_operations_table.c.lease_expires_at >= now)
+        )
+        if self._session.get_bind().dialect.name != "sqlite":
+            statement = statement.with_for_update()
+        return (await self._session.execute(statement)).mappings().one_or_none()
+
+    async def _raise_operation_transition_conflict(
+        self,
+        household_id: UUID,
+        operation_id: UUID,
+    ) -> None:
+        if await self.get_operation(household_id, operation_id) is None:
+            raise AgentOperationConflict("agent_operation_not_found")
+        raise AgentOperationConflict("agent_operation_transition_conflict")
+
+    async def _validate_operation_result_reference(
+        self,
+        source: RowMapping,
+        result_type: AgentOperationResultType,
+        result_id: UUID,
+    ) -> None:
+        kind = AgentOperationKind(str(source["operation_kind"]))
+        allowed = _OPERATION_RESULT_MATRIX[kind]
+        if result_type not in allowed:
+            raise AgentOperationConflict("agent_operation_result_incompatible")
+        if not isinstance(result_id, UUID):
+            raise TypeError("result_id must be UUID")
+
+        if result_type is AgentOperationResultType.OPERATION:
+            await self._validate_operation_handoff(source, result_id)
+            return
+
+        table, stage_scoped = _RESULT_REFERENCE_TABLES[result_type]
+        statement = (
+            select(table.c.id)
+            .where(table.c.id == str(result_id))
+            .where(table.c.household_id == str(source["household_id"]))
+            .where(table.c.run_id == str(source["run_id"]))
+        )
+        if stage_scoped:
+            statement = statement.where(table.c.stage_id == str(source["stage_id"]))
         exists = (await self._session.execute(statement)).scalar_one_or_none()
         if exists is None:
-            raise AgentOperationConflict("agent_operation_not_reservable")
+            raise AgentOperationConflict("agent_operation_result_not_found")
+
+    async def _validate_operation_handoff(
+        self,
+        source: RowMapping,
+        target_id: UUID,
+    ) -> None:
+        if str(target_id) == str(source["id"]):
+            raise AgentOperationConflict("agent_operation_result_invalid")
+        statement = (
+            select(agent_run_operations_table)
+            .where(agent_run_operations_table.c.id == str(target_id))
+            .where(agent_run_operations_table.c.household_id == str(source["household_id"]))
+            .where(agent_run_operations_table.c.run_id == str(source["run_id"]))
+            .where(agent_run_operations_table.c.stage_id == str(source["stage_id"]))
+        )
+        target = (await self._session.execute(statement)).mappings().one_or_none()
+        if target is None:
+            raise AgentOperationConflict("agent_operation_result_not_found")
+        source_kind = AgentOperationKind(str(source["operation_kind"]))
+        source_root_id = source["logical_root_operation_id"]
+        expected_root_id = (
+            source["id"] if source_kind is AgentOperationKind.EXACT_START else source_root_id
+        )
+        if (
+            AgentOperationKind(str(target["operation_kind"])) is not AgentOperationKind.EXACT_POLL
+            or target["provider_id"] != source["provider_id"]
+            or target["logical_operation_fingerprint"] != source["logical_operation_fingerprint"]
+            or target["logical_root_operation_id"] != expected_root_id
+        ):
+            raise AgentOperationConflict("agent_operation_result_invalid")
 
     async def _get_stage_by_kind(
         self,
@@ -2514,6 +3100,24 @@ class AgentOperationRepository:
         )
         return _operation_record(row) if row is not None else None
 
+    async def _get_logical_root_by_id(
+        self,
+        household_id: UUID,
+        run_id: UUID,
+        operation_id: UUID,
+    ) -> AgentRunOperationRecord | None:
+        statement = (
+            select(agent_run_operations_table)
+            .where(agent_run_operations_table.c.id == str(operation_id))
+            .where(agent_run_operations_table.c.household_id == str(household_id))
+            .where(agent_run_operations_table.c.run_id == str(run_id))
+            .where(agent_run_operations_table.c.consumes_logical_unit.is_(True))
+        )
+        if self._session.get_bind().dialect.name != "sqlite":
+            statement = statement.with_for_update()
+        row = (await self._session.execute(statement)).mappings().one_or_none()
+        return _operation_record(row) if row is not None else None
+
     async def _required_operation(
         self,
         household_id: UUID,
@@ -2536,11 +3140,10 @@ class AgentOperationRepository:
             raise AgentOperationConflict("agent_operation_not_found")
         raise AgentOperationConflict("agent_operation_transition_conflict")
 
-    async def _get_scope_snapshot_by_fingerprint(
+    async def _get_scope_snapshot_by_run(
         self,
         household_id: UUID,
         run_id: UUID,
-        fingerprint: str,
     ) -> AgentRunScopeSnapshotRecord | None:
         row = (
             (
@@ -2548,7 +3151,6 @@ class AgentOperationRepository:
                     select(agent_run_scope_snapshots_table)
                     .where(agent_run_scope_snapshots_table.c.household_id == str(household_id))
                     .where(agent_run_scope_snapshots_table.c.run_id == str(run_id))
-                    .where(agent_run_scope_snapshots_table.c.fingerprint == fingerprint)
                 )
             )
             .mappings()
@@ -2588,8 +3190,11 @@ class AgentOperationRepository:
             "consecutive_transient_failures": 0,
             "opened_at": None,
             "cooldown_until": None,
-            "half_open_probe_owner": None,
+            "half_open_probe_operation_id": None,
+            "half_open_probe_attempt_number": None,
+            "half_open_probe_token_digest": None,
             "half_open_probe_expires_at": None,
+            "generation": 0,
             "version": 0,
             "updated_at": now,
         }
@@ -2610,13 +3215,15 @@ class AgentOperationRepository:
                 raise
 
     async def _locked_circuit_state(self, provider_id: str) -> AgentCircuitStateRecord:
+        return _circuit_record(await self._locked_circuit_row(provider_id))
+
+    async def _locked_circuit_row(self, provider_id: str) -> RowMapping:
         statement = select(agent_provider_circuit_state_table).where(
             agent_provider_circuit_state_table.c.provider_id == provider_id
         )
         if self._session.get_bind().dialect.name != "sqlite":
             statement = statement.with_for_update()
-        row = (await self._session.execute(statement)).mappings().one()
-        return _circuit_record(row)
+        return (await self._session.execute(statement)).mappings().one()
 
 
 class AgentEvidenceRepository:
@@ -3472,6 +4079,14 @@ _UNSAFE_JSON_KEY_PARTS = (
     "passenger_name",
     "full_name",
     "pii",
+    "api_key",
+    "apikey",
+    "credential",
+    "access_key",
+    "accesskey",
+    "email",
+    "phone",
+    "contact",
 )
 _PROVIDER_BOUND_OPERATION_KINDS = frozenset(
     {
@@ -3481,6 +4096,129 @@ _PROVIDER_BOUND_OPERATION_KINDS = frozenset(
         AgentOperationKind.SUGGEST_DISCOVERY,
     }
 )
+_INDEPENDENT_OPERATION_KINDS = frozenset(
+    {
+        AgentOperationKind.SCOPE_FREEZE,
+        AgentOperationKind.COMPARISON,
+        AgentOperationKind.COMPOSITION,
+        AgentOperationKind.RANKING,
+        AgentOperationKind.ANALYSIS,
+    }
+)
+_LOGICAL_ROOT_OPERATION_KINDS = frozenset(
+    {AgentOperationKind.CALENDAR_SEARCH, AgentOperationKind.EXACT_START}
+)
+_NETWORK_OPERATION_KINDS = frozenset(
+    {
+        AgentOperationKind.CALENDAR_SEARCH,
+        AgentOperationKind.EXACT_START,
+        AgentOperationKind.EXACT_POLL,
+    }
+)
+_OPERATION_RESULT_MATRIX: dict[AgentOperationKind, frozenset[AgentOperationResultType]] = {
+    AgentOperationKind.SCOPE_FREEZE: frozenset({AgentOperationResultType.SCOPE_SNAPSHOT}),
+    AgentOperationKind.CALENDAR_SEARCH: frozenset({AgentOperationResultType.DISCOVERY_SIGNAL}),
+    AgentOperationKind.EXACT_START: frozenset({AgentOperationResultType.OPERATION}),
+    AgentOperationKind.EXACT_POLL: frozenset(
+        {AgentOperationResultType.OPERATION, AgentOperationResultType.CONFIRMED_OFFER}
+    ),
+    AgentOperationKind.SUGGEST_DISCOVERY: frozenset(),
+    AgentOperationKind.COMPARISON: frozenset(),
+    AgentOperationKind.COMPOSITION: frozenset({AgentOperationResultType.COMPOSED_CANDIDATE}),
+    AgentOperationKind.RANKING: frozenset({AgentOperationResultType.RANKING_SNAPSHOT}),
+    AgentOperationKind.ANALYSIS: frozenset(),
+}
+_RESULT_REFERENCE_TABLES: dict[AgentOperationResultType, tuple[Table, bool]] = {
+    AgentOperationResultType.SCOPE_SNAPSHOT: (agent_run_scope_snapshots_table, False),
+    AgentOperationResultType.DISCOVERY_SIGNAL: (agent_discovery_signals_table, True),
+    AgentOperationResultType.CONFIRMED_OFFER: (agent_confirmed_offer_evidence_table, True),
+    AgentOperationResultType.COMPOSED_CANDIDATE: (
+        agent_composed_route_candidates_table,
+        True,
+    ),
+    AgentOperationResultType.RANKING_SNAPSHOT: (agent_ranking_snapshots_table, False),
+}
+
+_OPERATION_INPUT_KEYS = frozenset(
+    {
+        "value",
+        "origin",
+        "destination",
+        "route",
+        "date",
+        "departure_date",
+        "return_date",
+        "passengers",
+        "adults",
+        "children",
+        "infants",
+        "phase",
+        "poll_round",
+        "round",
+        "currency",
+        "cabin",
+        "segment_ids",
+        "component_evidence_ids",
+        "ranking_profile",
+        "workflow_version",
+        "analysis_mode",
+        "comparison_key",
+        "ordered",
+        "version",
+    }
+)
+_PRIVATE_CONTINUATION_KEYS = frozenset(
+    {"value", "search_session", "search_id", "cursor", "poll_round", "request_id", "complete"}
+)
+_SCOPE_SNAPSHOT_KEYS = frozenset(
+    {
+        "value",
+        "airports",
+        "origins",
+        "destinations",
+        "source_signal_ids",
+        "catalog_checksum",
+        "taxonomy_version",
+        "coverage",
+    }
+)
+_DISCOVERY_EVIDENCE_KEYS = frozenset({"value", "calendar_bucket", "route_key", "source_version"})
+_CONFIRMED_ITINERARY_KEYS = frozenset(
+    {
+        "value",
+        "segments",
+        "origin",
+        "destination",
+        "depart_at",
+        "arrive_at",
+        "carrier",
+        "flight_number",
+        "duration_seconds",
+        "stops",
+        "ticket_structure",
+        "seller",
+        "fare_family",
+    }
+)
+_COMPOSED_ITINERARY_KEYS = frozenset(
+    {
+        "value",
+        "components",
+        "segments",
+        "origin",
+        "destination",
+        "depart_at",
+        "arrive_at",
+        "carrier",
+        "flight_number",
+        "duration_seconds",
+        "stops",
+        "ticket_boundaries",
+        "assumptions",
+        "unknown_costs",
+    }
+)
+_RANKING_KEYS = frozenset({"value", "ordered", "version", "profile", "scores", "reasons"})
 
 
 def canonical_sanitized_json(value: Mapping[str, object]) -> str:
@@ -3503,8 +4241,13 @@ def _sanitize_json_value(
     if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, str):
-        if re.match(r"^[a-z][a-z0-9+.-]*://", value.strip(), flags=re.IGNORECASE):
-            raise ValueError(f"unsafe field at {path}: URL values are not allowed")
+        stripped = value.strip()
+        if re.match(r"^(?:[a-z][a-z0-9+.-]*:|//)", stripped, flags=re.IGNORECASE):
+            raise ValueError(f"unsafe field at {path}: URI values are not allowed")
+        if re.search(r"\b[^\s@]+@[^\s@]+\.[^\s@]+\b", stripped):
+            raise ValueError(f"unsafe field at {path}: email values are not allowed")
+        if re.fullmatch(r"\+[0-9() .-]{7,}", stripped):
+            raise ValueError(f"unsafe field at {path}: phone values are not allowed")
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -3516,7 +4259,11 @@ def _sanitize_json_value(
             if not isinstance(key, str):
                 raise TypeError(f"{path} JSON object keys must be strings")
             normalized_key = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
-            if inspect_keys and any(part in normalized_key for part in _UNSAFE_JSON_KEY_PARTS):
+            compact_key = re.sub(r"[^a-z0-9]+", "", key.casefold())
+            if inspect_keys and any(
+                re.sub(r"[^a-z0-9]+", "", part.casefold()) in compact_key or part in normalized_key
+                for part in _UNSAFE_JSON_KEY_PARTS
+            ):
                 raise ValueError(f"unsafe field at {path}.{key}")
             sanitized[key] = _sanitize_json_value(
                 item,
@@ -3530,6 +4277,183 @@ def _sanitize_json_value(
             for index, item in enumerate(value)
         ]
     raise TypeError(f"{path} must contain JSON-compatible values")
+
+
+def canonical_operation_input_json(value: Mapping[str, object]) -> str:
+    return _canonical_context_json(value, "operation_input", _OPERATION_INPUT_KEYS)
+
+
+def _canonical_private_continuation_json(value: Mapping[str, object]) -> str:
+    return _canonical_context_json(value, "private_continuation", _PRIVATE_CONTINUATION_KEYS)
+
+
+def _canonical_scope_snapshot_json(value: Mapping[str, object]) -> str:
+    return _canonical_context_json(value, "scope_snapshot", _SCOPE_SNAPSHOT_KEYS)
+
+
+def _canonical_discovery_evidence_json(value: Mapping[str, object]) -> str:
+    return _canonical_context_json(value, "discovery_evidence", _DISCOVERY_EVIDENCE_KEYS)
+
+
+def _canonical_confirmed_itinerary_json(value: Mapping[str, object]) -> str:
+    return _canonical_context_json(value, "confirmed_itinerary", _CONFIRMED_ITINERARY_KEYS)
+
+
+def _canonical_composed_itinerary_json(value: Mapping[str, object]) -> str:
+    return _canonical_context_json(value, "composed_itinerary", _COMPOSED_ITINERARY_KEYS)
+
+
+def _canonical_ranking_json(value: Mapping[str, object]) -> str:
+    return _canonical_context_json(value, "ranking", _RANKING_KEYS)
+
+
+def _canonical_context_json(
+    value: Mapping[str, object],
+    context: str,
+    allowed_keys: frozenset[str],
+) -> str:
+    sanitized = _sanitize_json_value(value, path="$", inspect_keys=True)
+    _validate_context_keys(sanitized, context=context, allowed_keys=allowed_keys, path="$")
+    _validate_typed_context_values(sanitized, context=context, path="$")
+    return json.dumps(
+        sanitized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _validate_context_keys(
+    value: object,
+    *,
+    context: str,
+    allowed_keys: frozenset[str],
+    path: str,
+) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if key not in allowed_keys:
+                raise ValueError(f"field {path}.{key} is not allowed in {context}")
+            _validate_context_keys(
+                item,
+                context=context,
+                allowed_keys=allowed_keys,
+                path=f"{path}.{key}",
+            )
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for index, item in enumerate(value):
+            _validate_context_keys(
+                item,
+                context=context,
+                allowed_keys=allowed_keys,
+                path=f"{path}[{index}]",
+            )
+
+
+def _validate_typed_context_values(value: object, *, context: str, path: str) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            item_path = f"{path}.{key}"
+            if key in {"origin", "destination"}:
+                if not isinstance(item, str) or not re.fullmatch(r"[A-Z0-9]{3}", item):
+                    raise ValueError(f"{item_path} must be a normalized IATA code")
+            elif key in {"date", "departure_date", "return_date"} and item is not None:
+                if not isinstance(item, str):
+                    raise TypeError(f"{item_path} must be an ISO date string")
+                try:
+                    date.fromisoformat(item)
+                except ValueError as error:
+                    raise ValueError(f"{item_path} must be an ISO date string") from error
+            elif key in {
+                "poll_round",
+                "round",
+                "cursor",
+                "duration_seconds",
+                "stops",
+                "adults",
+                "children",
+                "infants",
+            }:
+                if type(item) is not int or item < 0:
+                    raise ValueError(f"{item_path} must be a non-negative integer")
+            elif key in {"route", "airports", "origins", "destinations"}:
+                if not isinstance(item, Sequence) or isinstance(item, (str, bytes, bytearray)):
+                    raise TypeError(f"{item_path} must be an ordered code collection")
+                if not all(
+                    isinstance(code, str) and re.fullmatch(r"[A-Z0-9]{3}", code) for code in item
+                ):
+                    raise ValueError(f"{item_path} must contain normalized IATA codes")
+            elif key in {"segments", "components", "ordered"}:
+                if not isinstance(item, Sequence) or isinstance(item, (str, bytes, bytearray)):
+                    raise TypeError(f"{item_path} must be an ordered collection")
+            elif key == "passengers" and not (
+                (type(item) is int and item > 0) or (isinstance(item, Mapping) and bool(item))
+            ):
+                raise ValueError(f"{item_path} must be a positive count or typed mix")
+            _validate_typed_context_values(item, context=context, path=item_path)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for index, item in enumerate(value):
+            _validate_typed_context_values(item, context=context, path=f"{path}[{index}]")
+
+
+def _permit_digest(token: str) -> str:
+    return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _expected_attempt_kind(operation: Mapping[Any, Any]) -> AttemptKind:
+    if int(operation["attempt_count"]) > 1:
+        return AttemptKind.RETRY
+    kind = AgentOperationKind(str(operation["operation_kind"]))
+    if kind is AgentOperationKind.EXACT_POLL:
+        return AttemptKind.POLL
+    if kind in {AgentOperationKind.CALENDAR_SEARCH, AgentOperationKind.EXACT_START}:
+        return AttemptKind.START
+    raise AgentOperationConflict("agent_operation_not_networked")
+
+
+def _require_permit_call_binding(
+    permit: ServerPrivateCircuitPermit,
+    *,
+    permit_digest: str,
+    operation: Mapping[Any, Any],
+    provider_id: str,
+) -> None:
+    if (
+        permit.provider_id != provider_id
+        or permit.operation_id != UUID(str(operation["id"]))
+        or permit.operation_attempt_number != int(operation["attempt_count"])
+        or operation["provider_id"] != provider_id
+        or not _SHA256_RE.fullmatch(permit_digest)
+    ):
+        raise AgentOperationConflict("agent_circuit_permit_stale")
+
+
+def _require_current_circuit_binding(
+    state: Mapping[Any, Any],
+    permit: ServerPrivateCircuitPermit,
+    permit_digest: str,
+    *,
+    now: datetime | None,
+) -> None:
+    if int(state["generation"]) != permit.generation:
+        raise AgentOperationConflict("agent_circuit_permit_stale")
+    state_value = AgentCircuitState(str(state["state"]))
+    if permit.mode is CircuitPermitMode.CLOSED:
+        if state_value is not AgentCircuitState.CLOSED:
+            raise AgentOperationConflict("agent_circuit_permit_stale")
+        return
+    probe_expiry = state["half_open_probe_expires_at"]
+    if (
+        state_value is not AgentCircuitState.HALF_OPEN
+        or state["half_open_probe_operation_id"] != str(permit.operation_id)
+        or state["half_open_probe_attempt_number"] != permit.operation_attempt_number
+        or state["half_open_probe_token_digest"] != permit_digest
+        or probe_expiry is None
+        or _aware_datetime(cast(datetime, probe_expiry)) != permit.expires_at
+        or (now is not None and now >= permit.expires_at)
+    ):
+        raise AgentOperationConflict("agent_circuit_permit_stale")
 
 
 def _validate_new_stage(stage: NewAgentPlanStage) -> None:
@@ -3549,12 +4473,31 @@ def _validate_new_operation(operation: NewAgentRunOperation) -> tuple[str, str |
     ):
         raise TypeError("operation ownership ids must be UUID values")
     kind = AgentOperationKind(operation.kind)
+    if kind is AgentOperationKind.SUGGEST_DISCOVERY:
+        raise AgentOperationConflict("agent_operation_kind_not_budgeted")
+    if operation.logical_root_operation_id is not None and not isinstance(
+        operation.logical_root_operation_id, UUID
+    ):
+        raise TypeError("logical_root_operation_id must be UUID or None")
     if operation.provider_id is not None and not operation.provider_id.strip():
         raise ValueError("provider_id must not be blank")
-    if kind in _PROVIDER_BOUND_OPERATION_KINDS and operation.provider_id is None:
-        raise ValueError("provider-bound operation requires provider_id")
+    if kind in _PROVIDER_BOUND_OPERATION_KINDS:
+        if operation.provider_id is None:
+            raise ValueError("provider-bound operation requires provider_id")
+    elif operation.provider_id is not None:
+        raise ValueError("provider-neutral operation cannot have provider_id")
     if type(operation.consumes_logical_unit) is not bool:
         raise TypeError("consumes_logical_unit must be bool")
+    if kind in _LOGICAL_ROOT_OPERATION_KINDS:
+        if not operation.consumes_logical_unit or operation.logical_root_operation_id is not None:
+            raise AgentOperationConflict("agent_logical_operation_shape_invalid")
+    elif kind is AgentOperationKind.EXACT_POLL:
+        if operation.consumes_logical_unit:
+            raise AgentOperationConflict("agent_logical_operation_shape_invalid")
+    elif kind in _INDEPENDENT_OPERATION_KINDS and (
+        operation.consumes_logical_unit or operation.logical_root_operation_id is not None
+    ):
+        raise AgentOperationConflict("agent_logical_operation_shape_invalid")
     if type(operation.max_attempts) is not int or operation.max_attempts <= 0:
         raise ValueError("max_attempts must be a positive integer")
     _validate_fingerprint(operation.operation_fingerprint, "operation_fingerprint")
@@ -3563,9 +4506,9 @@ def _validate_new_operation(operation: NewAgentRunOperation) -> tuple[str, str |
         "logical_operation_fingerprint",
     )
     _require_aware(operation.created_at, "created_at")
-    immutable_input_json = canonical_sanitized_json(operation.immutable_input)
+    immutable_input_json = canonical_operation_input_json(operation.immutable_input)
     private_continuation_json = (
-        canonical_sanitized_json(operation.private_continuation)
+        _canonical_private_continuation_json(operation.private_continuation)
         if operation.private_continuation is not None
         else None
     )
@@ -3575,6 +4518,42 @@ def _validate_new_operation(operation: NewAgentRunOperation) -> tuple[str, str |
 def _validate_fingerprint(value: str, field_name: str) -> None:
     if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
         raise ValueError(f"{field_name} must be a lowercase sha256 fingerprint")
+
+
+def _require_materialization_match(
+    existing: AgentRunOperationRecord,
+    requested: NewAgentRunOperation,
+) -> None:
+    if (
+        existing.household_id != requested.household_id
+        or existing.run_id != requested.run_id
+        or existing.stage_id != requested.stage_id
+        or existing.provider_id != requested.provider_id
+        or existing.kind is not AgentOperationKind(requested.kind)
+        or existing.logical_operation_fingerprint != requested.logical_operation_fingerprint
+        or existing.logical_root_operation_id != requested.logical_root_operation_id
+        or existing.consumes_logical_unit is not requested.consumes_logical_unit
+        or canonical_operation_input_json(existing.immutable_input)
+        != canonical_operation_input_json(requested.immutable_input)
+        or existing.max_attempts != requested.max_attempts
+    ):
+        raise AgentOperationConflict("agent_operation_fingerprint_conflict")
+
+
+def _logical_root_matches_child(
+    root: AgentRunOperationRecord,
+    child: NewAgentRunOperation,
+) -> bool:
+    return (
+        root.kind is AgentOperationKind.EXACT_START
+        and AgentOperationKind(child.kind) is AgentOperationKind.EXACT_POLL
+        and root.household_id == child.household_id
+        and root.run_id == child.run_id
+        and root.stage_id == child.stage_id
+        and root.provider_id == child.provider_id
+        and root.logical_operation_fingerprint == child.logical_operation_fingerprint
+        and root.id == child.logical_root_operation_id
+    )
 
 
 def _stage_record(row: RowMapping) -> AgentPlanStageRecord:
@@ -3604,6 +4583,11 @@ def _operation_record(row: RowMapping) -> AgentRunOperationRecord:
         kind=AgentOperationKind(str(row["operation_kind"])),
         operation_fingerprint=str(row["operation_fingerprint"]),
         logical_operation_fingerprint=str(row["logical_operation_fingerprint"]),
+        logical_root_operation_id=(
+            UUID(str(row["logical_root_operation_id"]))
+            if row["logical_root_operation_id"] is not None
+            else None
+        ),
         consumes_logical_unit=bool(row["consumes_logical_unit"]),
         immutable_input=_json_object(str(row["immutable_input_json"])),
         status=AgentOperationStatus(str(row["status"])),
@@ -3650,6 +4634,34 @@ def _operation_claim_eligibility(now: datetime) -> Any:
     )
 
 
+def _run_state_allows_io(row: Mapping[Any, Any], now: datetime) -> bool:
+    status, created_at, deadline_at = _run_execution_values(row)
+    return status in {"queued", "running"} and created_at <= now < deadline_at
+
+
+def _inactive_run_error(row: Mapping[Any, Any], now: datetime) -> str | None:
+    status, _created_at, deadline_at = _run_execution_values(row)
+    if status in {"cancel_requested", "cancelled"}:
+        return "agent_run_cancelled"
+    if now >= deadline_at:
+        return "agent_run_deadline_exceeded"
+    if status in _TERMINAL_RUN_STATUSES:
+        return "agent_run_terminal"
+    return None
+
+
+def _run_execution_values(row: Mapping[Any, Any]) -> tuple[str, datetime, datetime]:
+    prefixed = "run_status" in row
+    status_key = "run_status" if prefixed else "status"
+    created_key = "run_created_at" if prefixed else "created_at"
+    deadline_key = "run_deadline_at" if prefixed else "deadline_at"
+    return (
+        str(row[status_key]),
+        _aware_datetime(cast(datetime, row[created_key])),
+        _aware_datetime(cast(datetime, row[deadline_key])),
+    )
+
+
 def _validate_operation_completion(worker_id: str, code: str, now: datetime) -> None:
     _require_aware(now, "now")
     if not worker_id.strip():
@@ -3679,12 +4691,20 @@ def _circuit_record(row: RowMapping) -> AgentCircuitStateRecord:
         consecutive_transient_failures=int(row["consecutive_transient_failures"]),
         opened_at=_aware_datetime(opened_at) if opened_at is not None else None,
         cooldown_until=(_aware_datetime(cooldown_until) if cooldown_until is not None else None),
-        half_open_probe_owner=(
-            str(row["half_open_probe_owner"]) if row["half_open_probe_owner"] is not None else None
+        half_open_probe_operation_id=(
+            UUID(str(row["half_open_probe_operation_id"]))
+            if row["half_open_probe_operation_id"] is not None
+            else None
+        ),
+        half_open_probe_attempt_number=(
+            int(row["half_open_probe_attempt_number"])
+            if row["half_open_probe_attempt_number"] is not None
+            else None
         ),
         half_open_probe_expires_at=(
             _aware_datetime(probe_expires_at) if probe_expires_at is not None else None
         ),
+        generation=int(row["generation"]),
         version=int(row["version"]),
         updated_at=_aware_datetime(row["updated_at"]),
     )
@@ -3786,7 +4806,7 @@ def _validate_discovery_signal(signal: NewAgentDiscoverySignal) -> str:
     Freshness(signal.freshness)
     _validate_evidence_times(signal.observed_at, signal.created_at)
     _validate_fingerprint(signal.fingerprint, "fingerprint")
-    return canonical_sanitized_json(signal.signal_evidence)
+    return _canonical_discovery_evidence_json(signal.signal_evidence)
 
 
 def _validate_confirmed_evidence(evidence: NewAgentConfirmedOfferEvidence) -> str:
@@ -3810,7 +4830,7 @@ def _validate_confirmed_evidence(evidence: NewAgentConfirmedOfferEvidence) -> st
     )
     _validate_evidence_times(evidence.observed_at, evidence.created_at)
     _validate_fingerprint(evidence.fingerprint, "fingerprint")
-    return canonical_sanitized_json(evidence.itinerary_evidence)
+    return _canonical_confirmed_itinerary_json(evidence.itinerary_evidence)
 
 
 def _validate_composed_candidate(candidate: NewAgentComposedRouteCandidate) -> str:
@@ -3835,7 +4855,7 @@ def _validate_composed_candidate(candidate: NewAgentComposedRouteCandidate) -> s
     )
     _validate_evidence_times(candidate.observed_at, candidate.created_at)
     _validate_fingerprint(candidate.fingerprint, "fingerprint")
-    return canonical_sanitized_json(candidate.itinerary_evidence)
+    return _canonical_composed_itinerary_json(candidate.itinerary_evidence)
 
 
 def _validate_ranking_snapshot(snapshot: NewAgentRankingSnapshot) -> str:
@@ -3859,7 +4879,7 @@ def _validate_ranking_snapshot(snapshot: NewAgentRankingSnapshot) -> str:
         raise ValueError("ranking snapshot requires at least one result reference")
     _require_aware(snapshot.created_at, "created_at")
     _validate_fingerprint(snapshot.fingerprint, "fingerprint")
-    return canonical_sanitized_json(snapshot.ranking)
+    return _canonical_ranking_json(snapshot.ranking)
 
 
 def _optional_enum_value(value: object, enum_type: type[StrEnum]) -> str | None:

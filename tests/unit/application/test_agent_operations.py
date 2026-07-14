@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import asyncio
+import math
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from uuid import UUID
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+import flight_hunter.persistence.agent_repositories as agent_repository_types
 from flight_hunter.application.agent_operations import (
-    AgentProviderCircuitBreaker,
     CircuitPermitStatus,
+    OperationSpec,
     ProviderFailureClass,
     canonical_json,
     logical_workflow_fingerprint,
@@ -18,12 +19,10 @@ from flight_hunter.application.agent_operations import (
 )
 from flight_hunter.persistence.agent_repositories import (
     AgentOperationKind,
-    AgentOperationRepository,
     AgentOperationStatus,
     CircuitPermitResult,
+    NewAgentRunOperation,
 )
-from flight_hunter.persistence.database import create_database_engine
-from flight_hunter.persistence.models import mapper_registry
 
 NOW = datetime(2026, 7, 14, 10, 0, tzinfo=UTC)
 
@@ -64,10 +63,11 @@ def test_fingerprint_changes_with_operation_kind_or_typed_immutable_input() -> N
         AgentOperationKind.EXACT_START,
         {"origin": "LED", "destination": "CDG", "passengers": 2},
     )
-    assert base != operation_fingerprint(
-        AgentOperationKind.EXACT_START,
-        {"origin": "LED", "destination": "CDG", "passengers": "1"},
-    )
+    with pytest.raises(ValueError, match="passengers"):
+        operation_fingerprint(
+            AgentOperationKind.EXACT_START,
+            {"origin": "LED", "destination": "CDG", "passengers": "1"},
+        )
 
 
 def test_start_and_poll_can_share_a_separate_logical_workflow_fingerprint() -> None:
@@ -158,6 +158,64 @@ def test_429_uses_retry_after_and_network_or_5xx_retry_is_bounded() -> None:
     assert server_exhausted.next_retry_at is None
 
 
+def test_review_network_and_server_retry_use_bounded_jitter_without_lowering_retry_after() -> None:
+    low = retry_decision(
+        failure_class=ProviderFailureClass.NETWORK,
+        attempt_count=3,
+        max_attempts=8,
+        now=NOW,
+        jitter_source=lambda: 0.0,
+    )
+    middle = retry_decision(
+        failure_class=ProviderFailureClass.SERVER,
+        attempt_count=3,
+        max_attempts=8,
+        now=NOW,
+        jitter_source=lambda: 0.5,
+    )
+    high = retry_decision(
+        failure_class=ProviderFailureClass.NETWORK,
+        attempt_count=3,
+        max_attempts=8,
+        now=NOW,
+        jitter_source=lambda: 1.0,
+    )
+    capped = retry_decision(
+        failure_class=ProviderFailureClass.SERVER,
+        attempt_count=7,
+        max_attempts=8,
+        now=NOW,
+        jitter_source=lambda: 1.0,
+    )
+    retry_after = NOW + timedelta(seconds=47)
+    limited = retry_decision(
+        failure_class=ProviderFailureClass.RATE_LIMITED,
+        attempt_count=1,
+        max_attempts=8,
+        now=NOW,
+        retry_after=retry_after,
+        jitter_source=lambda: (_ for _ in ()).throw(AssertionError("jitter must not run")),
+    )
+
+    assert low.next_retry_at == NOW + timedelta(seconds=16)
+    assert middle.next_retry_at == NOW + timedelta(seconds=20)
+    assert high.next_retry_at == NOW + timedelta(seconds=24)
+    assert capped.next_retry_at == NOW + timedelta(seconds=300)
+    assert limited.next_retry_at == retry_after
+
+
+@pytest.mark.parametrize("sample", [-0.01, 1.01, math.nan])
+def test_review_retry_jitter_rejects_out_of_range_or_non_finite_samples(sample: float) -> None:
+    with pytest.raises(ValueError, match="jitter"):
+        retry_decision(
+            failure_class=ProviderFailureClass.NETWORK,
+            attempt_count=1,
+            max_attempts=3,
+            now=NOW,
+            jitter_source=lambda: sample,
+        )
+
+
 @pytest.mark.parametrize(
     ("attempt_count", "max_attempts"),
     [(0, 3), (4, 3), (1, 0), (True, 3)],
@@ -193,7 +251,19 @@ def test_retry_decision_rejects_naive_now_or_retry_after() -> None:
         )
 
 
-def test_circuit_permit_result_enforces_status_specific_retry_time() -> None:
+def test_review_circuit_permit_result_enforces_status_specific_shape() -> None:
+    permit_type = agent_repository_types.ServerPrivateCircuitPermit
+    mode_type = agent_repository_types.CircuitPermitMode
+    permit = permit_type(
+        provider_id="aviasales_search",
+        operation_id=UUID("77777777-7777-7777-7777-777777777777"),
+        operation_attempt_number=1,
+        generation=4,
+        mode=mode_type.CLOSED,
+        token="permit-super-secret",
+        expires_at=NOW + timedelta(seconds=30),
+    )
+
     with pytest.raises(ValueError, match="requires retry_at"):
         CircuitPermitResult(CircuitPermitStatus.OPEN)
     with pytest.raises(ValueError, match="timezone-aware"):
@@ -206,141 +276,50 @@ def test_circuit_permit_result_enforces_status_specific_retry_time() -> None:
         CircuitPermitStatus.HALF_OPEN_PROBE,
     ):
         with pytest.raises(ValueError, match="only valid"):
-            CircuitPermitResult(status, retry_at=NOW + timedelta(seconds=1))
-
-
-@pytest.mark.anyio
-async def test_persistent_circuit_survives_service_instance_and_denies_while_open(
-    tmp_path: Path,
-) -> None:
-    engine, sessions = await _session_factory(tmp_path, "circuit-persistence.db")
-
-    async with sessions() as session:
-        circuit = _circuit(session)
-        assert (
-            await circuit.before_attempt("aviasales_search", "worker-a", NOW)
-        ).status is CircuitPermitStatus.ALLOWED
-        await circuit.record_failure("aviasales_search", ProviderFailureClass.NETWORK, NOW)
-        opened = await circuit.record_failure(
-            "aviasales_search", ProviderFailureClass.SERVER, NOW + timedelta(seconds=1)
-        )
-        await session.commit()
-        assert opened.state.value == "open"
-
-    async with sessions() as session:
-        fresh_instance = _circuit(session)
-        denied = await fresh_instance.before_attempt(
-            "aviasales_search", "worker-b", NOW + timedelta(seconds=30)
-        )
-        assert denied.status is CircuitPermitStatus.OPEN
-        assert denied.retry_at == NOW + timedelta(seconds=61)
-
-    await engine.dispose()
-
-
-@pytest.mark.anyio
-async def test_after_cooldown_only_one_concurrent_half_open_probe_is_admitted(
-    tmp_path: Path,
-) -> None:
-    engine, sessions = await _session_factory(tmp_path, "circuit-half-open.db")
-    async with sessions() as session:
-        circuit = _circuit(session)
-        await circuit.record_failure("aviasales_search", ProviderFailureClass.NETWORK, NOW)
-        await circuit.record_failure(
-            "aviasales_search", ProviderFailureClass.SERVER, NOW + timedelta(seconds=1)
-        )
-        await session.commit()
-
-    ready = 0
-    ready_lock = asyncio.Lock()
-    start = asyncio.Event()
-
-    async def probe(worker_id: str) -> CircuitPermitStatus:
-        nonlocal ready
-        async with sessions() as session:
-            async with ready_lock:
-                ready += 1
-                if ready == 2:
-                    start.set()
-            await start.wait()
-            permit = await _circuit(session).before_attempt(
-                "aviasales_search",
-                worker_id,
-                NOW + timedelta(seconds=62),
+            CircuitPermitResult(
+                status,
+                retry_at=NOW + timedelta(seconds=1),
+                permit=permit,
             )
-            await session.commit()
-            return permit.status
+        with pytest.raises(ValueError, match="requires permit"):
+            CircuitPermitResult(status)
 
-    statuses = await asyncio.gather(probe("worker-a"), probe("worker-b"))
+    allowed = CircuitPermitResult(CircuitPermitStatus.ALLOWED, permit=permit)
+    assert allowed.permit == permit
+    assert "permit-super-secret" not in repr(permit)
+    assert "permit-super-secret" not in repr(allowed)
 
-    assert sorted(statuses, key=str) == sorted(
-        [CircuitPermitStatus.HALF_OPEN_PROBE, CircuitPermitStatus.OPEN],
-        key=str,
+
+def test_review_private_operation_dtos_do_not_leak_continuation_in_repr() -> None:
+    operation_id = UUID("77777777-7777-7777-7777-777777777777")
+    common = {
+        "id": operation_id,
+        "household_id": UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        "run_id": UUID("55555555-5555-5555-5555-555555555555"),
+        "stage_id": UUID("66666666-6666-6666-6666-666666666666"),
+        "provider_id": "aviasales_search",
+        "kind": AgentOperationKind.EXACT_START,
+        "immutable_input": {"origin": "LED", "destination": "CDG"},
+        "private_continuation": {"search_session": "opaque-private-state"},
+        "max_attempts": 3,
+        "created_at": NOW,
+    }
+    spec = OperationSpec(
+        **common,
+        logical_workflow_input={"origin": "LED", "destination": "CDG"},
+        consumes_logical_unit=True,
     )
-    await engine.dispose()
-
-
-@pytest.mark.anyio
-async def test_successful_half_open_probe_closes_and_resets_circuit(tmp_path: Path) -> None:
-    engine, sessions = await _session_factory(tmp_path, "circuit-success.db")
-    async with sessions() as session:
-        circuit = _circuit(session)
-        await circuit.record_failure("aviasales_search", ProviderFailureClass.NETWORK, NOW)
-        await circuit.record_failure(
-            "aviasales_search", ProviderFailureClass.SERVER, NOW + timedelta(seconds=1)
-        )
-        probe = await circuit.before_attempt(
-            "aviasales_search", "worker-a", NOW + timedelta(seconds=62)
-        )
-        assert probe.status is CircuitPermitStatus.HALF_OPEN_PROBE
-        closed = await circuit.record_success(
-            "aviasales_search", "worker-a", NOW + timedelta(seconds=63)
-        )
-        await session.commit()
-
-        assert closed.state.value == "closed"
-        assert closed.consecutive_transient_failures == 0
-        assert closed.half_open_probe_owner is None
-
-    async with sessions() as session:
-        permit = await _circuit(session).before_attempt(
-            "aviasales_search", "worker-b", NOW + timedelta(seconds=64)
-        )
-        assert permit.status is CircuitPermitStatus.ALLOWED
-
-    await engine.dispose()
-
-
-@pytest.mark.anyio
-async def test_terminal_failure_does_not_increment_transient_circuit_counter(
-    tmp_path: Path,
-) -> None:
-    engine, sessions = await _session_factory(tmp_path, "circuit-terminal.db")
-    async with sessions() as session:
-        circuit = _circuit(session)
-        state = await circuit.record_failure("aviasales_search", ProviderFailureClass.AUTH, NOW)
-        await session.commit()
-
-        assert state.state.value == "closed"
-        assert state.consecutive_transient_failures == 0
-
-    await engine.dispose()
-
-
-async def _session_factory(
-    tmp_path: Path,
-    filename: str,
-) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
-    engine = create_database_engine(f"sqlite+aiosqlite:///{(tmp_path / filename).as_posix()}")
-    async with engine.begin() as connection:
-        await connection.run_sync(mapper_registry.metadata.create_all)
-    return engine, async_sessionmaker(engine, expire_on_commit=False)
-
-
-def _circuit(session: AsyncSession) -> AgentProviderCircuitBreaker:
-    return AgentProviderCircuitBreaker(
-        AgentOperationRepository(session),
-        transient_failure_threshold=2,
-        cooldown_seconds=60,
-        probe_lease_seconds=30,
+    stored = NewAgentRunOperation(
+        **common,
+        operation_fingerprint="sha256:" + "a" * 64,
+        logical_operation_fingerprint="sha256:" + "b" * 64,
+        consumes_logical_unit=True,
     )
+
+    assert "opaque-private-state" not in repr(spec)
+    assert "opaque-private-state" not in repr(stored)
+    assert "private_continuation=" not in repr(spec)
+    assert "private_continuation=" not in repr(stored)
+
+    mutated = replace(spec, private_continuation={"search_id": "another-private-value"})
+    assert "another-private-value" not in repr(mutated)

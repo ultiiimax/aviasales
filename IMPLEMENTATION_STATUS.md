@@ -125,19 +125,23 @@ tests and 4 integration tests pass, rendered web JavaScript parses, mypy checks
 114 source files, and Ruff format/check remain clean across 276 files. Final
 independent re-review accepted the slice at `8f7b39b` with no findings.
 
-Task 7 implementation is complete and pending independent review; its acceptance
-checkbox remains unchecked. Forward-only migration 0024 and matching Core
-metadata add the ten durable ledger/evidence tables and exact approved logical / HTTP
-budgets. Historical runs receive honest zero budgets, so upgrades cannot authorize
-new I/O. Household-scoped stages, operations, leases, worker-CAS reservations,
-global provider RPM, persistent circuit/half-open state, sanitized evidence,
-append-only composed candidates and idempotent ranking snapshots are implemented.
-Expired final-attempt leases recover terminally, inactive/deadline-expired runs
-cannot claim or reserve, and the 60-second RPM boundary is half-open. Public records
-structurally omit provider continuation state. Fresh focused tests pass 77/77,
-Task 4-6 regressions pass 114/114, all 826 unit tests and 4 integration tests pass,
-targeted mypy passes, and global Ruff format/check is clean across 281 files. No
-provider call was made and Task 8 was not started.
+Task 7 implementation and its independent-review fix cycle are complete and
+pending re-review; its acceptance checkbox remains unchecked. Forward-only
+migration 0024 and matching Core metadata add the ten durable ledger/evidence
+tables and exact approved logical / HTTP budgets. Historical runs receive honest
+zero budgets, so upgrades cannot authorize new I/O. Exact polls now have an
+explicit owned exact-start root while provider-neutral work has no fake logical
+root. Claim reconciles inactive-run work and offers current-owner cancellation
+CAS. Success uses typed/owned result references. HTTP reservations are unique and
+idempotent per claim attempt, and one-shot opaque circuit permits are bound to the
+provider/operation/attempt/generation without exposing raw tokens. Scope is frozen
+once per run, ledger/evidence contexts have explicit typed allowlists, and retry
+backoff has bounded injected jitter. Fresh review behavior passes 67/67, schema
+review passes 5/5, the combined Task 7 gate passes 133/133, Task 4-6 lifecycle/API/UI
+regressions pass 77/77, all 882 unit tests and 4 integration tests pass, targeted
+mypy and global Ruff format/check are clean, and `git diff --check` passes. The
+warning audit found only unrelated third-party/parser and SQLite test-cleanup
+warnings. No provider call was made and Task 8 was not started.
 
 Task 4 hardening is complete and accepted by independent review. Forward-only
 migration 0023 and matching Core metadata persist household-scoped immutable

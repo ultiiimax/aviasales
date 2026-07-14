@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
-from dataclasses import dataclass
+import math
+import random
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from uuid import UUID
@@ -17,6 +19,8 @@ from flight_hunter.persistence.agent_repositories import (
     CircuitPermitResult,
     CircuitPermitStatus,
     NewAgentRunOperation,
+    ServerPrivateCircuitPermit,
+    canonical_operation_input_json,
     canonical_sanitized_json,
 )
 
@@ -41,9 +45,10 @@ class OperationSpec:
     immutable_input: Mapping[str, object]
     logical_workflow_input: Mapping[str, object]
     consumes_logical_unit: bool
-    private_continuation: Mapping[str, object] | None
+    private_continuation: Mapping[str, object] | None = field(repr=False)
     max_attempts: int
     created_at: datetime
+    logical_root_operation_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +67,7 @@ def operation_fingerprint(
     immutable_input: Mapping[str, object],
 ) -> str:
     kind = AgentOperationKind(operation_kind)
+    canonical_operation_input_json(immutable_input)
     return _sha256_fingerprint(
         {
             "operation_kind": kind.value,
@@ -76,6 +82,7 @@ def logical_workflow_fingerprint(
 ) -> str:
     if not isinstance(workflow_kind, str) or not workflow_kind.strip():
         raise ValueError("workflow_kind must not be blank")
+    canonical_operation_input_json(immutable_input)
     return _sha256_fingerprint(
         {
             "workflow_kind": workflow_kind.strip(),
@@ -91,6 +98,7 @@ def retry_decision(
     max_attempts: int,
     now: datetime,
     retry_after: datetime | None = None,
+    jitter_source: Callable[[], float] = random.random,
 ) -> RetryDecision:
     _require_aware(now, "now")
     if type(attempt_count) is not int or attempt_count < 1:
@@ -116,7 +124,17 @@ def retry_decision(
         if retry_after <= now:
             raise ValueError("retry_after must be after now")
         return RetryDecision(AgentOperationStatus.RETRY_WAIT, retry_after, error_code)
-    delay_seconds = min(300, 5 * (2 ** (attempt_count - 1)))
+    sample = jitter_source()
+    if isinstance(sample, bool) or not isinstance(sample, (int, float)):
+        raise ValueError("jitter source must return a finite number from 0 to 1")
+    normalized_sample = float(sample)
+    if not 0.0 <= normalized_sample <= 1.0 or not math.isfinite(normalized_sample):
+        raise ValueError("jitter source must return a finite number from 0 to 1")
+    base_delay_seconds = min(300, 5 * (2 ** min(attempt_count - 1, 6)))
+    delay_seconds = min(
+        300,
+        max(1, round(base_delay_seconds * (0.8 + (0.4 * normalized_sample)))),
+    )
     return RetryDecision(
         AgentOperationStatus.RETRY_WAIT,
         now + timedelta(seconds=delay_seconds),
@@ -155,6 +173,7 @@ class OperationScheduler:
                 private_continuation=spec.private_continuation,
                 max_attempts=spec.max_attempts,
                 created_at=spec.created_at,
+                logical_root_operation_id=spec.logical_root_operation_id,
             )
         )
 
@@ -236,11 +255,18 @@ class AgentProviderCircuitBreaker:
 
     async def before_attempt(
         self,
+        *,
+        household_id: UUID,
+        run_id: UUID,
+        operation_id: UUID,
         provider_id: str,
         worker_id: str,
         now: datetime,
     ) -> CircuitPermitResult:
         return await self._repository.acquire_circuit_permit(
+            household_id=household_id,
+            run_id=run_id,
+            operation_id=operation_id,
             provider_id=provider_id,
             worker_id=worker_id,
             now=now,
@@ -249,13 +275,16 @@ class AgentProviderCircuitBreaker:
 
     async def record_failure(
         self,
-        provider_id: str,
+        *,
+        circuit_permit: ServerPrivateCircuitPermit,
+        reservation_id: UUID,
         failure_class: ProviderFailureClass | str,
         now: datetime,
     ) -> AgentCircuitStateRecord:
         classification = ProviderFailureClass(failure_class)
         return await self._repository.record_circuit_failure(
-            provider_id=provider_id,
+            circuit_permit=circuit_permit,
+            reservation_id=reservation_id,
             transient=classification in {ProviderFailureClass.NETWORK, ProviderFailureClass.SERVER},
             failure_threshold=self._transient_failure_threshold,
             cooldown_seconds=self._cooldown_seconds,
@@ -264,13 +293,14 @@ class AgentProviderCircuitBreaker:
 
     async def record_success(
         self,
-        provider_id: str,
-        worker_id: str,
+        *,
+        circuit_permit: ServerPrivateCircuitPermit,
+        reservation_id: UUID,
         now: datetime,
     ) -> AgentCircuitStateRecord:
         return await self._repository.record_circuit_success(
-            provider_id=provider_id,
-            worker_id=worker_id,
+            circuit_permit=circuit_permit,
+            reservation_id=reservation_id,
             now=now,
         )
 

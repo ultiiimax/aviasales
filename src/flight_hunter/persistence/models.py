@@ -774,6 +774,12 @@ agent_run_operations_table = Table(
     Column("operation_kind", String(40), nullable=False),
     Column("operation_fingerprint", String(71), nullable=False),
     Column("logical_operation_fingerprint", String(71), nullable=False),
+    Column(
+        "logical_root_operation_id",
+        String(36),
+        ForeignKey("agent_run_operations.id", ondelete="CASCADE"),
+        nullable=True,
+    ),
     Column("consumes_logical_unit", Boolean, nullable=False),
     Column("immutable_input_json", Text, nullable=False),
     Column("private_continuation_json", Text, nullable=True),
@@ -784,6 +790,12 @@ agent_run_operations_table = Table(
     Column("max_attempts", Integer, nullable=False),
     Column("next_retry_at", DateTime(timezone=True), nullable=True),
     Column("http_attempts_consumed", Integer, nullable=False, server_default=text("0")),
+    Column("circuit_permit_token_digest", String(71), nullable=True),
+    Column("circuit_permit_generation", Integer, nullable=True),
+    Column("circuit_permit_mode", String(20), nullable=True),
+    Column("circuit_permit_attempt_number", Integer, nullable=True),
+    Column("circuit_permit_expires_at", DateTime(timezone=True), nullable=True),
+    Column("circuit_permit_consumed_at", DateTime(timezone=True), nullable=True),
     Column("result_type", String(40), nullable=True),
     Column("result_id", String(36), nullable=True),
     Column("error_code", String(80), nullable=True),
@@ -797,14 +809,26 @@ agent_run_operations_table = Table(
     ),
     CheckConstraint(
         "operation_kind IN ('scope_freeze', 'calendar_search', 'exact_start', "
-        "'exact_poll', 'suggest_discovery', 'comparison', 'composition', "
+        "'exact_poll', 'comparison', 'composition', "
         "'ranking', 'analysis')",
         name="ck_agent_run_operation_kind",
     ),
     CheckConstraint(
-        "operation_kind NOT IN ('calendar_search', 'exact_start', 'exact_poll', "
-        "'suggest_discovery') OR provider_id IS NOT NULL",
+        "(operation_kind IN ('calendar_search', 'exact_start', 'exact_poll') "
+        "AND provider_id IS NOT NULL) OR "
+        "(operation_kind IN ('scope_freeze', 'comparison', 'composition', "
+        "'ranking', 'analysis') AND provider_id IS NULL)",
         name="ck_agent_run_operation_provider",
+    ),
+    CheckConstraint(
+        "(operation_kind IN ('calendar_search', 'exact_start') "
+        "AND consumes_logical_unit = 1 AND logical_root_operation_id IS NULL) OR "
+        "(operation_kind = 'exact_poll' AND consumes_logical_unit = 0 "
+        "AND logical_root_operation_id IS NOT NULL) OR "
+        "(operation_kind IN ('scope_freeze', 'comparison', 'composition', "
+        "'ranking', 'analysis') AND consumes_logical_unit = 0 "
+        "AND logical_root_operation_id IS NULL)",
+        name="ck_agent_run_operation_logical_shape",
     ),
     CheckConstraint(
         "status IN ('pending', 'leased', 'retry_wait', 'succeeded', 'failed', 'skipped')",
@@ -812,13 +836,30 @@ agent_run_operations_table = Table(
     ),
     CheckConstraint(
         "result_type IS NULL OR result_type IN ('scope_snapshot', 'discovery_signal', "
-        "'confirmed_offer', 'composed_candidate', 'ranking_snapshot')",
+        "'confirmed_offer', 'composed_candidate', 'ranking_snapshot', 'operation')",
         name="ck_agent_run_operation_result_type",
     ),
     CheckConstraint(
         "attempt_count >= 0 AND max_attempts > 0 AND attempt_count <= max_attempts AND "
         "http_attempts_consumed >= 0",
         name="ck_agent_run_operation_counters",
+    ),
+    CheckConstraint(
+        "(circuit_permit_token_digest IS NULL "
+        "AND circuit_permit_generation IS NULL AND circuit_permit_mode IS NULL "
+        "AND circuit_permit_attempt_number IS NULL "
+        "AND circuit_permit_expires_at IS NULL "
+        "AND circuit_permit_consumed_at IS NULL) OR "
+        "(provider_id IS NOT NULL AND circuit_permit_token_digest IS NOT NULL "
+        "AND length(circuit_permit_token_digest) = 71 "
+        "AND circuit_permit_generation >= 0 "
+        "AND circuit_permit_mode IN ('closed', 'half_open') "
+        "AND circuit_permit_attempt_number > 0 "
+        "AND circuit_permit_attempt_number = attempt_count "
+        "AND circuit_permit_expires_at IS NOT NULL "
+        "AND (circuit_permit_consumed_at IS NULL "
+        "OR circuit_permit_consumed_at <= circuit_permit_expires_at))",
+        name="ck_agent_run_operation_permit_shape",
     ),
     CheckConstraint(
         "(status = 'leased' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL "
@@ -847,6 +888,10 @@ agent_run_operations_table = Table(
     ),
 )
 
+Index(
+    "ix_agent_run_operation_logical_root_id",
+    agent_run_operations_table.c.logical_root_operation_id,
+)
 Index(
     "uq_agent_run_logical_root",
     agent_run_operations_table.c.run_id,
@@ -893,10 +938,23 @@ agent_provider_http_attempts_table = Table(
         index=True,
     ),
     Column("attempt_kind", String(20), nullable=False),
+    Column("operation_attempt_number", Integer, nullable=False),
+    Column("circuit_permit_generation", Integer, nullable=False),
+    Column("circuit_permit_token_digest", String(71), nullable=False),
     Column("reserved_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint(
+        "operation_id",
+        "operation_attempt_number",
+        name="uq_agent_provider_http_operation_attempt",
+    ),
     CheckConstraint(
         "attempt_kind IN ('start', 'poll', 'retry')",
         name="ck_agent_provider_http_attempt_kind",
+    ),
+    CheckConstraint(
+        "operation_attempt_number > 0 AND circuit_permit_generation >= 0 "
+        "AND length(circuit_permit_token_digest) = 71",
+        name="ck_agent_provider_http_attempt_binding",
     ),
 )
 
@@ -915,8 +973,11 @@ agent_provider_circuit_state_table = Table(
     Column("consecutive_transient_failures", Integer, nullable=False),
     Column("opened_at", DateTime(timezone=True), nullable=True),
     Column("cooldown_until", DateTime(timezone=True), nullable=True),
-    Column("half_open_probe_owner", String(160), nullable=True),
+    Column("half_open_probe_operation_id", String(36), nullable=True),
+    Column("half_open_probe_attempt_number", Integer, nullable=True),
+    Column("half_open_probe_token_digest", String(71), nullable=True),
     Column("half_open_probe_expires_at", DateTime(timezone=True), nullable=True),
+    Column("generation", Integer, nullable=False),
     Column("version", Integer, nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     CheckConstraint(
@@ -924,16 +985,26 @@ agent_provider_circuit_state_table = Table(
         name="ck_agent_provider_circuit_state",
     ),
     CheckConstraint(
-        "consecutive_transient_failures >= 0 AND version >= 0",
+        "consecutive_transient_failures >= 0 AND generation >= 0 AND version >= 0",
         name="ck_agent_provider_circuit_counters",
     ),
     CheckConstraint(
         "(state = 'closed' AND opened_at IS NULL AND cooldown_until IS NULL "
-        "AND half_open_probe_owner IS NULL AND half_open_probe_expires_at IS NULL) OR "
+        "AND half_open_probe_operation_id IS NULL "
+        "AND half_open_probe_attempt_number IS NULL "
+        "AND half_open_probe_token_digest IS NULL "
+        "AND half_open_probe_expires_at IS NULL) OR "
         "(state = 'open' AND opened_at IS NOT NULL AND cooldown_until IS NOT NULL "
-        "AND half_open_probe_owner IS NULL AND half_open_probe_expires_at IS NULL) OR "
+        "AND half_open_probe_operation_id IS NULL "
+        "AND half_open_probe_attempt_number IS NULL "
+        "AND half_open_probe_token_digest IS NULL "
+        "AND half_open_probe_expires_at IS NULL) OR "
         "(state = 'half_open' AND opened_at IS NOT NULL AND cooldown_until IS NOT NULL "
-        "AND half_open_probe_owner IS NOT NULL AND half_open_probe_expires_at IS NOT NULL)",
+        "AND half_open_probe_operation_id IS NOT NULL "
+        "AND half_open_probe_attempt_number > 0 "
+        "AND half_open_probe_token_digest IS NOT NULL "
+        "AND length(half_open_probe_token_digest) = 71 "
+        "AND half_open_probe_expires_at IS NOT NULL)",
         name="ck_agent_provider_circuit_shape",
     ),
 )
@@ -954,7 +1025,7 @@ agent_run_scope_snapshots_table = Table(
     Column("fingerprint", String(71), nullable=False),
     Column("snapshot_json", Text, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint("run_id", "fingerprint", name="uq_agent_run_scope_fingerprint"),
+    UniqueConstraint("run_id", name="uq_agent_run_scope"),
 )
 
 

@@ -344,6 +344,146 @@ async def test_nested_secrets_provider_payloads_urls_and_pii_are_rejected(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
+    "payload",
+    (
+        {"segments": [{"apiKey": "secret"}]},
+        {"segments": [{"api-key": "secret"}]},
+        {"segments": [{"credentials": [{"value": "secret"}]}]},
+        {"segments": [{"accessKey": "secret"}]},
+        {"segments": [{"email": "person@example.test"}]},
+        {"segments": [{"phone": "+7 999 111-22-33"}]},
+        {"segments": [{"traveler": {"contact": "person@example.test"}}]},
+    ),
+)
+async def test_review_json_guard_rejects_secret_and_pii_aliases_at_any_depth(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "evidence-alias-sanitizer.db")
+    await _seed_run_and_stage(sessions)
+    async with sessions() as session:
+        with pytest.raises(ValueError, match="unsafe field"):
+            await AgentEvidenceRepository(session).append_confirmed_evidence(
+                replace(_confirmed(), itinerary_evidence=payload)
+            )
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "unsafe_value",
+    (
+        "http://signed.example/value",
+        "  HtTpS://signed.example/value",
+        "mailto:person@example.test",
+        "data:text/plain,secret",
+        "javascript:alert(1)",
+        "//signed.example/value",
+        "  //signed.example/value",
+    ),
+)
+async def test_review_evidence_context_rejects_all_uri_forms(
+    tmp_path: Path,
+    unsafe_value: str,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "evidence-uri-sanitizer.db")
+    await _seed_run_and_stage(sessions)
+    async with sessions() as session:
+        with pytest.raises(ValueError, match="unsafe field"):
+            await AgentEvidenceRepository(session).append_confirmed_evidence(
+                replace(
+                    _confirmed(),
+                    itinerary_evidence={
+                        "segments": [{"origin": "LED", "destination": "CDG", "value": unsafe_value}]
+                    },
+                )
+            )
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_review_each_json_context_has_its_own_explicit_allowlist(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "evidence-context-policies.db")
+    await _seed_run_and_stage(sessions)
+    repository_calls = (
+        lambda repository: repository.append_discovery_signal(
+            replace(_discovery(), signal_evidence={"unexpected_safe_key": "value"})
+        ),
+        lambda repository: repository.append_confirmed_evidence(
+            replace(_confirmed(), itinerary_evidence={"unexpected_safe_key": "value"})
+        ),
+        lambda repository: repository.append_composed_candidate(
+            replace(_candidate(), itinerary_evidence={"unexpected_safe_key": "value"})
+        ),
+        lambda repository: repository.create_ranking_snapshot(
+            replace(_ranking(), ranking={"unexpected_safe_key": "value"})
+        ),
+    )
+    async with sessions() as session:
+        repository = AgentEvidenceRepository(session)
+        for call in repository_calls:
+            with pytest.raises(ValueError, match="not allowed"):
+                await call(repository)
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_review_current_safe_discovery_segment_component_and_ranking_fields_remain_valid(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "evidence-safe-policies.db")
+    await _seed_run_and_stage(sessions)
+    async with sessions() as session:
+        repository = AgentEvidenceRepository(session)
+        discovery = await repository.append_discovery_signal(
+            replace(
+                _discovery(),
+                signal_evidence={"calendar_bucket": "2026-09", "value": 1},
+            )
+        )
+        confirmed = await repository.append_confirmed_evidence(
+            replace(
+                _confirmed(),
+                itinerary_evidence={
+                    "segments": [
+                        {
+                            "origin": "LED",
+                            "destination": "CDG",
+                            "value": "segment-1",
+                        }
+                    ]
+                },
+            )
+        )
+        candidate = await repository.append_composed_candidate(
+            replace(
+                _candidate(),
+                itinerary_evidence={"components": [str(confirmed.id)], "value": 1},
+            )
+        )
+        ranking = await repository.create_ranking_snapshot(
+            replace(
+                _ranking(),
+                confirmed_evidence_ids=(confirmed.id,),
+                composed_candidate_ids=(candidate.id,),
+                ranking={
+                    "ordered": [str(confirmed.id), str(candidate.id)],
+                    "version": "rank-v1",
+                    "value": 1,
+                },
+            )
+        )
+        await session.commit()
+        assert discovery.id == DISCOVERY_ID
+        assert ranking.id == RANKING_ID
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
     "mutation",
     [
         {"observed_at": NOW.replace(tzinfo=None)},

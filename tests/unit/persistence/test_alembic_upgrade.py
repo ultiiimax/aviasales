@@ -91,7 +91,7 @@ def test_agent_core_metadata_has_reviewed_checks_and_approval_snapshot() -> None
         assert not agent_plan_execution_approvals_table.c[column_name].nullable
 
 
-def test_agent_ledger_core_metadata_has_budget_checks_and_reviewed_indexes() -> None:
+def test_review_agent_ledger_core_metadata_has_budget_checks_and_indexes() -> None:
     run_checks = {
         constraint.name: str(constraint.sqltext)
         for constraint in agent_plan_runs_table.constraints
@@ -99,6 +99,17 @@ def test_agent_ledger_core_metadata_has_budget_checks_and_reviewed_indexes() -> 
     }
     operation_indexes = {index.name: index for index in agent_run_operations_table.indexes}
     logical_root = operation_indexes["uq_agent_run_logical_root"]
+    operation_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in agent_run_operations_table.constraints
+        if constraint.name is not None and hasattr(constraint, "sqltext")
+    }
+    attempt_constraints = {
+        constraint.name for constraint in agent_provider_http_attempts_table.constraints
+    }
+    scope_constraints = {
+        constraint.name for constraint in agent_run_scope_snapshots_table.constraints
+    }
 
     assert "ck_agent_plan_run_budgets" in run_checks
     assert (
@@ -122,6 +133,41 @@ def test_agent_ledger_core_metadata_has_budget_checks_and_reviewed_indexes() -> 
         == "consumes_logical_unit = 1"
     )
     assert "ix_agent_operation_claim" in operation_indexes
+    assert "ix_agent_run_operation_logical_root_id" in operation_indexes
+    assert {
+        "logical_root_operation_id",
+        "circuit_permit_token_digest",
+        "circuit_permit_generation",
+        "circuit_permit_mode",
+        "circuit_permit_attempt_number",
+        "circuit_permit_expires_at",
+        "circuit_permit_consumed_at",
+    }.issubset(agent_run_operations_table.c.keys())
+    logical_root_fk = next(
+        foreign_key
+        for foreign_key in agent_run_operations_table.c.logical_root_operation_id.foreign_keys
+    )
+    assert logical_root_fk.target_fullname == "agent_run_operations.id"
+    assert logical_root_fk.ondelete == "CASCADE"
+    assert "suggest_discovery" not in operation_checks["ck_agent_run_operation_kind"]
+    assert "logical_root_operation_id" in operation_checks["ck_agent_run_operation_logical_shape"]
+    assert "circuit_permit_token_digest" in operation_checks["ck_agent_run_operation_permit_shape"]
+    assert "operation" in operation_checks["ck_agent_run_operation_result_type"]
+    assert {
+        "operation_attempt_number",
+        "circuit_permit_generation",
+        "circuit_permit_token_digest",
+    }.issubset(agent_provider_http_attempts_table.c.keys())
+    assert "uq_agent_provider_http_operation_attempt" in attempt_constraints
+    assert "uq_agent_run_scope" in scope_constraints
+    assert "uq_agent_run_scope_fingerprint" not in scope_constraints
+    assert {
+        "generation",
+        "half_open_probe_operation_id",
+        "half_open_probe_attempt_number",
+        "half_open_probe_token_digest",
+    }.issubset(agent_provider_circuit_state_table.c.keys())
+    assert "half_open_probe_owner" not in agent_provider_circuit_state_table.c
     assert any(
         index.name == "ix_agent_provider_http_attempt_provider_reserved"
         for index in agent_provider_http_attempts_table.indexes
@@ -144,7 +190,7 @@ def test_alembic_upgrade_does_not_disable_application_loggers(tmp_path: Path) ->
     assert not logger.disabled
 
 
-def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
+def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
     db_path = tmp_path / "flight_hunter_test.db"
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path.as_posix()}")
@@ -268,6 +314,25 @@ def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
             "select sql from sqlite_master where type = 'index' and name = ?",
             ("uq_agent_run_logical_root",),
         ).fetchone()
+        operation_table_sql = connection.execute(
+            "select sql from sqlite_master where type = 'table' and name = ?",
+            ("agent_run_operations",),
+        ).fetchone()
+        attempt_table_sql = connection.execute(
+            "select sql from sqlite_master where type = 'table' and name = ?",
+            ("agent_provider_http_attempts",),
+        ).fetchone()
+        scope_table_sql = connection.execute(
+            "select sql from sqlite_master where type = 'table' and name = ?",
+            ("agent_run_scope_snapshots",),
+        ).fetchone()
+        circuit_table_sql = connection.execute(
+            "select sql from sqlite_master where type = 'table' and name = ?",
+            ("agent_provider_circuit_state",),
+        ).fetchone()
+        operation_foreign_keys = connection.execute(
+            "pragma foreign_key_list(agent_run_operations)"
+        ).fetchall()
         ranking_table_sql = connection.execute(
             "select sql from sqlite_master where type = 'table' and name = ?",
             ("agent_ranking_snapshots",),
@@ -480,6 +545,7 @@ def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
         "operation_kind",
         "operation_fingerprint",
         "logical_operation_fingerprint",
+        "logical_root_operation_id",
         "consumes_logical_unit",
         "immutable_input_json",
         "private_continuation_json",
@@ -493,16 +559,55 @@ def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
         "result_type",
         "result_id",
         "error_code",
+        "circuit_permit_token_digest",
+        "circuit_permit_generation",
+        "circuit_permit_mode",
+        "circuit_permit_attempt_number",
+        "circuit_permit_expires_at",
+        "circuit_permit_consumed_at",
     }.issubset(ledger_table_columns["agent_run_operations"])
+    assert {
+        "operation_attempt_number",
+        "circuit_permit_generation",
+        "circuit_permit_token_digest",
+    }.issubset(ledger_table_columns["agent_provider_http_attempts"])
+    assert {
+        "generation",
+        "half_open_probe_operation_id",
+        "half_open_probe_attempt_number",
+        "half_open_probe_token_digest",
+    }.issubset(ledger_table_columns["agent_provider_circuit_state"])
+    assert "half_open_probe_owner" not in ledger_table_columns["agent_provider_circuit_state"]
     assert "uq_agent_run_logical_root" in operation_indexes
     assert "ix_agent_operation_claim" in operation_indexes
     assert logical_root_index_sql is not None
     assert "WHERE consumes_logical_unit = 1" in logical_root_index_sql[0]
+    assert operation_table_sql is not None
+    assert "ck_agent_run_operation_logical_shape" in operation_table_sql[0]
+    assert "ck_agent_run_operation_permit_shape" in operation_table_sql[0]
+    assert "'operation'" in operation_table_sql[0]
+    assert "'suggest_discovery'" not in operation_table_sql[0]
+    assert any(
+        row[2] == "agent_run_operations"
+        and row[3] == "logical_root_operation_id"
+        and row[4] == "id"
+        and row[6].upper() == "CASCADE"
+        for row in operation_foreign_keys
+    )
+    assert attempt_table_sql is not None
+    assert "uq_agent_provider_http_operation_attempt" in attempt_table_sql[0]
+    assert scope_table_sql is not None
+    assert "uq_agent_run_scope" in scope_table_sql[0]
+    assert "uq_agent_run_scope_fingerprint" not in scope_table_sql[0]
+    assert circuit_table_sql is not None
+    assert "half_open_probe_operation_id" in circuit_table_sql[0]
     assert ranking_table_sql is not None
     assert "uq_agent_ranking_fingerprint" in ranking_table_sql[0]
 
 
-def test_fresh_core_metadata_matches_migration_head_for_agent_ledger(tmp_path: Path) -> None:
+def test_review_fresh_core_metadata_matches_migration_head_for_agent_ledger(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "ledger-metadata-parity.db"
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path.as_posix()}")
