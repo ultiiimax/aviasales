@@ -188,7 +188,7 @@ async def test_raw_location_syntax_without_catalog_never_reaches_approval() -> N
 
 
 @pytest.mark.anyio
-async def test_anywhere_approves_only_with_frozen_origin_and_bounded_discovery_rule() -> None:
+async def test_quick_anywhere_freezes_rule_and_estimates_seed_worst_case() -> None:
     parsed = IntentParser().parse(
         "LED → anywhere",
         preset=None,
@@ -207,6 +207,33 @@ async def test_anywhere_approves_only_with_frozen_origin_and_bounded_discovery_r
     assert frozen.anywhere_rule.max_destination_seeds == 40
     assert frozen.anywhere_rule.exact_verification_limit == 20
     assert frozen.anywhere_rule.catalog_checksum == frozen.origin_scope.catalog_checksum
+    assert revision.estimate is not None
+    assert revision.estimate.calendar_searches == 40
+    assert revision.estimate.exact_searches == 20
+    assert revision.estimate.logical_operations == 60
+
+
+@pytest.mark.anyio
+async def test_full_anywhere_uses_full_bounds_and_requires_budget_revision() -> None:
+    parsed = IntentParser().parse(
+        "LED → anywhere",
+        preset=None,
+        selections={"departure_date": "2026-09-10"},
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.FULL)
+
+    assert revision.status is PlanRevisionStatus.DRAFT
+    frozen = revision.frozen_legs[0]
+    assert frozen.anywhere_rule is not None
+    assert frozen.anywhere_rule.max_destination_seeds == 240
+    assert frozen.anywhere_rule.exact_verification_limit == 240
+    assert revision.estimate is not None
+    assert revision.estimate.calendar_searches == 240
+    assert revision.estimate.exact_searches == 240
+    assert revision.estimate.logical_operations == 480
+    assert revision.estimate.requested_logical_limit == 480
+    assert tuple(item.code for item in revision.clarifications) == ("budget_revision_required",)
 
 
 @pytest.mark.anyio

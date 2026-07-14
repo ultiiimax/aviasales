@@ -348,9 +348,13 @@ class AgentPlanBuilder:
                     if coverage is CoverageMode.QUICK
                     else self._settings.agent_full_logical_limit
                 )
-                exact_verification_limit = min(
-                    self._settings.agent_quick_exact_limit,
-                    max_destination_seeds,
+                exact_verification_limit = (
+                    min(
+                        self._settings.agent_quick_exact_limit,
+                        max_destination_seeds,
+                    )
+                    if coverage is CoverageMode.QUICK
+                    else max_destination_seeds
                 )
                 anywhere_rule = self._scope_resolver.build_anywhere_rule(
                     frozen_origins=frozen_origin,
@@ -408,8 +412,12 @@ def _surface_for_frozen_legs(
         origin_count = len(frozen_leg.origin_scope.airport_codes)
         date_count = _date_count(frozen_leg.date_constraint)
         if frozen_leg.anywhere_rule is not None:
-            calendar_searches += (
+            discovery_query_work = (
                 origin_count * date_count * len(frozen_leg.anywhere_rule.discovery_source_ids)
+            )
+            calendar_searches += max(
+                frozen_leg.anywhere_rule.max_destination_seeds,
+                discovery_query_work,
             )
             exact_searches += frozen_leg.anywhere_rule.exact_verification_limit
             continue
