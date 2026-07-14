@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 
+from flight_hunter.agent.presets import PRESET_EDITS
 from flight_hunter.application.agent_capabilities import ProviderCapabilityRegistry
 from flight_hunter.application.agent_intent import (
     ClarificationAction,
@@ -251,7 +252,9 @@ class AgentPlanBuilder:
     ) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._settings = settings or AppSettings.from_env()
-        self._capabilities = capabilities or ProviderCapabilityRegistry()
+        self._capabilities = capabilities or ProviderCapabilityRegistry(
+            requests_per_minute=self._settings.aviasales_search_internal_rpm
+        )
         self._estimator = estimator or PlanEstimator(settings=self._settings)
         self._scope_resolver = scope_resolver
 
@@ -304,6 +307,7 @@ class AgentPlanBuilder:
         frozen_legs, geography_clarifications = await self._freeze_legs(
             travel_intent,
             normalized_coverage,
+            nearby_radius_km=_nearby_radius_km(parsed),
         )
         if geography_clarifications:
             return _draft_revision(
@@ -334,7 +338,12 @@ class AgentPlanBuilder:
                 coverage=normalized_coverage,
                 snapshot=snapshot,
                 frozen_legs=frozen_legs,
-                clarifications=(_quick_budget_clarification(surface),),
+                clarifications=(
+                    _quick_budget_clarification(
+                        surface,
+                        logical_limit=self._settings.agent_quick_logical_limit,
+                    ),
+                ),
                 created_at=created_at,
                 expires_at=expires_at,
             )
@@ -367,6 +376,8 @@ class AgentPlanBuilder:
         self,
         intent: TravelIntent,
         coverage: CoverageMode,
+        *,
+        nearby_radius_km: int,
     ) -> tuple[tuple[FrozenPlanLeg, ...], tuple[IntentClarification, ...]]:
         assert self._scope_resolver is not None
         frozen_legs: list[FrozenPlanLeg] = []
@@ -382,6 +393,7 @@ class AgentPlanBuilder:
                 leg.origin,
                 coverage=coverage,
                 quick_limit=quick_limit,
+                nearby_radius_km=nearby_radius_km,
             )
             if isinstance(frozen_origin, GeographyClarification):
                 clarifications.append(_scope_clarification(index, "origin", frozen_origin))
@@ -423,6 +435,7 @@ class AgentPlanBuilder:
                 leg.destination,
                 coverage=coverage,
                 quick_limit=quick_limit,
+                nearby_radius_km=nearby_radius_km,
             )
             if isinstance(frozen_destination, GeographyClarification):
                 clarifications.append(
@@ -580,7 +593,11 @@ def _budget_revision_clarification(estimate: PlanEstimate) -> IntentClarificatio
     )
 
 
-def _quick_budget_clarification(surface: SearchSurface) -> IntentClarification:
+def _quick_budget_clarification(
+    surface: SearchSurface,
+    *,
+    logical_limit: int,
+) -> IntentClarification:
     logical_operations = surface.calendar_searches + surface.exact_searches
     return IntentClarification(
         field="budget",
@@ -605,5 +622,12 @@ def _quick_budget_clarification(surface: SearchSurface) -> IntentClarification:
             "calendar_searches": surface.calendar_searches,
             "exact_searches": surface.exact_searches,
             "logical_operations": logical_operations,
+            "limit": logical_limit,
         },
     )
+
+
+def _nearby_radius_km(parsed: ParsedIntent) -> int:
+    if parsed.preset_id is None:
+        return 0
+    return PRESET_EDITS[parsed.preset_id.value].nearby_radius_km or 0

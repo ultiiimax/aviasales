@@ -236,6 +236,7 @@ async def test_quick_anywhere_rolling_window_rejects_complete_unclamped_surface(
         "calendar_searches": 180,
         "exact_searches": 20,
         "logical_operations": 200,
+        "limit": 60,
     }
     assert tuple(action.action_id for action in clarification.actions) == (
         "narrow_scope_or_dates",
@@ -350,6 +351,7 @@ async def test_rolling_finite_quick_scope_keeps_window_and_rejects_complete_surf
         "calendar_searches": 360,
         "exact_searches": 360,
         "logical_operations": 720,
+        "limit": 60,
     }
     assert tuple(action.action_id for action in clarification.actions) == (
         "narrow_scope_or_dates",

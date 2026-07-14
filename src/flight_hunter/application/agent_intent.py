@@ -32,6 +32,10 @@ from flight_hunter.domain.agent_search import (
 from flight_hunter.geo.airports import AirportCatalogSnapshot
 
 _ROUTE_SEPARATOR_RE = re.compile(r"\s*(?:→|->|⟶)\s*")
+_NATURAL_ROUTE_RE = re.compile(
+    r"(?:^|\s)(?:из|с)\s+(?P<origin>.+?)\s+(?:в|во|до)\s+(?P<destination>.+?)\s*$",
+    re.IGNORECASE,
+)
 _EXACT_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 _RANGE_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*(?:\.\.|—|–)\s*(\d{4}-\d{2}-\d{2})")
 _FLEX_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*(?:±|\+/-)\s*(\d+)")
@@ -77,6 +81,9 @@ _ANYWHERE_ALIASES = {
     "любая точка",
     "любой город",
     "везде",
+}
+_INFLECTED_LOCATION_ALIASES = {
+    "францию": "Франция",
 }
 
 
@@ -582,9 +589,15 @@ def _route_parts(text: str) -> tuple[str | None, str | None]:
     for _, pattern in _TRIP_SHAPE_PATTERNS:
         route_text = pattern.sub("", route_text)
     parts = _ROUTE_SEPARATOR_RE.split(route_text, maxsplit=1)
-    if len(parts) != 2:
+    if len(parts) == 2:
+        return parts[0].strip(" ,") or None, parts[1].strip(" ,") or None
+    natural = _NATURAL_ROUTE_RE.search(route_text)
+    if natural is None:
         return None, None
-    return parts[0].strip(" ,") or None, parts[1].strip(" ,") or None
+    return (
+        natural.group("origin").strip(" ,") or None,
+        natural.group("destination").strip(" ,") or None,
+    )
 
 
 def _trip_shape_from_text(text: str) -> TripShape | None:
@@ -598,6 +611,8 @@ def _parse_scope(value: object, taxonomy_resolver: ScopeResolver) -> _ScopeParse
     if not isinstance(value, str) or not value.strip():
         return _ScopeParseResult(None)
     raw = value.strip()
+    normalized = _normalize_text(raw)
+    raw = _INFLECTED_LOCATION_ALIASES.get(normalized, raw)
     normalized = _normalize_text(raw)
     prefixes = (
         ("airport", LocationScopeKind.AIRPORT),

@@ -198,11 +198,17 @@ class ProviderHttpCostModel:
     start_attempts: int
     poll_rounds: int
     attempts_per_poll: int
+    requests_per_minute: int = 20
 
     def __post_init__(self) -> None:
         if not self.version:
             raise ValueError("cost model version is required")
-        values = (self.start_attempts, self.poll_rounds, self.attempts_per_poll)
+        values = (
+            self.start_attempts,
+            self.poll_rounds,
+            self.attempts_per_poll,
+            self.requests_per_minute,
+        )
         if any(type(value) is not int for value in values):
             raise TypeError("provider HTTP costs must be integers")
         if min(values) <= 0:

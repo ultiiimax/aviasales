@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from types import MappingProxyType
+
+from flight_hunter.domain.agent_search import DateMode, RouteStrategy
 
 
 class AgentPresetId(StrEnum):
@@ -23,6 +26,36 @@ class RiskLevel(StrEnum):
     HIGH = "high"
 
 
+class AnalysisMode(StrEnum):
+    BUY_TIMING = "buy_timing"
+    ERROR_FARE = "error_fare"
+    CURRENCY_COMPARE = "currency_compare"
+
+
+@dataclass(frozen=True, slots=True)
+class PlanEdits:
+    analysis_modes: tuple[AnalysisMode, ...] = ()
+    default_flex_days: int | None = None
+    nearby_radius_km: int | None = None
+    strategies: tuple[RouteStrategy, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "analysis_modes",
+            tuple(AnalysisMode(value) for value in self.analysis_modes),
+        )
+        object.__setattr__(
+            self,
+            "strategies",
+            tuple(RouteStrategy(value) for value in self.strategies),
+        )
+        if self.default_flex_days is not None and self.default_flex_days <= 0:
+            raise ValueError("default_flex_days must be positive")
+        if self.nearby_radius_km is not None and self.nearby_radius_km <= 0:
+            raise ValueError("nearby_radius_km must be positive")
+
+
 @dataclass(frozen=True, slots=True)
 class AgentPreset:
     id: AgentPresetId
@@ -32,256 +65,95 @@ class AgentPreset:
     risk_level: RiskLevel
 
 
-@dataclass(frozen=True, slots=True)
-class AgentPlanStep:
-    action: str
-    title_ru: str
-    parameters: dict[str, Any]
-    requires_live_refresh: bool
-    explanation_ru: str
-
-
-@dataclass(frozen=True, slots=True)
-class AgentPlan:
-    preset_id: AgentPresetId
-    title_ru: str
-    risk_level: RiskLevel
-    missing_slots: tuple[str, ...]
-    steps: tuple[AgentPlanStep, ...]
-    warnings: tuple[str, ...]
-
-
-class AgentPlanBuilder:
-    def list_presets(self) -> tuple[AgentPreset, ...]:
-        return tuple(PRESETS.values())
-
-    def build(
-        self,
-        preset_id: AgentPresetId | str,
-        *,
-        slots: dict[str, Any],
-    ) -> AgentPlan:
-        preset = PRESETS[AgentPresetId(preset_id)]
-        normalized_slots = {key: value for key, value in slots.items() if value not in (None, "")}
-        missing_slots = tuple(
-            slot for slot in preset.required_slots if slot not in normalized_slots
-        )
-        if missing_slots:
-            return AgentPlan(
-                preset_id=preset.id,
-                title_ru=preset.title_ru,
-                risk_level=preset.risk_level,
-                missing_slots=missing_slots,
-                steps=(),
-                warnings=(
-                    "Нужно заполнить недостающие поля. Я не буду угадывать город, дату или рейс.",
-                ),
-            )
-
-        return _plan_for(preset, normalized_slots)
-
-
-PRESETS: dict[AgentPresetId, AgentPreset] = {
-    AgentPresetId.BUY_TIMING: AgentPreset(
-        id=AgentPresetId.BUY_TIMING,
-        title_ru="Когда покупать",
-        description_ru="Оценить дешевые дни покупки по истории и текущим cached/live возможностям.",
-        required_slots=("origin", "destination", "departure_date"),
-        risk_level=RiskLevel.LOW,
-    ),
-    AgentPresetId.FLEXIBLE_DATES: AgentPreset(
-        id=AgentPresetId.FLEXIBLE_DATES,
-        title_ru="Даты +/- 3 дня",
-        description_ru="Построить матрицу соседних дат и выбрать самый дешевый вариант по данным.",
-        required_slots=("origin", "destination", "departure_date"),
-        risk_level=RiskLevel.LOW,
-    ),
-    AgentPresetId.NEARBY_AIRPORTS: AgentPreset(
-        id=AgentPresetId.NEARBY_AIRPORTS,
-        title_ru="Аэропорты рядом",
-        description_ru="Проверить аэропорты вокруг вылета и прилета в радиусе 150 км.",
-        required_slots=("origin", "destination"),
-        risk_level=RiskLevel.LOW,
-    ),
-    AgentPresetId.HIDDEN_CITY: AgentPreset(
-        id=AgentPresetId.HIDDEN_CITY,
-        title_ru="Скрытый город",
-        description_ru=(
-            "Исследовательский режим: пункт назначения как пересадка, не обычная выдача."
+PRESETS: Mapping[AgentPresetId, AgentPreset] = MappingProxyType(
+    {
+        AgentPresetId.BUY_TIMING: AgentPreset(
+            id=AgentPresetId.BUY_TIMING,
+            title_ru="Когда покупать",
+            description_ru="Оценить момент покупки только по накопленной истории цен.",
+            required_slots=("origin", "destination", "departure_date"),
+            risk_level=RiskLevel.LOW,
         ),
-        required_slots=("origin", "destination", "departure_date"),
-        risk_level=RiskLevel.HIGH,
-    ),
-    AgentPresetId.SPLIT_TICKET: AgentPreset(
-        id=AgentPresetId.SPLIT_TICKET,
-        title_ru="Разбить билет",
-        description_ru="Сравнить один билет с отдельными сегментами и показать риски пересадки.",
-        required_slots=("origin", "destination", "departure_date"),
-        risk_level=RiskLevel.MEDIUM,
-    ),
-    AgentPresetId.ERROR_FARE_SOURCES: AgentPreset(
-        id=AgentPresetId.ERROR_FARE_SOURCES,
-        title_ru="Error fare источники",
-        description_ru="Подобрать места для мониторинга подозрительно низких тарифов по региону.",
-        required_slots=("region",),
-        risk_level=RiskLevel.MEDIUM,
-    ),
-    AgentPresetId.GEO_CURRENCY: AgentPreset(
-        id=AgentPresetId.GEO_CURRENCY,
-        title_ru="Страна сайта и валюта",
-        description_ru=(
-            "Сравнить официальный сайт авиакомпании по странам и валютам без автопокупки."
+        AgentPresetId.FLEXIBLE_DATES: AgentPreset(
+            id=AgentPresetId.FLEXIBLE_DATES,
+            title_ru="Даты ±3 дня",
+            description_ru="Сравнить соседние даты после подтверждения плана.",
+            required_slots=("origin", "destination", "departure_date"),
+            risk_level=RiskLevel.LOW,
         ),
-        required_slots=("flight",),
-        risk_level=RiskLevel.MEDIUM,
-    ),
-}
+        AgentPresetId.NEARBY_AIRPORTS: AgentPreset(
+            id=AgentPresetId.NEARBY_AIRPORTS,
+            title_ru="Аэропорты рядом",
+            description_ru="Проверить аэропорты вылета и прилёта в радиусе 150 км.",
+            required_slots=("origin", "destination"),
+            risk_level=RiskLevel.LOW,
+        ),
+        AgentPresetId.HIDDEN_CITY: AgentPreset(
+            id=AgentPresetId.HIDDEN_CITY,
+            title_ru="Скрытый город",
+            description_ru="Отдельное исследование с дополнительным предупреждением о рисках.",
+            required_slots=("origin", "destination", "departure_date"),
+            risk_level=RiskLevel.HIGH,
+        ),
+        AgentPresetId.SPLIT_TICKET: AgentPreset(
+            id=AgentPresetId.SPLIT_TICKET,
+            title_ru="Разбить билет",
+            description_ru="Сравнить единый маршрут и отдельные подтверждённые сегменты.",
+            required_slots=("origin", "destination", "departure_date"),
+            risk_level=RiskLevel.MEDIUM,
+        ),
+        AgentPresetId.ERROR_FARE_SOURCES: AgentPreset(
+            id=AgentPresetId.ERROR_FARE_SOURCES,
+            title_ru="Аномально низкие цены",
+            description_ru="Искать только доказуемые подозрения на ценовую аномалию.",
+            required_slots=("region",),
+            risk_level=RiskLevel.MEDIUM,
+        ),
+        AgentPresetId.GEO_CURRENCY: AgentPreset(
+            id=AgentPresetId.GEO_CURRENCY,
+            title_ru="Страна сайта и валюта",
+            description_ru="Сравнить сопоставимые предложения с подтверждённым FX.",
+            required_slots=("flight",),
+            risk_level=RiskLevel.MEDIUM,
+        ),
+    }
+)
 
 
-def _plan_for(preset: AgentPreset, slots: dict[str, Any]) -> AgentPlan:
-    steps: tuple[AgentPlanStep, ...]
-    warnings: tuple[str, ...]
+PRESET_EDITS: Mapping[str, PlanEdits] = MappingProxyType(
+    {
+        AgentPresetId.BUY_TIMING.value: PlanEdits(analysis_modes=(AnalysisMode.BUY_TIMING,)),
+        AgentPresetId.FLEXIBLE_DATES.value: PlanEdits(default_flex_days=3),
+        AgentPresetId.NEARBY_AIRPORTS.value: PlanEdits(nearby_radius_km=150),
+        AgentPresetId.HIDDEN_CITY.value: PlanEdits(strategies=(RouteStrategy.HIDDEN_CITY,)),
+        AgentPresetId.SPLIT_TICKET.value: PlanEdits(strategies=(RouteStrategy.SPLIT_TICKET,)),
+        AgentPresetId.ERROR_FARE_SOURCES.value: PlanEdits(
+            analysis_modes=(AnalysisMode.ERROR_FARE,)
+        ),
+        AgentPresetId.GEO_CURRENCY.value: PlanEdits(
+            analysis_modes=(AnalysisMode.CURRENCY_COMPARE,)
+        ),
+    }
+)
 
-    if preset.id == AgentPresetId.BUY_TIMING:
-        steps = (
-            AgentPlanStep(
-                action="analyze_price_history",
-                title_ru="Проверить историю цен",
-                parameters={
-                    "origin": slots["origin"],
-                    "destination": slots["destination"],
-                    "departure_date": slots["departure_date"],
-                },
-                requires_live_refresh=False,
-                explanation_ru=(
-                    "Сначала берем только сохраненную историю и cached данные, чтобы не выдумывать "
-                    "лучшее время покупки."
-                ),
-            ),
-            AgentPlanStep(
-                action="optional_user_live_refresh",
-                title_ru="Предложить ручное обновление",
-                parameters={"min_gap_minutes": 10},
-                requires_live_refresh=True,
-                explanation_ru="Live-обновление можно запустить только кнопкой пользователя.",
-            ),
-        )
-        warnings = ("Если истории мало, ответ будет: Недостаточно данных.",)
-    elif preset.id == AgentPresetId.FLEXIBLE_DATES:
-        steps = (
-            AgentPlanStep(
-                action="build_date_matrix",
-                title_ru="Построить матрицу дат",
-                parameters={
-                    "origin": slots["origin"],
-                    "destination": slots["destination"],
-                    "departure_date": slots["departure_date"],
-                    "flexibility_days": 3,
-                },
-                requires_live_refresh=False,
-                explanation_ru="Сравниваем даты вылета в окне +/- 3 дня.",
-            ),
-        )
-        warnings = ("Цены выводятся только с источником и временем наблюдения.",)
-    elif preset.id == AgentPresetId.NEARBY_AIRPORTS:
-        steps = (
-            AgentPlanStep(
-                action="find_nearby_airports",
-                title_ru="Найти аэропорты рядом",
-                parameters={
-                    "origin": slots["origin"],
-                    "destination": slots["destination"],
-                    "radius_km": 150,
-                },
-                requires_live_refresh=False,
-                explanation_ru=(
-                    "Сначала показываем аэропорты и время на дорогу, потом сравниваем цены только "
-                    "если есть данные."
-                ),
-            ),
-        )
-        warnings = ("Экономия считается вместе с оценкой наземного трансфера, когда она доступна.",)
-    elif preset.id == AgentPresetId.HIDDEN_CITY:
-        steps = (
-            AgentPlanStep(
-                action="research_hidden_city",
-                title_ru="Проверить только в отдельном режиме",
-                parameters={
-                    "origin": slots["origin"],
-                    "hidden_city": slots["destination"],
-                    "departure_date": slots["departure_date"],
-                    "include_in_default_ranking": False,
-                },
-                requires_live_refresh=True,
-                explanation_ru=(
-                    "Ищем маршруты, где нужный город является пересадкой, но не смешиваем их с "
-                    "обычной выдачей."
-                ),
-            ),
-        )
-        warnings = (
-            "Риск высокий: багаж может улететь до финального города, "
-            "обратный сегмент могут отменить.",
-            "Hidden-city не попадает в обычную выдачу и требует явного включения.",
-        )
-    elif preset.id == AgentPresetId.SPLIT_TICKET:
-        steps = (
-            AgentPlanStep(
-                action="compare_split_ticket",
-                title_ru="Сравнить единый билет и сегменты",
-                parameters={
-                    "origin": slots["origin"],
-                    "destination": slots["destination"],
-                    "departure_date": slots["departure_date"],
-                    "min_connection_buffer_minutes": 180,
-                },
-                requires_live_refresh=False,
-                explanation_ru=(
-                    "Отдельные билеты показываются с риском самостоятельной пересадки и потери "
-                    "защиты при задержке."
-                ),
-            ),
-        )
-        warnings = ("Разорванный билет не считается безопасной заменой единому маршруту.",)
-    elif preset.id == AgentPresetId.ERROR_FARE_SOURCES:
-        steps = (
-            AgentPlanStep(
-                action="prepare_error_fare_watchlist",
-                title_ru="Подготовить список источников",
-                parameters={"region": slots["region"], "requires_current_web_check": True},
-                requires_live_refresh=False,
-                explanation_ru=(
-                    "Источники error fare быстро меняются, поэтому перед показом списка нужна "
-                    "актуальная проверка."
-                ),
-            ),
-        )
-        warnings = ("Error fare показывается как подозрение, а не гарантия выписки билета.",)
-    elif preset.id == AgentPresetId.GEO_CURRENCY:
-        steps = (
-            AgentPlanStep(
-                action="compare_airline_country_currency",
-                title_ru="Сравнить страны сайта и валюты",
-                parameters={"flight": slots["flight"], "auto_purchase": False},
-                requires_live_refresh=True,
-                explanation_ru=(
-                    "Сравнение делается только на официальных страницах/разрешенных API и не "
-                    "оформляет покупку автоматически."
-                ),
-            ),
-        )
-        warnings = (
-            "Итог нужно считать с банковской комиссией, багажом и правилами тарифа.",
-            "Нельзя обходить ограничения доступа, геолокации или антибот-защиту.",
-        )
-    else:
-        raise ValueError(f"unsupported preset: {preset.id}")
 
-    return AgentPlan(
-        preset_id=preset.id,
-        title_ru=preset.title_ru,
-        risk_level=preset.risk_level,
-        missing_slots=(),
-        steps=steps,
-        warnings=warnings,
-    )
+def list_presets() -> tuple[AgentPreset, ...]:
+    return tuple(PRESETS.values())
+
+
+def apply_preset_edits(
+    preset_id: AgentPresetId | str,
+    selections: Mapping[str, object],
+) -> dict[str, object]:
+    normalized = AgentPresetId(preset_id)
+    edits = PRESET_EDITS[normalized.value]
+    result = {key: value for key, value in selections.items() if value not in (None, "")}
+    if edits.default_flex_days is not None and result.get("departure_date") is not None:
+        result.setdefault("date_mode", DateMode.FLEXIBLE.value)
+        result.setdefault("flex_days", edits.default_flex_days)
+    if edits.strategies:
+        result.setdefault(
+            "requested_strategies",
+            [strategy.value for strategy in edits.strategies],
+        )
+    return result

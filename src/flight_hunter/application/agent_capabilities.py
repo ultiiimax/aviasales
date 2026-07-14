@@ -8,6 +8,11 @@ from flight_hunter.domain.agent_search import (
 
 
 class ProviderCapabilityRegistry:
+    def __init__(self, *, requests_per_minute: int = 20) -> None:
+        if type(requests_per_minute) is not int or requests_per_minute <= 0:
+            raise ValueError("requests_per_minute must be a positive integer")
+        self._requests_per_minute = requests_per_minute
+
     def snapshot(self) -> ProviderCapabilitySnapshot:
         return ProviderCapabilitySnapshot(
             provider_id="aviasales_search",
@@ -24,5 +29,6 @@ class ProviderCapabilityRegistry:
                 start_attempts=3,
                 poll_rounds=8,
                 attempts_per_poll=3,
+                requests_per_minute=self._requests_per_minute,
             ),
         )

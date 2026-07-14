@@ -28,20 +28,28 @@ from flight_hunter.agent.chat import (
     AgentTurnResponse,
     AirportOption,
 )
-from flight_hunter.agent.openai_responses import OpenAIResponsesAgentAdapter
-from flight_hunter.agent.presets import AgentPlan, AgentPlanBuilder, AgentPlanStep, AgentPreset
+from flight_hunter.agent.presets import AgentPreset, apply_preset_edits, list_presets
 from flight_hunter.api.agent_routes import (
     AgentRouteError,
     agent_route_error_handler,
     agent_validation_error_handler,
     create_agent_router,
 )
+from flight_hunter.api.agent_schemas import AgentPlanResponse as DurableAgentPlanResponse
 from flight_hunter.api.web import (
     render_index_html,
     render_pwa_icon_svg,
     render_service_worker_js,
     render_web_manifest,
 )
+from flight_hunter.application.agent_intent import IntentParser
+from flight_hunter.application.agent_lifecycle import (
+    AgentLifecycleError,
+    AgentLifecycleService,
+    CreateAgentPlan,
+)
+from flight_hunter.application.agent_planning import AgentPlanBuilder
+from flight_hunter.application.agent_scope import ScopeResolver
 from flight_hunter.application.airport_service import (
     AirportAutocompleteMatch,
     AirportService,
@@ -529,29 +537,13 @@ class AgentPlanRequestBody(BaseModel):
     slots: dict[str, object] = Field(default_factory=dict)
 
 
-class AgentPlanStepResponse(BaseModel):
-    action: str
-    title_ru: str
-    parameters: dict[str, object]
-    requires_live_refresh: bool
-    explanation_ru: str
-
-
-class AgentPlanResponse(BaseModel):
-    preset_id: str
-    title_ru: str
-    risk_level: str
-    missing_slots: list[str]
-    steps: list[AgentPlanStepResponse]
-    warnings: list[str]
-
-
 class AgentChatTurnRequestBody(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     selected_origin: str | None = Field(default=None, min_length=3, max_length=3)
     selected_destination: str | None = Field(default=None, min_length=3, max_length=3)
     departure_date: str | None = None
     return_date: str | None = None
+    date_mode: str | None = None
     passengers: int = Field(default=1, ge=1)
     adults: int | None = Field(default=None, ge=1)
     children: int = Field(default=0, ge=0)
@@ -595,6 +587,7 @@ class AgentRuntimeResponse(BaseModel):
 
 class AgentChatTurnResponse(BaseModel):
     reply_ru: str
+    proposed_plan: DurableAgentPlanResponse
     extracted: dict[str, object]
     missing_slots: list[str]
     airport_options: dict[str, list[AgentAirportOptionResponse]]
@@ -1226,10 +1219,8 @@ def create_app(
         providers=provider_instances,
         enabled_external_source_ids=settings.ru_clickout_enabled_source_ids,
     )
-    agent_plan_builder = AgentPlanBuilder()
     airport_service = AirportService(repository=DemoAirportRepository())
     date_matrix_planner = DateMatrixPlanner()
-    intent_adapter = agent_intent_adapter or _agent_intent_adapter(settings)
     price_source_catalog = PriceSourceCatalog.default()
     source_contract_catalog = SourceContractCatalog.default(settings=settings, registry=registry)
     browser_source_catalog = BrowserSourceCatalog.demo(
@@ -1241,12 +1232,32 @@ def create_app(
         secret_token=settings.telegram_webhook_secret,
     )
     session_factory = watch_session_factory or _watch_session_factory(settings.database_url)
+
+    def agent_lifecycle_service(session: AsyncSession) -> AgentLifecycleService:
+        resolver = ScopeResolver(repository=AirportReferenceRepository(session))
+
+        def lifecycle_clock() -> datetime:
+            return datetime.now(UTC)
+
+        return AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(
+                clock=lifecycle_clock,
+                settings=settings,
+                scope_resolver=resolver,
+            ),
+            clock=lifecycle_clock,
+            provider_gateway=agent_provider_gateway,
+        )
+
     app.add_exception_handler(AgentRouteError, agent_route_error_handler)
     app.add_exception_handler(RequestValidationError, agent_validation_error_handler)
     app.include_router(
         create_agent_router(
             session_factory=session_factory,
             provider_gateway=agent_provider_gateway,
+            settings=settings,
         )
     )
 
@@ -2201,18 +2212,51 @@ def create_app(
     def agent_presets() -> AgentPresetsResponse:
         return AgentPresetsResponse(
             mode=_agent_mode_response(settings),
-            presets=[
-                _agent_preset_response(preset) for preset in agent_plan_builder.list_presets()
-            ],
+            presets=[_agent_preset_response(preset) for preset in list_presets()],
         )
 
-    @app.post("/api/v1/agent/plan", response_model=AgentPlanResponse)
-    def agent_plan(body: AgentPlanRequestBody) -> AgentPlanResponse:
+    @app.post("/api/v1/agent/plan", response_model=DurableAgentPlanResponse)
+    async def agent_plan(
+        body: AgentPlanRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+        household_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-Household-Id",
+        ),
+        user_header: str | None = Header(
+            default=None,
+            alias="X-Flight-Hunter-User-Id",
+        ),
+    ) -> DurableAgentPlanResponse:
         try:
-            plan = agent_plan_builder.build(body.preset_id, slots=body.slots)
+            selections = apply_preset_edits(body.preset_id, body.slots)
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="unknown agent preset") from exc
-        return _agent_plan_response(plan)
+        async with session_factory() as auth_session:
+            auth_context = await _optional_auth_context_from_headers(
+                auth_session,
+                settings=settings,
+                authorization_header=authorization_header,
+                household_header=household_header,
+                user_header=user_header,
+            )
+        if auth_context is None:
+            raise AgentRouteError("auth_context_missing")
+        household_id, user_id = auth_context
+        async with session_factory() as session:
+            try:
+                plan = await agent_lifecycle_service(session).create_plan(
+                    CreateAgentPlan(
+                        household_id=household_id,
+                        user_id=user_id,
+                        text="",
+                        selections=selections,
+                        preset_id=body.preset_id,
+                    )
+                )
+            except AgentLifecycleError as error:
+                raise AgentRouteError(error.code) from error
+        return DurableAgentPlanResponse.from_view(plan)
 
     @app.post("/api/v1/agent/chat/turn", response_model=AgentChatTurnResponse)
     async def agent_chat_turn(
@@ -2227,22 +2271,20 @@ def create_app(
             alias="X-Flight-Hunter-User-Id",
         ),
     ) -> AgentChatTurnResponse:
-        async with session_factory() as session:
+        async with session_factory() as auth_session:
             auth_context = await _optional_auth_context_from_headers(
-                session,
+                auth_session,
                 settings=settings,
                 authorization_header=authorization_header,
                 household_header=household_header,
                 user_header=user_header,
             )
-            household_id, user_id = auth_context if auth_context is not None else (None, None)
+        if auth_context is None:
+            raise AgentRouteError("auth_context_missing")
+        household_id, user_id = auth_context
+        async with session_factory() as session:
             service = AgentChatService(
-                airport_service=airport_service,
-                date_matrix_planner=date_matrix_planner,
-                search_service=search_service,
-                watch_creator=_AgentWatchCreator(session),
-                intent_adapter=intent_adapter,
-                clock=lambda: datetime.now(UTC),
+                plan_creator=agent_lifecycle_service(session),
             )
             response = await service.handle_turn(
                 AgentTurnRequest(
@@ -2253,6 +2295,7 @@ def create_app(
                     selected_destination=body.selected_destination,
                     departure_date=body.departure_date,
                     return_date=body.return_date,
+                    date_mode=body.date_mode,
                     passengers=body.passengers,
                     adults=body.adults,
                     children=body.children,
@@ -3685,17 +3728,6 @@ def _required_ref_str(ref: dict[str, object], key: str) -> str:
     return value
 
 
-def _agent_intent_adapter(settings: AppSettings) -> AgentIntentAdapter | None:
-    if not settings.agent_openai_enabled or settings.openai_api_key is None:
-        return None
-    return OpenAIResponsesAgentAdapter(
-        api_key=settings.openai_api_key,
-        model=settings.agent_openai_model,
-        timeout_seconds=settings.agent_openai_timeout_seconds,
-        base_url=settings.openai_base_url,
-    )
-
-
 async def _auth_context_from_headers(
     session: AsyncSession,
     *,
@@ -3865,35 +3897,6 @@ async def _try_record_source_health_event(
             await session.commit()
     except SQLAlchemyError:
         return
-
-
-class _AgentWatchCreator:
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-
-    async def create_watch(
-        self,
-        *,
-        household_id: UUID,
-        user_id: UUID,
-        origin: str,
-        destination: str,
-        departure_date: str,
-        return_date: str | None,
-    ) -> WatchRecord:
-        service = WatchService(
-            HouseholdWatchRepository(self._session), clock=lambda: datetime.now(UTC)
-        )
-        return await service.create_watch(
-            CreateWatchCommand(
-                household_id=household_id,
-                owner_user_id=user_id,
-                origin=origin,
-                destination=destination,
-                departure_date=departure_date,
-                return_date=return_date,
-            )
-        )
 
 
 def _provider_status_response(status: ProviderStatus) -> ProviderStatusResponse:
@@ -4265,30 +4268,10 @@ def _agent_preset_response(preset: AgentPreset) -> AgentPresetResponse:
     )
 
 
-def _agent_plan_response(plan: AgentPlan) -> AgentPlanResponse:
-    return AgentPlanResponse(
-        preset_id=plan.preset_id.value,
-        title_ru=plan.title_ru,
-        risk_level=plan.risk_level.value,
-        missing_slots=list(plan.missing_slots),
-        steps=[_agent_plan_step_response(step) for step in plan.steps],
-        warnings=list(plan.warnings),
-    )
-
-
-def _agent_plan_step_response(step: AgentPlanStep) -> AgentPlanStepResponse:
-    return AgentPlanStepResponse(
-        action=step.action,
-        title_ru=step.title_ru,
-        parameters=step.parameters,
-        requires_live_refresh=step.requires_live_refresh,
-        explanation_ru=step.explanation_ru,
-    )
-
-
 def _agent_chat_turn_response(response: AgentTurnResponse) -> AgentChatTurnResponse:
     return AgentChatTurnResponse(
         reply_ru=response.reply_ru,
+        proposed_plan=DurableAgentPlanResponse.from_view(response.proposed_plan),
         extracted=response.extracted,
         missing_slots=list(response.missing_slots),
         airport_options={

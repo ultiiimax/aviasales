@@ -35,6 +35,7 @@ from flight_hunter.application.agent_lifecycle import (
 )
 from flight_hunter.application.agent_planning import AgentPlanBuilder
 from flight_hunter.application.agent_scope import ScopeResolver
+from flight_hunter.config import AppSettings
 from flight_hunter.domain.auth import AuthSession, token_hash
 from flight_hunter.persistence.repositories import AirportReferenceRepository, IdentityRepository
 
@@ -106,9 +107,11 @@ def create_agent_router(
     session_factory: async_sessionmaker[AsyncSession],
     provider_gateway: object | None = None,
     clock: Callable[[], datetime] | None = None,
+    settings: AppSettings | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/agent/search-plans", tags=["agent-plans"])
     lifecycle_clock = clock or (lambda: datetime.now(UTC))
+    lifecycle_settings = settings or AppSettings.from_env()
 
     async def require_bearer_session(
         credentials: HTTPAuthorizationCredentials | None = Depends(_BEARER),
@@ -129,7 +132,11 @@ def create_agent_router(
         return AgentLifecycleService(
             session=session,
             parser=IntentParser(),
-            builder=AgentPlanBuilder(clock=lifecycle_clock, scope_resolver=resolver),
+            builder=AgentPlanBuilder(
+                clock=lifecycle_clock,
+                settings=lifecycle_settings,
+                scope_resolver=resolver,
+            ),
             clock=lifecycle_clock,
             provider_gateway=provider_gateway,
         )

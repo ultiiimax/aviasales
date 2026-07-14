@@ -1,246 +1,502 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+from typing import Protocol
 from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from flight_hunter.agent.chat import IntentDraft
 from flight_hunter.api.app import create_app
 from flight_hunter.config import AppSettings
-from flight_hunter.persistence.models import mapper_registry
-
-HOUSEHOLD_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-USER_A = "aaaaaaaa-0000-0000-0000-000000000001"
+from flight_hunter.persistence.models import agent_search_plan_revisions_table
 
 
-def test_agent_presets_endpoint_lists_beginner_presets() -> None:
-    client = TestClient(create_app())
+class _ProviderCounter(Protocol):
+    calls: int
 
-    response = client.get("/api/v1/agent/presets")
+
+class _Harness(Protocol):
+    client: TestClient
+    session_factory: async_sessionmaker[AsyncSession]
+    household_id: str
+    user_id: str
+    provider: _ProviderCounter
+
+    @property
+    def auth_headers(self) -> dict[str, str]: ...
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("preset_id", "slots"),
+    (
+        (
+            "buy_timing",
+            {"origin": "LED", "destination": "CDG", "departure_date": "2026-10-12"},
+        ),
+        (
+            "flexible_dates",
+            {"origin": "LED", "destination": "CDG", "departure_date": "2026-10-12"},
+        ),
+        ("nearby_airports", {"origin": "LED", "destination": "CDG"}),
+        (
+            "hidden_city",
+            {"origin": "LED", "destination": "CDG", "departure_date": "2026-10-12"},
+        ),
+        (
+            "split_ticket",
+            {"origin": "LED", "destination": "CDG", "departure_date": "2026-10-12"},
+        ),
+        ("error_fare_sources", {"region": "southern_europe"}),
+        ("geo_currency", {"flight": "SU 100"}),
+    ),
+)
+async def test_all_compatibility_presets_return_the_durable_revision_schema(
+    agent_api_harness: _Harness,
+    preset_id: str,
+    slots: dict[str, object],
+) -> None:
+    response = agent_api_harness.client.post(
+        "/api/v1/agent/plan",
+        headers=agent_api_harness.auth_headers,
+        json={"preset_id": preset_id, "slots": slots},
+    )
 
     assert response.status_code == 200
     body = response.json()
-    preset_ids = {preset["id"] for preset in body["presets"]}
-    assert "flexible_dates" in preset_ids
-    assert "hidden_city" in preset_ids
-    assert "geo_currency" in preset_ids
-    assert body["mode"]["provider"] == "deterministic_presets"
+    assert {
+        "plan_id",
+        "revision_id",
+        "revision",
+        "state",
+        "content_hash",
+        "coverage",
+        "executable",
+        "enabled_strategies",
+        "estimate",
+        "clarifications",
+        "summary",
+        "created_at",
+        "expires_at",
+    } == set(body)
+    assert body["revision"] == 1
+    assert "steps" not in body
+    assert "canonical_plan" not in response.text
+    assert "scope_snapshot" not in response.text
+    assert "provider_ref" not in response.text
+    assert agent_api_harness.provider.calls == 0
 
 
-def test_agent_plan_endpoint_returns_safe_plan() -> None:
-    client = TestClient(create_app())
+@pytest.mark.anyio
+async def test_compatibility_agent_endpoints_require_auth(agent_api_harness: _Harness) -> None:
+    plan = agent_api_harness.client.post(
+        "/api/v1/agent/plan",
+        json={"preset_id": "flexible_dates", "slots": {}},
+    )
+    chat = agent_api_harness.client.post(
+        "/api/v1/agent/chat/turn",
+        json={"message": "LED → CDG"},
+    )
 
+    assert plan.status_code == 401
+    assert chat.status_code == 401
+    assert plan.json()["code"] == "auth_context_missing"
+    assert chat.json()["code"] == "auth_context_missing"
+
+
+@pytest.mark.anyio
+async def test_compatibility_plan_is_committed_and_reloadable_from_canonical_api(
+    agent_api_harness: _Harness,
+) -> None:
+    created = agent_api_harness.client.post(
+        "/api/v1/agent/plan",
+        headers=agent_api_harness.auth_headers,
+        json={
+            "preset_id": "buy_timing",
+            "slots": {
+                "origin": "LED",
+                "destination": "CDG",
+                "departure_date": "2026-10-12",
+            },
+        },
+    )
+
+    assert created.status_code == 200
+    plan = created.json()
+    reloaded = agent_api_harness.client.get(
+        f"/api/v1/agent/search-plans/{plan['plan_id']}",
+        headers=agent_api_harness.auth_headers,
+    )
+    assert reloaded.status_code == 200
+    assert reloaded.json()["revision_id"] == plan["revision_id"]
+
+
+@pytest.mark.anyio
+async def test_legacy_headers_remain_available_only_when_enabled(
+    agent_api_harness: _Harness,
+) -> None:
+    settings = replace(AppSettings.from_env(), auth_allow_legacy_headers=True)
+    client = TestClient(
+        create_app(
+            watch_session_factory=agent_api_harness.session_factory,
+            settings=settings,
+            agent_provider_gateway=agent_api_harness.provider,
+        ),
+        raise_server_exceptions=False,
+    )
     response = client.post(
         "/api/v1/agent/plan",
+        headers={
+            "X-Flight-Hunter-Household-Id": agent_api_harness.household_id,
+            "X-Flight-Hunter-User-Id": agent_api_harness.user_id,
+        },
         json={
             "preset_id": "flexible_dates",
             "slots": {
-                "origin": "WAW",
-                "destination": "BCN",
+                "origin": "LED",
+                "destination": "CDG",
                 "departure_date": "2026-10-12",
             },
         },
     )
 
     assert response.status_code == 200
+    assert response.json()["plan_id"]
+    assert agent_api_harness.provider.calls == 0
+    client.close()
+
+
+@pytest.mark.anyio
+async def test_free_text_chat_returns_missing_date_plan_reference_without_provider_calls(
+    agent_api_harness: _Harness,
+) -> None:
+    response = agent_api_harness.client.post(
+        "/api/v1/agent/chat/turn",
+        headers=agent_api_harness.auth_headers,
+        json={"message": "Найди самый дешёвый вариант из СПб во Францию"},
+    )
+
+    assert response.status_code == 200
     body = response.json()
-    assert body["preset_id"] == "flexible_dates"
-    assert body["missing_slots"] == []
-    assert body["steps"][0]["action"] == "build_date_matrix"
-    assert body["steps"][0]["requires_live_refresh"] is False
+    plan = body["proposed_plan"]
+    assert plan["state"] == "draft"
+    assert plan["executable"] is False
+    draft_scope = plan["summary"]["scope"][0]
+    assert draft_scope["origin_kind"] == "city"
+    assert draft_scope["origin_value"] == "LED"
+    assert draft_scope["origin_airports"] == []
+    assert draft_scope["destination_kind"] == "country"
+    assert draft_scope["destination_value"] == "FR"
+    assert draft_scope["destination_airports"] == []
+    assert draft_scope["frozen"] is False
+    assert plan["clarifications"][0]["code"] == "date_required"
+    assert plan["clarifications"][0]["actions"][0]["action_id"] == ("use_rolling_90_days")
+    assert agent_api_harness.provider.calls == 0
 
 
-def test_agent_plan_endpoint_does_not_guess_missing_fields() -> None:
-    client = TestClient(create_app())
+@pytest.mark.anyio
+async def test_rolling_90_day_quick_plan_is_not_clamped_or_made_executable(
+    agent_api_harness: _Harness,
+) -> None:
+    response = agent_api_harness.client.post(
+        "/api/v1/agent/chat/turn",
+        headers=agent_api_harness.auth_headers,
+        json={
+            "message": "Найди самый дешёвый вариант из СПб во Францию",
+            "date_mode": "rolling_90_days",
+        },
+    )
 
-    response = client.post(
+    assert response.status_code == 200
+    plan = response.json()["proposed_plan"]
+    assert plan["state"] == "draft"
+    assert plan["executable"] is False
+    assert plan["estimate"] is None
+    budget = next(
+        item for item in plan["clarifications"] if item["code"] == "quick_budget_too_large"
+    )
+    assert budget["details"]["calendar_searches"] == 90
+    assert budget["details"]["exact_searches"] == 90
+    assert budget["details"]["logical_operations"] == 180
+    assert budget["details"]["limit"] == 60
+    assert plan["summary"]["date_mode"] == "rolling_90_days"
+    assert agent_api_harness.provider.calls == 0
+
+
+@pytest.mark.anyio
+async def test_bounded_plan_exposes_sanitized_frozen_plan_card_summary(
+    agent_api_harness: _Harness,
+) -> None:
+    response = agent_api_harness.client.post(
         "/api/v1/agent/plan",
-        json={"preset_id": "buy_timing", "slots": {"origin": "WAW"}},
+        headers=agent_api_harness.auth_headers,
+        json={
+            "preset_id": "flexible_dates",
+            "slots": {
+                "origin": "LED",
+                "destination": "CDG",
+                "departure_date": "2026-10-12",
+            },
+        },
     )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["missing_slots"] == ["destination", "departure_date"]
-    assert body["steps"] == []
+    plan = response.json()
+    assert plan["state"] == "awaiting_approval"
+    assert plan["executable"] is True
+    assert plan["coverage"] == "quick"
+    assert plan["summary"] == {
+        "trip_shape": "one_way",
+        "date_mode": "flexible",
+        "preset_id": "flexible_dates",
+        "analysis_modes": [],
+        "passengers": {
+            "adults": 1,
+            "children": 0,
+            "infants": 0,
+            "total": 1,
+            "currency": "RUB",
+        },
+        "scope": [
+            {
+                "origin_kind": "airport",
+                "origin_value": "LED",
+                "origin_airports": ["LED"],
+                "destination_kind": "airport",
+                "destination_value": "CDG",
+                "destination_airports": ["CDG"],
+                "anywhere": False,
+                "frozen": True,
+                "nearby_radius_km": 0,
+                "date_mode": "flexible",
+                "date_start": "2026-10-09",
+                "date_end": "2026-10-15",
+                "flex_days": 3,
+            }
+        ],
+        "provider": {
+            "source_id": "aviasales_search",
+            "capability_version": "mobile-contract-2026-07-13",
+            "cost_model_version": "aviasales-v1",
+            "requests_per_minute": 20,
+        },
+        "hidden_city_enabled": False,
+    }
+    assert plan["estimate"] == {
+        "calendar_searches": 7,
+        "exact_searches": 7,
+        "logical_operations": 14,
+        "http_attempts": 210,
+        "deadline_seconds": 600,
+    }
+    assert agent_api_harness.provider.calls == 0
 
 
-def test_agent_plan_endpoint_rejects_unknown_preset_cleanly() -> None:
-    client = TestClient(create_app())
+@pytest.mark.anyio
+async def test_pre_task6_revision_reports_unknown_rpm_instead_of_inventing_default(
+    agent_api_harness: _Harness,
+) -> None:
+    created = agent_api_harness.client.post(
+        "/api/v1/agent/search-plans",
+        headers=agent_api_harness.auth_headers,
+        json={
+            "text": "LED → CDG 2026-10-12",
+            "coverage": "quick",
+        },
+    ).json()
+    async with agent_api_harness.session_factory() as session:
+        statement = update(agent_search_plan_revisions_table).where(
+            agent_search_plan_revisions_table.c.id == created["revision_id"]
+        )
+        current = {
+            "version": "aviasales-v1",
+            "start_attempts": 3,
+            "poll_rounds": 8,
+            "attempts_per_poll": 3,
+            "worst_case_exact_http_attempts": 27,
+        }
+        await session.execute(
+            statement.values(cost_model_snapshot_json=json.dumps(current, sort_keys=True))
+        )
+        await session.commit()
 
-    response = client.post(
+    fetched = agent_api_harness.client.get(
+        f"/api/v1/agent/search-plans/{created['plan_id']}",
+        headers=agent_api_harness.auth_headers,
+    )
+
+    assert fetched.status_code == 200
+    assert fetched.json()["summary"]["provider"]["requests_per_minute"] is None
+    assert UUID(fetched.json()["revision_id"])
+
+
+@pytest.mark.anyio
+async def test_canonical_compat_and_chat_share_the_same_frozen_runtime_settings(
+    agent_api_harness: _Harness,
+) -> None:
+    settings = replace(
+        AppSettings.from_env(),
+        aviasales_search_internal_rpm=17,
+    )
+    client = TestClient(
+        create_app(
+            watch_session_factory=agent_api_harness.session_factory,
+            settings=settings,
+            agent_provider_gateway=agent_api_harness.provider,
+        ),
+        raise_server_exceptions=False,
+    )
+    canonical = client.post(
+        "/api/v1/agent/search-plans",
+        headers=agent_api_harness.auth_headers,
+        json={"text": "LED → CDG 2026-10-12", "coverage": "quick"},
+    )
+    compatibility = client.post(
         "/api/v1/agent/plan",
-        json={"preset_id": "unknown", "slots": {}},
+        headers=agent_api_harness.auth_headers,
+        json={
+            "preset_id": "buy_timing",
+            "slots": {
+                "origin": "LED",
+                "destination": "CDG",
+                "departure_date": "2026-10-12",
+            },
+        },
+    )
+    chat = client.post(
+        "/api/v1/agent/chat/turn",
+        headers=agent_api_harness.auth_headers,
+        json={"message": "LED → CDG 2026-10-12"},
     )
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "unknown agent preset"
-
-
-def test_airport_search_endpoint_accepts_city_names_and_aliases() -> None:
-    client = TestClient(create_app())
-
-    response = client.get("/api/v1/airports/search", params={"q": "Варшава"})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert [airport["iata_code"] for airport in body["airports"][:2]] == ["WAW", "WMI"]
-    assert body["import_status"]["source"] in {"demo", "ourairports"}
-
-
-def test_airport_search_endpoint_accepts_spb_and_shanghai_aliases() -> None:
-    client = TestClient(create_app())
-
-    spb_response = client.get("/api/v1/airports/search", params={"q": "спб"})
-    shanghai_response = client.get("/api/v1/airports/search", params={"q": "Шанхай"})
-
-    assert spb_response.status_code == 200
-    assert shanghai_response.status_code == 200
-    assert [airport["iata_code"] for airport in spb_response.json()["airports"]] == ["LED"]
-    assert [airport["iata_code"] for airport in shanghai_response.json()["airports"][:2]] == [
-        "PVG",
-        "SHA",
-    ]
+    assert canonical.status_code == 201
+    assert compatibility.status_code == 200
+    assert chat.status_code == 200
+    plans = (canonical.json(), compatibility.json(), chat.json()["proposed_plan"])
+    assert {plan["summary"]["provider"]["requests_per_minute"] for plan in plans} == {17}
+    assert {json.dumps(plan["estimate"], sort_keys=True) for plan in plans} == {
+        json.dumps(
+            {
+                "calendar_searches": 0,
+                "exact_searches": 1,
+                "logical_operations": 1,
+                "http_attempts": 27,
+                "deadline_seconds": 600,
+            },
+            sort_keys=True,
+        )
+    }
+    assert agent_api_harness.provider.calls == 0
+    client.close()
 
 
 @pytest.mark.anyio
-async def test_agent_chat_turn_creates_watch_only_from_explicit_monitoring_request() -> None:
-    session_factory = await _session_factory()
-    client = TestClient(create_app(watch_session_factory=session_factory))
-
-    response = client.post(
-        "/api/v1/agent/chat/turn",
-        headers=_headers(HOUSEHOLD_A, USER_A),
-        json={"message": "WAW BCN 2026-10-12 2026-10-19 следи"},
+async def test_nearby_preset_freezes_the_real_150_km_scope(
+    agent_api_harness: _Harness,
+) -> None:
+    response = agent_api_harness.client.post(
+        "/api/v1/agent/plan",
+        headers=agent_api_harness.auth_headers,
+        json={
+            "preset_id": "nearby_airports",
+            "slots": {
+                "origin": "LED",
+                "destination": "CDG",
+                "departure_date": "2026-10-12",
+            },
+        },
     )
-    watches = client.get("/api/v1/watches", headers=_headers(HOUSEHOLD_A, USER_A))
 
     assert response.status_code == 200
-    body = response.json()
-    assert [action["kind"] for action in body["actions"]] == [
-        "search_cached_offers",
-        "build_date_matrix",
-        "find_nearby_airports",
-        "create_watch",
-        "offer_live_check",
-    ]
-    assert UUID(body["actions"][3]["related_id"])
-    assert "grant_token" not in response.text
-    assert "WAW BCN 2026-10-12 2026-10-19 следи" not in response.text
-    assert [watch["destination"] for watch in watches.json()["watches"]] == ["BCN"]
+    scope = response.json()["summary"]["scope"][0]
+    assert scope["frozen"] is True
+    assert scope["nearby_radius_km"] == 150
+    assert "LED" in scope["origin_airports"]
+    assert "CDG" in scope["destination_airports"]
+    assert agent_api_harness.provider.calls == 0
 
 
 @pytest.mark.anyio
-async def test_agent_chat_turn_returns_airport_choices_without_guessing() -> None:
-    client = TestClient(create_app(watch_session_factory=await _session_factory()))
-
-    response = client.post(
-        "/api/v1/agent/chat/turn",
-        headers=_headers(HOUSEHOLD_A, USER_A),
-        json={"message": "из Варшавы в Барселону на неделю в октябре"},
+@pytest.mark.parametrize(
+    ("preset_id", "slots", "analysis_mode"),
+    (
+        (
+            "buy_timing",
+            {"origin": "LED", "destination": "CDG", "departure_date": "2026-10-12"},
+            "buy_timing",
+        ),
+        ("error_fare_sources", {"region": "southern_europe"}, "error_fare"),
+        ("geo_currency", {"flight": "SU 100"}, "currency_compare"),
+    ),
+)
+async def test_analysis_presets_keep_typed_mode_without_inventing_analysis(
+    agent_api_harness: _Harness,
+    preset_id: str,
+    slots: dict[str, object],
+    analysis_mode: str,
+) -> None:
+    response = agent_api_harness.client.post(
+        "/api/v1/agent/plan",
+        headers=agent_api_harness.auth_headers,
+        json={"preset_id": preset_id, "slots": slots},
     )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["missing_slots"] == ["origin", "departure_date"]
-    assert [item["iata_code"] for item in body["airport_options"]["origin"]] == ["WAW", "WMI"]
-    assert [action["kind"] for action in body["actions"]] == [
-        "clarify_airport_choice",
-        "clarify_travel_dates",
-    ]
+    summary = response.json()["summary"]
+    assert summary["preset_id"] == preset_id
+    assert summary["analysis_modes"] == [analysis_mode]
+    assert "analysis_result" not in response.text
+    assert agent_api_harness.provider.calls == 0
 
 
 @pytest.mark.anyio
-async def test_agent_chat_turn_understands_spb_shanghai_month_query() -> None:
-    client = TestClient(create_app(watch_session_factory=await _session_factory()))
-
-    response = client.post(
-        "/api/v1/agent/chat/turn",
-        headers=_headers(HOUSEHOLD_A, USER_A),
-        json={"message": "Хочу из спб улететь в Шанхай в октябре"},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["extracted"]["origin"] == "LED"
-    assert body["extracted"]["destination"] is None
-    assert body["extracted"]["date_hint"] == "октябрь"
-    assert body["missing_slots"] == ["destination", "departure_date"]
-    assert [item["iata_code"] for item in body["airport_options"]["origin"]] == ["LED"]
-    assert [item["iata_code"] for item in body["airport_options"]["destination"][:2]] == [
-        "PVG",
-        "SHA",
-    ]
-    assert [action["kind"] for action in body["actions"]] == [
-        "clarify_airport_choice",
-        "clarify_travel_dates",
-    ]
-    assert "search_cached_offers" not in {action["kind"] for action in body["actions"]}
-    assert body["runtime"]["backend"] == "deterministic_harness"
-    assert body["runtime"]["agentic_loop"] == "policy_validated_tool_plan"
-    assert body["runtime"]["live_calls_allowed"] is False
-
-
-def test_agent_chat_turn_reports_openai_backend_when_configured_without_leaking_key() -> None:
-    settings = _settings(
+async def test_configured_legacy_model_is_not_claimed_when_plan_parser_does_not_use_it(
+    agent_api_harness: _Harness,
+) -> None:
+    settings = replace(
+        AppSettings.from_env(),
         agent_openai_enabled=True,
         openai_api_key="sk-test",
         agent_openai_model="gpt-5.5",
     )
     client = TestClient(
-        create_app(settings=settings, agent_intent_adapter=NoopIntentAdapter(model="gpt-5.5"))
+        create_app(
+            watch_session_factory=agent_api_harness.session_factory,
+            settings=settings,
+            agent_intent_adapter=NoopIntentAdapter(),
+            agent_provider_gateway=agent_api_harness.provider,
+        )
     )
-
     response = client.post(
         "/api/v1/agent/chat/turn",
-        headers=_headers(HOUSEHOLD_A, USER_A),
-        json={"message": "Хочу из спб улететь в Шанхай в октябре"},
+        headers=agent_api_harness.auth_headers,
+        json={"message": "LED → CDG 2026-10-12"},
     )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["runtime"]["backend"] == "openai_responses"
-    assert body["runtime"]["model"] == "gpt-5.5"
-    assert body["runtime"]["fallback_backend"] == "deterministic_harness"
+    assert response.json()["runtime"]["backend"] == "deterministic_harness"
+    assert response.json()["runtime"]["model"] is None
     assert "sk-test" not in response.text
-
-
-def _headers(household_id: str, user_id: str) -> dict[str, str]:
-    return {
-        "X-Flight-Hunter-Household-Id": household_id,
-        "X-Flight-Hunter-User-Id": user_id,
-    }
-
-
-async def _session_factory():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as connection:
-        await connection.run_sync(mapper_registry.metadata.create_all)
-    return async_sessionmaker(engine, expire_on_commit=False)
+    client.close()
 
 
 class NoopIntentAdapter:
-    def __init__(self, *, model: str) -> None:
-        self._model = model
-
     @property
     def model(self) -> str:
-        return self._model
+        return "gpt-5.5"
 
-    def extract_intent(self, message: str) -> IntentDraft | None:
+    def extract_intent(self, _message: str) -> IntentDraft | None:
         return None
 
 
-def _settings(**overrides: object) -> AppSettings:
-    values = {
-        "database_url": "sqlite+aiosqlite:///:memory:",
-        "aviasales_search_enabled": False,
-        "aviasales_search_signature": None,
-        "aviasales_search_marker": None,
-        "aviasales_search_internal_rpm": 20,
-        "telegram_enabled": False,
-        "telegram_webhook_secret": None,
-    }
-    values.update(overrides)
-    return AppSettings(**values)
+def test_agent_validation_handler_keeps_non_agent_validation_generic() -> None:
+    response = TestClient(create_app()).post("/api/v1/auth/accept-invitation", json={})
+
+    assert response.status_code == 422
+    assert "detail" in response.json()
+    assert "code" not in response.json()

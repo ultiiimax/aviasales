@@ -110,6 +110,56 @@ class AgentPlanEstimateResponse(BaseModel):
     deadline_seconds: int
 
 
+class AgentPlanPassengerSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    adults: int
+    children: int
+    infants: int
+    total: int
+    currency: str
+
+
+class AgentPlanScopeLegSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    origin_kind: str | None
+    origin_value: str | None
+    origin_airports: list[str]
+    destination_kind: str | None
+    destination_value: str | None
+    destination_airports: list[str]
+    anywhere: bool
+    frozen: bool
+    nearby_radius_km: int
+    date_mode: str
+    date_start: Date | None
+    date_end: Date | None
+    flex_days: int
+
+
+class AgentPlanProviderSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    source_id: str
+    capability_version: str
+    cost_model_version: str
+    requests_per_minute: int | None
+
+
+class AgentPlanSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    trip_shape: str
+    date_mode: str
+    preset_id: str | None
+    analysis_modes: list[str]
+    passengers: AgentPlanPassengerSummaryResponse
+    scope: list[AgentPlanScopeLegSummaryResponse]
+    provider: AgentPlanProviderSummaryResponse
+    hidden_city_enabled: bool
+
+
 class AgentPlanResponse(BaseModel):
     plan_id: UUID
     revision_id: UUID
@@ -120,6 +170,7 @@ class AgentPlanResponse(BaseModel):
     executable: bool
     enabled_strategies: list[str]
     estimate: AgentPlanEstimateResponse | None
+    summary: AgentPlanSummaryResponse
     clarifications: list[ClarificationResponse]
     created_at: datetime
     expires_at: datetime
@@ -137,6 +188,7 @@ class AgentPlanResponse(BaseModel):
                 "executable": view.executable,
                 "enabled_strategies": list(view.enabled_strategies),
                 "estimate": view.estimate,
+                "summary": view.summary,
                 "clarifications": list(view.clarifications),
                 "created_at": view.created_at,
                 "expires_at": view.expires_at,

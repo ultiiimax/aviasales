@@ -327,6 +327,44 @@ def render_index_html() -> str:
       gap: 10px;
     }
 
+    .agent-plan-card {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(244, 248, 249, 0.92);
+    }
+
+    .agent-plan-card[hidden],
+    .agent-plan-region[hidden] {
+      display: none;
+    }
+
+    .agent-plan-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px 14px;
+      margin: 0;
+    }
+
+    .agent-plan-grid div {
+      min-width: 0;
+    }
+
+    .agent-plan-grid dt {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .agent-plan-grid dd {
+      margin: 3px 0 0;
+      overflow-wrap: anywhere;
+      font-size: 13px;
+    }
+
     .choice-list,
     .action-list {
       display: grid;
@@ -721,6 +759,38 @@ def render_index_html() -> str:
               <div class="action-list" id="agent-action-list"></div>
             </div>
           </div>
+          <section class="agent-plan-card" id="agent-plan-card" aria-labelledby="agent-plan-heading" hidden>
+            <div>
+              <h3 id="agent-plan-heading">План поиска</h3>
+              <div id="agent-plan-status" role="status" aria-live="polite">План не создан</div>
+            </div>
+            <dl class="agent-plan-grid">
+              <div><dt>Ревизия</dt><dd id="agent-plan-revision">Неизвестно</dd></div>
+              <div><dt>Замороженная область</dt><dd id="agent-plan-scope">Неизвестно</dd></div>
+              <div><dt>Даты</dt><dd id="agent-plan-date-mode">Неизвестно</dd></div>
+              <div><dt>Пассажиры</dt><dd id="agent-plan-passengers">Неизвестно</dd></div>
+              <div><dt>Покрытие</dt><dd id="agent-plan-coverage">Неизвестно</dd></div>
+              <div><dt>Стратегии</dt><dd id="agent-plan-strategies">Неизвестно</dd></div>
+              <div><dt>Hidden-city</dt><dd id="agent-plan-hidden-city">Неизвестно</dd></div>
+              <div><dt>Оценка</dt><dd id="agent-plan-estimate">Неизвестно</dd></div>
+              <div><dt>Лимит провайдера</dt><dd id="agent-plan-rpm">Неизвестно</dd></div>
+              <div><dt>Дедлайн</dt><dd id="agent-plan-deadline">Неизвестно</dd></div>
+              <div><dt>Источник</dt><dd id="agent-plan-source">Неизвестно</dd></div>
+              <div><dt>Истекает</dt><dd id="agent-plan-expiry">Неизвестно</dd></div>
+            </dl>
+            <div class="quick-actions" aria-label="Действия с планом">
+              <button class="secondary" type="button" id="agent-plan-edit">Изменить план</button>
+              <button class="secondary" type="button" id="agent-plan-full">Проверить всю область</button>
+              <button class="primary" type="button" id="agent-plan-execute" disabled>Запустить поиск</button>
+            </div>
+            <div class="agent-plan-region" id="agent-run-progress" role="status" aria-live="polite">Запуск ещё не создан.</div>
+            <button class="secondary" type="button" id="agent-run-cancel" disabled>Отменить запуск</button>
+            <section class="agent-plan-region" id="agent-risky-results" aria-labelledby="agent-risky-results-heading" hidden>
+              <h4 id="agent-risky-results-heading">Рискованные варианты</h4>
+              <div id="agent-risky-results-list">Нет подтверждённых рискованных вариантов.</div>
+            </section>
+            <div class="agent-plan-region" id="agent-partial-errors" role="alert" hidden></div>
+          </section>
           <form class="assistant-input" id="assistant-form">
             <textarea name="agent_prompt" placeholder="Например: из Варшавы в Барселону 2026-10-12 2026-10-19 следи"></textarea>
             <button class="primary" type="submit">Спросить агента</button>
@@ -887,7 +957,12 @@ def render_index_html() -> str:
     let lastSearchId = null;
     let lastExternalLinks = [];
     let watchRecords = [];
+    let currentAgentPlan = null;
+    let currentAgentRun = null;
+    let lastAgentPrompt = "";
+    let agentEditMode = false;
     const sessionTokenKey = "flight_hunter_session_token";
+    const agentPlanStorageKey = "flight_hunter_agent_plan_id_v1";
 
     const manualConfirmationActions = [
       {status: "confirmed", label: "Совпала"},
@@ -968,7 +1043,12 @@ def render_index_html() -> str:
         renderSignedOutState();
         return;
       }
-      await Promise.all([loadManualConfirmations(), loadWatches(), loadAuditEvents()]);
+      await Promise.all([
+        loadManualConfirmations(),
+        loadWatches(),
+        loadAuditEvents(),
+        reloadAgentPlan()
+      ]);
     }
 
     async function refreshSessionState() {
@@ -1174,6 +1254,10 @@ def render_index_html() -> str:
         destination: payload.destination,
         departure_date: payload.departure_date,
         return_date: payload.return_date,
+        adults: payload.adults,
+        children: payload.children,
+        infants: payload.infants,
+        currency: payload.currency,
         flight: `${payload.origin}-${payload.destination} ${payload.departure_date}`,
         region: payload.destination || payload.origin
       };
@@ -2263,18 +2347,167 @@ def render_index_html() -> str:
       return "flexible_dates";
     }
 
-    function renderAgentPlan(plan) {
-      if (plan.missing_slots && plan.missing_slots.length > 0) {
-        addMessage("bot", `Нужны поля: ${plan.missing_slots.join(", ")}.`);
-        return;
+    function freshIdempotencyKey() {
+      if (window.crypto && typeof window.crypto.randomUUID === "function") {
+        return `web-${window.crypto.randomUUID()}`;
       }
-      const steps = (plan.steps || []).map((step, index) =>
-        `${index + 1}. ${step.title_ru}\\n${step.explanation_ru}`
-      ).join("\\n\\n");
-      const warnings = (plan.warnings || []).length
-        ? `\\n\\nОграничения:\\n${plan.warnings.map((item) => `- ${item}`).join("\\n")}`
-        : "";
-      addMessage("bot", `${plan.title_ru}\\n\\n${steps}${warnings}`);
+      if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+        const words = new Uint32Array(4);
+        window.crypto.getRandomValues(words);
+        return `web-${Array.from(words, (word) => word.toString(16).padStart(8, "0")).join("")}`;
+      }
+      throw new Error("secure_idempotency_key_unavailable");
+    }
+
+    function agentPlanUrl(planId) {
+      return `/api/v1/agent/search-plans/${encodeURIComponent(planId)}`;
+    }
+
+    function agentPlanStateLabel(state) {
+      const labels = {
+        draft: "Черновик — нужны уточнения",
+        awaiting_approval: "Ждёт явного запуска",
+        consumed: "Быстрый план уже запущен",
+        expired: "План истёк",
+        superseded: "Есть более новая ревизия"
+      };
+      return labels[state] || state || "Неизвестно";
+    }
+
+    function agentScopeLabel(scope) {
+      if (!scope || scope.length === 0) return "Неизвестно";
+      return scope.map((leg, index) => {
+        const requestedOrigin = [leg.origin_kind, leg.origin_value].filter(Boolean).join(": ");
+        const requestedDestination = [leg.destination_kind, leg.destination_value]
+          .filter(Boolean).join(": ");
+        const origin = leg.frozen && leg.origin_airports.length
+          ? leg.origin_airports.join(", ")
+          : requestedOrigin || "не задано";
+        const destination = leg.anywhere
+          ? "куда угодно"
+          : leg.frozen && leg.destination_airports.length
+            ? leg.destination_airports.join(", ")
+            : requestedDestination || "не задано";
+        const nearby = leg.nearby_radius_km > 0 ? ` · радиус ${leg.nearby_radius_km} км` : "";
+        const freeze = leg.frozen ? "заморожено" : "ещё не заморожено";
+        return `${index + 1}. ${origin} → ${destination}${nearby} · ${freeze}`;
+      }).join("; ");
+    }
+
+    function agentDateLabel(plan) {
+      const summary = plan.summary || {};
+      const legs = summary.scope || [];
+      const ranges = legs.map((leg) => {
+        if (!leg.date_start) return null;
+        const end = leg.date_end && leg.date_end !== leg.date_start ? ` — ${leg.date_end}` : "";
+        const flex = leg.flex_days > 0 ? ` · ±${leg.flex_days} дн.` : "";
+        return `${leg.date_start}${end}${flex}`;
+      }).filter(Boolean);
+      return `${summary.date_mode || "Неизвестно"}${ranges.length ? ` · ${ranges.join("; ")}` : ""}`;
+    }
+
+    function agentEstimateLabel(plan) {
+      if (!plan.estimate) {
+        const budget = (plan.clarifications || []).find(
+          (item) => item.code === "quick_budget_too_large"
+        );
+        if (budget) {
+          const logical = budget.details && budget.details.logical_operations;
+          const calendar = budget.details && budget.details.calendar_searches;
+          const exact = budget.details && budget.details.exact_searches;
+          const limit = budget.details && budget.details.limit;
+          return `Не исполняется: ${logical ?? "?"} операций `
+            + `(${calendar ?? "?"} календарных, ${exact ?? "?"} точных) `
+            + `при лимите ${limit ?? "?"}`;
+        }
+        return "Недостаточно данных";
+      }
+      return `${plan.estimate.logical_operations} операций · `
+        + `${plan.estimate.http_attempts} HTTP-попыток`;
+    }
+
+    function agentClarificationLabel(plan) {
+      const clarifications = plan.clarifications || [];
+      if (!clarifications.length) return "";
+      return ` · ${clarifications.map((item) => item.message_ru).join(" ")}`;
+    }
+
+    function renderAgentPlan(plan) {
+      currentAgentPlan = plan;
+      agentEditMode = false;
+      window.localStorage.setItem(agentPlanStorageKey, String(plan.plan_id));
+      const summary = plan.summary || {};
+      const passengers = summary.passengers || {};
+      const provider = summary.provider || {};
+      const hiddenCityEnabled = summary.hidden_city_enabled === true;
+      const executeReady = plan.state === "awaiting_approval"
+        && plan.executable === true
+        && !hiddenCityEnabled;
+      const cloneReady = ["consumed", "expired", "superseded"].includes(plan.state)
+        && plan.coverage === "quick";
+      const editReady = ["draft", "awaiting_approval"].includes(plan.state);
+
+      document.getElementById("agent-plan-card").hidden = false;
+      document.getElementById("agent-plan-status").textContent =
+        `${agentPlanStateLabel(plan.state)}${agentClarificationLabel(plan)}`;
+      document.getElementById("agent-plan-revision").textContent =
+        `${plan.revision} · ${String(plan.revision_id).slice(0, 8)}`;
+      document.getElementById("agent-plan-scope").textContent = agentScopeLabel(summary.scope || []);
+      document.getElementById("agent-plan-date-mode").textContent = agentDateLabel(plan);
+      document.getElementById("agent-plan-passengers").textContent = passengers.total
+        ? `${passengers.adults} взр. · ${passengers.children} дет. · `
+          + `${passengers.infants} мл. · всего ${passengers.total} · ${passengers.currency}`
+        : "Неизвестно";
+      document.getElementById("agent-plan-coverage").textContent = plan.coverage || "Неизвестно";
+      document.getElementById("agent-plan-strategies").textContent =
+        (plan.enabled_strategies || []).join(", ") || "Стандартный маршрут";
+      document.getElementById("agent-plan-hidden-city").textContent = hiddenCityEnabled
+        ? "Включён: только без регистрируемого багажа; сегменты после выхода могут отменить"
+        : "Выключен";
+      document.getElementById("agent-plan-estimate").textContent = agentEstimateLabel(plan);
+      document.getElementById("agent-plan-rpm").textContent = provider.requests_per_minute == null
+        ? "Неизвестно"
+        : `${provider.requests_per_minute} запросов/мин`;
+      document.getElementById("agent-plan-deadline").textContent = plan.estimate
+        ? `${plan.estimate.deadline_seconds} сек.`
+        : "Неизвестно";
+      document.getElementById("agent-plan-source").textContent = provider.source_id
+        ? `${provider.source_id} · ${provider.capability_version} · ${provider.cost_model_version}`
+        : "Неизвестно";
+      document.getElementById("agent-plan-expiry").textContent = plan.expires_at || "Неизвестно";
+
+      const executeButton = document.getElementById("agent-plan-execute");
+      executeButton.disabled = !executeReady;
+      executeButton.title = executeReady
+        ? "Запустить ровно эту замороженную ревизию"
+        : hiddenCityEnabled
+          ? "Для hidden-city нужно отдельное подтверждение риска"
+          : "Сначала устраните уточнения или создайте новый план";
+      const cloneButton = document.getElementById("agent-plan-full");
+      cloneButton.disabled = !cloneReady;
+      cloneButton.title = cloneReady
+        ? "Создать новую full-ревизию из завершённого quick-плана"
+        : "Full-ревизия доступна после завершения или истечения quick-плана";
+      const editButton = document.getElementById("agent-plan-edit");
+      editButton.disabled = !editReady;
+      editButton.title = editReady ? "Уточнить запрос и создать новую ревизию" : "Ревизия закрыта";
+      document.getElementById("agent-risky-results").hidden = !hiddenCityEnabled;
+      document.getElementById("agent-risky-results-list").textContent = hiddenCityEnabled
+        ? "Подтверждённых вариантов ещё нет. Рискованные варианты не смешиваются с обычными."
+        : "Нет подтверждённых рискованных вариантов.";
+    }
+
+    function beginAgentPlanEdit() {
+      if (
+        !currentAgentPlan
+        || !["draft", "awaiting_approval"].includes(currentAgentPlan.state)
+      ) return;
+      agentEditMode = true;
+      const input = document.querySelector("#assistant-form textarea");
+      input.placeholder = "Опиши изменение для текущей ревизии плана";
+      input.focus();
+      document.getElementById("agent-plan-status").textContent =
+        "Режим изменения: следующий запрос создаст новую ревизию этого плана.";
     }
 
     function renderAirportChoices(optionsByRole) {
@@ -2312,8 +2545,9 @@ def render_index_html() -> str:
     function renderAgentActions(actions) {
       agentActionList.replaceChildren();
       (actions || []).forEach((action) => {
-        const node = document.createElement("div");
+        const node = document.createElement("button");
         node.className = "action-card";
+        node.type = "button";
         const title = document.createElement("strong");
         title.textContent = `${action.title_ru}:`;
         const meta = document.createElement("div");
@@ -2323,6 +2557,9 @@ def render_index_html() -> str:
           : "можно выполнить без live-вызова";
         meta.textContent = `${gate} · ${action.policy_decision}`;
         node.append(title, document.createTextNode("\\n"), meta);
+        node.addEventListener("click", () => {
+          reviseAgentPlan(action.parameters || {});
+        });
         agentActionList.append(node);
       });
       if (!agentActionList.children.length) {
@@ -2333,6 +2570,232 @@ def render_index_html() -> str:
       }
     }
 
+    function typedAgentAction(parameters) {
+      const allowedSelections = new Set([
+        "origin",
+        "destination",
+        "date_mode",
+        "departure_date",
+        "date_start",
+        "date_end",
+        "return_date",
+        "trip_shape",
+        "currency",
+        "requested_strategies"
+      ]);
+      const selections = {};
+      Object.entries(parameters || {}).forEach(([key, value]) => {
+        if (allowedSelections.has(key)) selections[key] = value;
+      });
+      return {
+        selections,
+        coverage: parameters && ["quick", "full"].includes(parameters.coverage)
+          ? parameters.coverage
+          : null
+      };
+    }
+
+    function agentRunErrorMessage(code, fallback) {
+      const messages = {
+        aviasales_search_rate_limited: "Aviasales временно ограничил частоту запросов.",
+        aviasales_search_blocked: "Aviasales заблокировал запрос; данные не подменены.",
+        aviasales_search_unavailable: "Aviasales сейчас недоступен; показаны только подтверждённые данные.",
+        agent_run_deadline_exceeded: "Дедлайн запуска истёк до завершения всей области."
+      };
+      return messages[code] || fallback || code || "Неизвестная ошибка запуска";
+    }
+
+    function renderAgentRun(run) {
+      currentAgentRun = run;
+      const progress = document.getElementById("agent-run-progress");
+      const cancelButton = document.getElementById("agent-run-cancel");
+      const partialErrors = document.getElementById("agent-partial-errors");
+      const terminalProblem = ["partial", "failed", "cancelled"].includes(run.status);
+      progress.textContent = `Запуск ${String(run.run_id).slice(0, 8)} · ${run.status} · `
+        + `дедлайн ${run.deadline_at}`;
+      cancelButton.disabled = !["queued", "running"].includes(run.status);
+      cancelButton.title = run.status === "cancel_requested"
+        ? "Отмена уже запрошена"
+        : "Отменить выполняющийся запуск";
+      partialErrors.hidden = !terminalProblem && !run.error_code;
+      partialErrors.textContent = partialErrors.hidden
+        ? ""
+        : agentRunErrorMessage(run.error_code, run.public_message || `Состояние: ${run.status}`);
+    }
+
+    async function reviseAgentPlan(parameters) {
+      if (
+        !currentAgentPlan
+        || !["draft", "awaiting_approval"].includes(currentAgentPlan.state)
+      ) return;
+      const revision = typedAgentAction(parameters);
+      if (!revision.coverage && Object.keys(revision.selections).length === 0) {
+        document.querySelector("#assistant-form textarea").focus();
+        return;
+      }
+      const body = {
+        source_revision_id: currentAgentPlan.revision_id,
+        expected_revision: currentAgentPlan.revision,
+        selections: revision.selections
+      };
+      if (revision.coverage) body.coverage = revision.coverage;
+      const response = await fetch(agentPlanUrl(currentAgentPlan.plan_id), {
+        method: "PATCH",
+        headers: authHeaders({"Content-Type": "application/json"}),
+        body: JSON.stringify(body)
+      });
+      if (!response.ok) throw new Error(await codedMessage(response));
+      renderAgentPlan(await response.json());
+      renderAgentRunPlaceholder("Новая ревизия ждёт явного запуска.");
+    }
+
+    async function editAgentPlan(prompt) {
+      if (
+        !currentAgentPlan
+        || !["draft", "awaiting_approval"].includes(currentAgentPlan.state)
+      ) return;
+      addMessage("user", prompt);
+      const response = await fetch(agentPlanUrl(currentAgentPlan.plan_id), {
+        method: "PATCH",
+        headers: authHeaders({"Content-Type": "application/json"}),
+        body: JSON.stringify({
+          source_revision_id: currentAgentPlan.revision_id,
+          expected_revision: currentAgentPlan.revision,
+          text: prompt,
+          selections: {}
+        })
+      });
+      if (!response.ok) throw new Error(await codedMessage(response));
+      const plan = await response.json();
+      renderAgentPlan(plan);
+      renderAgentRunPlaceholder("Изменённая ревизия ждёт явного запуска.");
+      addMessage("bot", `Создана ревизия ${plan.revision}: ${agentPlanStateLabel(plan.state)}.`);
+    }
+
+    async function executeAgentPlan() {
+      if (
+        !currentAgentPlan
+        || currentAgentPlan.state !== "awaiting_approval"
+        || !currentAgentPlan.executable
+        || currentAgentPlan.summary.hidden_city_enabled === true
+      ) return;
+      const response = await fetch(`${agentPlanUrl(currentAgentPlan.plan_id)}/execute`, {
+        method: "POST",
+        headers: authHeaders({
+          "Content-Type": "application/json",
+          "Idempotency-Key": freshIdempotencyKey()
+        }),
+        body: JSON.stringify({
+          revision_id: currentAgentPlan.revision_id,
+          expected_revision: currentAgentPlan.revision,
+          content_hash: currentAgentPlan.content_hash
+        })
+      });
+      if (!response.ok) throw new Error(await codedMessage(response));
+      renderAgentRun(await response.json());
+      await reloadAgentPlan();
+    }
+
+    async function cloneAgentPlanAsFull() {
+      if (
+        !currentAgentPlan
+        || !["consumed", "expired", "superseded"].includes(currentAgentPlan.state)
+        || currentAgentPlan.coverage !== "quick"
+      ) return;
+      const response = await fetch(`${agentPlanUrl(currentAgentPlan.plan_id)}/revisions`, {
+        method: "POST",
+        headers: authHeaders({
+          "Content-Type": "application/json",
+          "Idempotency-Key": freshIdempotencyKey()
+        }),
+        body: JSON.stringify({
+          source_revision_id: currentAgentPlan.revision_id,
+          expected_revision: currentAgentPlan.revision,
+          selections: {},
+          coverage: "full"
+        })
+      });
+      if (!response.ok) throw new Error(await codedMessage(response));
+      renderAgentPlan(await response.json());
+      renderAgentRunPlaceholder("Новая full-ревизия ждёт явного запуска.");
+    }
+
+    async function reloadAgentPlan() {
+      if (!sessionToken()) return;
+      const storedPlanId = window.localStorage.getItem(agentPlanStorageKey);
+      if (!storedPlanId) return;
+      const response = await fetch(agentPlanUrl(storedPlanId), {headers: authHeaders()});
+      if (response.status === 404) {
+        window.localStorage.removeItem(agentPlanStorageKey);
+        currentAgentPlan = null;
+        currentAgentRun = null;
+        document.getElementById("agent-plan-card").hidden = true;
+        return;
+      }
+      if (!response.ok) throw new Error(await codedMessage(response));
+      renderAgentPlan(await response.json());
+      const runResponse = await fetch(`${agentPlanUrl(storedPlanId)}/runs/latest`, {
+        headers: authHeaders()
+      });
+      if (runResponse.status === 404) {
+        renderAgentRunPlaceholder("Запуск ещё не создан.");
+        return;
+      }
+      if (!runResponse.ok) throw new Error(await codedMessage(runResponse));
+      const run = await runResponse.json();
+      renderAgentRun(run);
+      if (["queued", "running", "cancel_requested"].includes(run.status)) {
+        window.setTimeout(() => pollAgentRun(run, 1000), 1000);
+      }
+    }
+
+    async function pollAgentRun(run, delayMs = 1000) {
+      if (!currentAgentPlan || currentAgentRun?.run_id !== run.run_id) return;
+      const response = await fetch(
+        `${agentPlanUrl(currentAgentPlan.plan_id)}/runs/${encodeURIComponent(run.run_id)}`,
+        {headers: authHeaders()}
+      );
+      if (!response.ok) throw new Error(await codedMessage(response));
+      const latest = await response.json();
+      renderAgentRun(latest);
+      if (
+        latest.status === "queued"
+        || latest.status === "running"
+        || latest.status === "cancel_requested"
+      ) {
+        const nextDelay = Math.min(Math.round(delayMs * 1.5), 10000);
+        window.setTimeout(() => pollAgentRun(latest, nextDelay), nextDelay);
+      } else {
+        const planResponse = await fetch(agentPlanUrl(currentAgentPlan.plan_id), {
+          headers: authHeaders()
+        });
+        if (planResponse.ok) renderAgentPlan(await planResponse.json());
+      }
+    }
+
+    async function cancelAgentRun() {
+      if (
+        !currentAgentPlan
+        || !currentAgentRun
+        || !["queued", "running"].includes(currentAgentRun.status)
+      ) return;
+      const response = await fetch(
+        `${agentPlanUrl(currentAgentPlan.plan_id)}/runs/`
+          + `${encodeURIComponent(currentAgentRun.run_id)}/cancel`,
+        {method: "POST", headers: authHeaders()}
+      );
+      if (!response.ok) throw new Error(await codedMessage(response));
+      renderAgentRun(await response.json());
+    }
+
+    function renderAgentRunPlaceholder(message) {
+      currentAgentRun = null;
+      document.getElementById("agent-run-progress").textContent = message;
+      document.getElementById("agent-run-cancel").disabled = true;
+      document.getElementById("agent-partial-errors").hidden = true;
+      document.getElementById("agent-partial-errors").textContent = "";
+    }
+
     async function lookupAirports(query) {
       const response = await fetch(`/api/v1/airports/search?q=${encodeURIComponent(query)}`);
       if (!response.ok) throw new Error(`airport HTTP ${response.status}`);
@@ -2340,6 +2803,7 @@ def render_index_html() -> str:
     }
 
     async function requestAgentChat(prompt) {
+      lastAgentPrompt = prompt;
       addMessage("user", prompt);
       statusLine.textContent = "агент думает...";
       const payload = buildSearchPayload();
@@ -2359,6 +2823,8 @@ def render_index_html() -> str:
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const body = await response.json();
         addMessage("bot", body.reply_ru);
+        renderAgentPlan(body.proposed_plan);
+        renderAgentRunPlaceholder("План создан, запуск ещё не выполнялся.");
         renderAgentRuntime(body.runtime);
         renderAirportChoices(body.airport_options);
         renderAgentActions(body.actions);
@@ -2376,11 +2842,12 @@ def render_index_html() -> str:
       try {
         const response = await fetch("/api/v1/agent/plan", {
           method: "POST",
-          headers: {"Content-Type": "application/json"},
+          headers: authHeaders({"Content-Type": "application/json"}),
           body: JSON.stringify({preset_id: presetId, slots: currentSlots()})
         });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        if (!response.ok) throw new Error(await codedMessage(response));
         renderAgentPlan(await response.json());
+        renderAgentRunPlaceholder("План создан, запуск ещё не выполнялся.");
         statusLine.textContent = "готово";
       } catch (error) {
         addMessage("bot", `Не смог собрать план: ${error.message}`);
@@ -2593,6 +3060,10 @@ def render_index_html() -> str:
     }
 
     document.querySelector("#search-form").addEventListener("submit", runSearch);
+    document.getElementById("agent-plan-execute").addEventListener("click", executeAgentPlan);
+    document.getElementById("agent-plan-full").addEventListener("click", cloneAgentPlanAsFull);
+    document.getElementById("agent-run-cancel").addEventListener("click", cancelAgentRun);
+    document.getElementById("agent-plan-edit").addEventListener("click", beginAgentPlanEdit);
     authForm.addEventListener("submit", acceptInvitation);
     authSignoutButton.addEventListener("click", () => {
       clearSession();
@@ -2610,13 +3081,14 @@ def render_index_html() -> str:
       event.preventDefault();
       const prompt = text(new FormData(event.currentTarget).get("agent_prompt"));
       if (!prompt) return;
-      requestAgentChat(prompt);
+      const operation = agentEditMode ? editAgentPlan(prompt) : requestAgentChat(prompt);
+      void operation;
       event.currentTarget.reset();
     });
     updatePassengerSummary();
     renderAgentRuntime({
       backend: "deterministic_harness",
-      agentic_loop: "policy_validated_tool_plan",
+      agentic_loop: "approval_gated_plan_lifecycle",
       live_calls_allowed: false,
       cloudflare_ready: true
     });
@@ -2627,6 +3099,13 @@ def render_index_html() -> str:
     loadAdminHealth();
     loadAgentPresets();
     refreshSessionState().then(loadSessionBoundData);
+    window.addEventListener("unhandledrejection", (event) => {
+      event.preventDefault();
+      const message = event.reason instanceof Error ? event.reason.message : String(event.reason);
+      document.getElementById("agent-partial-errors").hidden = false;
+      document.getElementById("agent-partial-errors").textContent = `Ошибка действия: ${message}`;
+      statusLine.textContent = "agent-operation-error";
+    });
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
         navigator.serviceWorker.register("/service-worker.js").catch(() => {});

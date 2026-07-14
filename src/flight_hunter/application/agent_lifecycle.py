@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from flight_hunter.agent.presets import AgentPresetId
+from flight_hunter.agent.presets import PRESET_EDITS, AgentPresetId
 from flight_hunter.application.agent_intent import (
     ClarificationAction,
     IntentClarification,
@@ -130,6 +130,52 @@ class EstimateView:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanPassengerView:
+    adults: int
+    children: int
+    infants: int
+    total: int
+    currency: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlanScopeLegView:
+    origin_kind: str | None
+    origin_value: str | None
+    origin_airports: tuple[str, ...]
+    destination_kind: str | None
+    destination_value: str | None
+    destination_airports: tuple[str, ...]
+    anywhere: bool
+    frozen: bool
+    nearby_radius_km: int
+    date_mode: str
+    date_start: str | None
+    date_end: str | None
+    flex_days: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlanProviderView:
+    source_id: str
+    capability_version: str
+    cost_model_version: str
+    requests_per_minute: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class PlanSummaryView:
+    trip_shape: str
+    date_mode: str
+    preset_id: str | None
+    analysis_modes: tuple[str, ...]
+    passengers: PlanPassengerView
+    scope: tuple[PlanScopeLegView, ...]
+    provider: PlanProviderView
+    hidden_city_enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
 class PlanView:
     plan_id: UUID
     revision_id: UUID
@@ -140,6 +186,7 @@ class PlanView:
     executable: bool
     enabled_strategies: tuple[str, ...]
     estimate: EstimateView | None
+    summary: PlanSummaryView
     clarifications: tuple[Mapping[str, object], ...]
     created_at: datetime
     expires_at: datetime
@@ -566,6 +613,7 @@ def _plan_payload(
 
 
 def _intent_payload(parsed: ParsedIntent) -> dict[str, object]:
+    preset_edits = PRESET_EDITS.get(parsed.preset_id.value) if parsed.preset_id else None
     return {
         "origin_text": parsed.origin_text,
         "destination_text": parsed.destination_text,
@@ -577,6 +625,9 @@ def _intent_payload(parsed: ParsedIntent) -> dict[str, object]:
         "currency": parsed.currency,
         "requested_strategies": [strategy.value for strategy in parsed.requested_strategies],
         "preset_id": parsed.preset_id.value if parsed.preset_id is not None else None,
+        "analysis_modes": (
+            [mode.value for mode in preset_edits.analysis_modes] if preset_edits is not None else []
+        ),
         "legs": [
             {
                 "origin": _location_payload(leg.origin),
@@ -707,6 +758,7 @@ def _cost_model_payload(proposed: ProposedPlanRevision) -> dict[str, object]:
         "start_attempts": model.start_attempts,
         "poll_rounds": model.poll_rounds,
         "attempts_per_poll": model.attempts_per_poll,
+        "requests_per_minute": model.requests_per_minute,
         "worst_case_exact_http_attempts": model.worst_case_exact_http_attempts,
     }
 
@@ -724,10 +776,154 @@ def _plan_view(revision: AgentPlanRevisionRecord) -> PlanView:
         executable=revision.state == "awaiting_approval",
         enabled_strategies=_stored_strategies(revision),
         estimate=_estimate_view(revision),
+        summary=_plan_summary_view(revision),
         clarifications=tuple(_mapping(value) for value in clarification_values),
         created_at=revision.created_at,
         expires_at=revision.expires_at,
     )
+
+
+def _plan_summary_view(revision: AgentPlanRevisionRecord) -> PlanSummaryView:
+    plan = _json_mapping(revision.plan_json)
+    intent = _mapping(plan["intent"])
+    scope_snapshot = _json_mapping(revision.scope_snapshot_json)
+    capability = _json_mapping(revision.capability_snapshot_json)
+    cost_model = _json_mapping(revision.cost_model_snapshot_json)
+    preset_id = _optional_stored_str(intent.get("preset_id"), "preset_id")
+    preset_radius = 0
+    if preset_id is not None:
+        preset_radius = PRESET_EDITS[AgentPresetId(preset_id).value].nearby_radius_km or 0
+    intent_legs = _sequence(intent.get("legs", []))
+    frozen_legs = _sequence(scope_snapshot.get("legs", []))
+    scope = tuple(
+        _plan_scope_leg_view(
+            _mapping(intent_leg),
+            _mapping(frozen_legs[index]) if index < len(frozen_legs) else None,
+            preset_radius=preset_radius,
+        )
+        for index, intent_leg in enumerate(intent_legs)
+    )
+    adults = _stored_int(intent.get("adults"), "adults")
+    children = _stored_int(intent.get("children"), "children")
+    infants = _stored_int(intent.get("infants"), "infants")
+    strategies = tuple(str(value) for value in _sequence(intent.get("requested_strategies", [])))
+    return PlanSummaryView(
+        trip_shape=_required_stored_str(intent.get("trip_shape"), "trip_shape"),
+        date_mode=_required_stored_str(intent.get("date_mode"), "date_mode"),
+        preset_id=preset_id,
+        analysis_modes=tuple(str(value) for value in _sequence(intent.get("analysis_modes", []))),
+        passengers=PlanPassengerView(
+            adults=adults,
+            children=children,
+            infants=infants,
+            total=adults + children + infants,
+            currency=_required_stored_str(intent.get("currency"), "currency"),
+        ),
+        scope=scope,
+        provider=PlanProviderView(
+            source_id=_required_stored_str(capability.get("provider_id"), "provider_id"),
+            capability_version=_required_stored_str(
+                capability.get("version"),
+                "capability_version",
+            ),
+            cost_model_version=_required_stored_str(
+                cost_model.get("version"),
+                "cost_model_version",
+            ),
+            requests_per_minute=_optional_stored_int(
+                cost_model.get("requests_per_minute"),
+                "requests_per_minute",
+            ),
+        ),
+        hidden_city_enabled=RouteStrategy.HIDDEN_CITY.value in strategies,
+    )
+
+
+def _plan_scope_leg_view(
+    intent_leg: Mapping[str, object],
+    frozen_leg: Mapping[str, object] | None,
+    *,
+    preset_radius: int,
+) -> PlanScopeLegView:
+    intent_origin = _optional_mapping(intent_leg.get("origin"))
+    intent_destination = _optional_mapping(intent_leg.get("destination"))
+    date_constraint = _mapping(intent_leg["date_constraint"])
+    origin_airports: tuple[str, ...] = ()
+    destination_airports: tuple[str, ...] = ()
+    nearby_radius_km = preset_radius
+    frozen = frozen_leg is not None
+    anywhere = _scope_kind(intent_destination) == LocationScopeKind.ANYWHERE.value
+    if frozen_leg is not None:
+        frozen_origin = _mapping(frozen_leg["origin"])
+        origin_airports = tuple(
+            str(value) for value in _sequence(frozen_origin.get("airport_codes", []))
+        )
+        nearby_radius_km = _stored_int(
+            frozen_origin.get("nearby_radius_km"),
+            "nearby_radius_km",
+        )
+        frozen_destination = _optional_mapping(frozen_leg.get("destination"))
+        if frozen_destination is not None:
+            destination_airports = tuple(
+                str(value) for value in _sequence(frozen_destination.get("airport_codes", []))
+            )
+            nearby_radius_km = max(
+                nearby_radius_km,
+                _stored_int(
+                    frozen_destination.get("nearby_radius_km"),
+                    "nearby_radius_km",
+                ),
+            )
+        anywhere = frozen_leg.get("anywhere") is not None
+        date_constraint = _mapping(frozen_leg["date_constraint"])
+    date_start, date_end = _plan_date_bounds(date_constraint)
+    return PlanScopeLegView(
+        origin_kind=_scope_kind(intent_origin),
+        origin_value=_scope_value(intent_origin),
+        origin_airports=origin_airports,
+        destination_kind=_scope_kind(intent_destination),
+        destination_value=_scope_value(intent_destination),
+        destination_airports=destination_airports,
+        anywhere=anywhere,
+        frozen=frozen,
+        nearby_radius_km=nearby_radius_km,
+        date_mode=_required_stored_str(date_constraint.get("mode"), "date_mode"),
+        date_start=date_start,
+        date_end=date_end,
+        flex_days=_stored_int(date_constraint.get("flex_days"), "flex_days"),
+    )
+
+
+def _plan_date_bounds(date_constraint: Mapping[str, object]) -> tuple[str | None, str | None]:
+    raw_start = _optional_stored_str(date_constraint.get("start_date"), "date_start")
+    raw_end = _optional_stored_str(date_constraint.get("end_date"), "date_end")
+    if raw_start is None:
+        return None, raw_end
+    mode = _required_stored_str(date_constraint.get("mode"), "date_mode")
+    if mode != DateMode.FLEXIBLE.value:
+        return raw_start, raw_end
+    flex_days = _stored_int(date_constraint.get("flex_days"), "flex_days")
+    center = date.fromisoformat(raw_start)
+    delta = timedelta(days=flex_days)
+    return (center - delta).isoformat(), (center + delta).isoformat()
+
+
+def _optional_mapping(value: object) -> Mapping[str, object] | None:
+    if value is None:
+        return None
+    return _mapping(value)
+
+
+def _scope_kind(scope: Mapping[str, object] | None) -> str | None:
+    if scope is None:
+        return None
+    return _optional_stored_str(scope.get("kind"), "scope_kind")
+
+
+def _scope_value(scope: Mapping[str, object] | None) -> str | None:
+    if scope is None:
+        return None
+    return _optional_stored_str(scope.get("value"), "scope_value")
 
 
 def _estimate_view(revision: AgentPlanRevisionRecord) -> EstimateView | None:
@@ -1002,3 +1198,21 @@ def _stored_int(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise RuntimeError(f"stored agent plan {field_name} must be an integer")
     return value
+
+
+def _optional_stored_int(value: object, field_name: str) -> int | None:
+    if value is None:
+        return None
+    return _stored_int(value, field_name)
+
+
+def _required_stored_str(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"stored agent plan {field_name} must be a non-empty string")
+    return value
+
+
+def _optional_stored_str(value: object, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _required_stored_str(value, field_name)
