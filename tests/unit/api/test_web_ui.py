@@ -290,11 +290,61 @@ def test_web_signed_out_state_clears_agent_card_and_invalidates_polling() -> Non
         assert f'getElementById("{control}").disabled = true' in clear_agent
     for sensitive_region in ("agent-plan-status", "agent-run-progress", "agent-partial-errors"):
         assert sensitive_region in clear_agent
-    assert "clearAgentSessionState()" in clear_session
+    assert "renderSignedOutState()" in clear_session
     assert "clearAgentSessionState()" in signed_out
-    assert "renderSignedOutState()" in refresh
+    assert "clearSession()" in refresh
     assert "sessionGeneration !== agentSessionGeneration" in poll
     assert "!sessionToken()" in poll
+
+
+def test_web_auth_refresh_is_bound_to_exact_session_identity() -> None:
+    html = TestClient(create_app()).get("/").text
+    identity = _javascript_sync_function(html, "sessionIdentityIsCurrent")
+    store = _javascript_sync_function(html, "storeSession")
+    refresh = _javascript_function(html, "refreshSessionState")
+
+    assert "clearAgentSessionState()" in store
+    assert "token === sessionToken()" in identity
+    assert "sessionGeneration === agentSessionGeneration" in identity
+    assert "const sessionGeneration = agentSessionGeneration" in refresh
+
+    guard = "if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;"
+    assert refresh.count(guard) == 3
+    fetch_position = refresh.index('await fetch("/api/v1/auth/me"')
+    response_guard_position = refresh.index(guard, fetch_position)
+    response_status_position = refresh.index("if (!response.ok)")
+    json_position = refresh.index("await response.json()")
+    success_guard_position = refresh.index(guard, json_position)
+    auth_ui_position = refresh.index("authState.textContent", success_guard_position)
+    catch_position = refresh.index("} catch (error) {")
+    error_guard_position = refresh.index(guard, catch_position)
+    clear_position = refresh.index("clearSession()", error_guard_position)
+
+    assert fetch_position < response_guard_position < response_status_position
+    assert json_position < success_guard_position < auth_ui_position
+    assert catch_position < error_guard_position < clear_position
+
+
+def test_web_auth_refresh_clears_missing_or_current_session_only_once() -> None:
+    html = TestClient(create_app()).get("/").text
+    clear_session = _javascript_sync_function(html, "clearSession")
+    signed_out = _javascript_sync_function(html, "renderSignedOutState")
+    session_load = _javascript_function(html, "loadSessionBoundData")
+    refresh = _javascript_function(html, "refreshSessionState")
+
+    assert "clearAgentSessionState()" not in clear_session
+    assert clear_session.count("renderSignedOutState()") == 1
+    assert signed_out.count("clearAgentSessionState()") == 1
+    assert refresh.count("clearSession()") == 2
+    assert "renderSignedOutState()" not in refresh
+    assert "if (!sessionToken()) return;" in session_load
+    assert "renderSignedOutState()" not in session_load
+    assert "if (!token) {\n        clearSession();\n        return;" in refresh
+    assert (
+        "if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;\n"
+        "        clearSession();\n"
+        '        statusLine.textContent = "session expired";'
+    ) in refresh
 
 
 def test_web_household_agent_actions_ignore_responses_from_old_session_generation() -> None:

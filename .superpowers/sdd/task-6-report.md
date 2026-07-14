@@ -56,6 +56,17 @@ findings. All four are now covered test-first:
   remove sensitive plan/run state from the DOM, and disable plan controls.
 - The assistant renders all seven compatibility presets without truncation.
 
+A follow-up re-review found one additional Important session-swap race. It is
+also fixed test-first:
+
+- `refreshSessionState()` binds `/auth/me` to both the exact captured token and
+  the captured agent-session generation. A late success or error from session A
+  becomes a no-op after `storeSession(B)` and cannot overwrite B's auth UI or
+  remove B's token.
+- Initial signed-out bootstrap and current-session expiry now perform one full
+  signed-out clear. The chained session-bound loader becomes a no-op without a
+  token instead of clearing and bumping the generation a second time.
+
 ## Task 3 invariant vs. Task 6 Step 1
 
 The Task 6 brief says a rolling-90 QUICK selection should show an estimate and an
@@ -93,12 +104,23 @@ the five-preset truncation. The separate in-flight-session contract then failed
 until every household-scoped async action captured and checked the session
 generation.
 
+Follow-up re-review RED evidence:
+
+```powershell
+uv run pytest tests/unit/api/test_web_ui.py::test_web_auth_refresh_is_bound_to_exact_session_identity tests/unit/api/test_web_ui.py::test_web_auth_refresh_clears_missing_or_current_session_only_once -q
+uv run pytest tests/unit/api/test_web_ui.py::test_web_auth_refresh_clears_missing_or_current_session_only_once -q
+```
+
+The first command failed both contracts because auth refresh had no exact
+session-identity guard and the signed-out path cleared twice. After guarding the
+refresh itself, the second command remained RED on the chained bootstrap loader;
+it passed only after the loader stopped repeating signed-out mutation.
+
 Final verification on 2026-07-14:
 
 ```text
-Focused Task 6:       40 passed
-Task 3/4/5 regressions: 166 passed
-Full unit suite:      754 passed, 13 warnings
+Focused Task 6 + auth: 49 passed
+Full unit suite:       756 passed, 18 warnings
 Integration suite:    4 passed
 Ruff format/check:    passed (276 files)
 Full mypy:            passed (114 source files)

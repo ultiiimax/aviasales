@@ -35,7 +35,8 @@ This file is maintained by coding agents. Mark a slice done only after implement
     independent review at `2bf8dbe`, with no Critical/Important/Minor findings).
   - [ ] Make free text, all seven presets and the approval-gated web plan card
     use the same builder without provider calls before explicit execution
-    (review fixes complete on 2026-07-14; pending independent re-review).
+    (review fixes, including the session-swap race, complete on 2026-07-14;
+    pending independent re-review).
   - [ ] Persist the durable operation ledger.
   - [ ] Execute resumable Aviasales calendar/exact work in the worker.
   - [ ] Compose and rank split, self-transfer, open-jaw and multi-city routes.
@@ -112,6 +113,15 @@ regressions pass 166/166, all 754 unit tests and 4 integration tests pass, mypy
 checks all 114 source files, and global Ruff format/check pass across 276 files.
 No provider call occurs before explicit execute. The fixes remain pending
 independent re-review.
+
+Task 6 follow-up re-review fix on 2026-07-14 binds auth refresh to the exact
+captured token and session generation. A late `/auth/me` success or error from
+session A cannot overwrite or clear a newer session B. Signed-out bootstrap and
+current-session expiry clear once; the chained session-bound loader is a no-op
+without a token. Focused Task 6 plus auth regressions pass 49/49, all 756 unit
+tests and 4 integration tests pass, rendered web JavaScript parses, mypy checks
+114 source files, and Ruff format/check remain clean across 276 files. Task 6
+remains pending independent re-review.
 
 Task 4 hardening is complete and accepted by independent review. Forward-only
 migration 0023 and matching Core metadata persist household-scoped immutable

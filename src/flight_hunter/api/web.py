@@ -1017,6 +1017,11 @@ def render_index_html() -> str:
       return extra;
     }
 
+    function sessionIdentityIsCurrent(token, sessionGeneration) {
+      return token === sessionToken()
+        && sessionGeneration === agentSessionGeneration;
+    }
+
     function storeSession(session) {
       clearAgentSessionState();
       window.localStorage.setItem(sessionTokenKey, session.session_token);
@@ -1067,7 +1072,7 @@ def render_index_html() -> str:
       window.localStorage.removeItem(sessionTokenKey);
       authState.textContent = "Session: не выполнен вход";
       authSignoutButton.disabled = true;
-      clearAgentSessionState();
+      renderSignedOutState();
     }
 
     function renderSignedOutState() {
@@ -1082,10 +1087,7 @@ def render_index_html() -> str:
     }
 
     async function loadSessionBoundData() {
-      if (!sessionToken()) {
-        renderSignedOutState();
-        return;
-      }
+      if (!sessionToken()) return;
       await Promise.all([
         loadManualConfirmations(),
         loadWatches(),
@@ -1098,20 +1100,22 @@ def render_index_html() -> str:
       const token = sessionToken();
       if (!token) {
         clearSession();
-        renderSignedOutState();
         return;
       }
+      const sessionGeneration = agentSessionGeneration;
       try {
         const response = await fetch("/api/v1/auth/me", {
           headers: {"Authorization": `Bearer ${token}`}
         });
+        if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;
         if (!response.ok) throw new Error(await codedMessage(response));
         const session = await response.json();
+        if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;
         authState.textContent = `Session: ${session.role} · ${session.household_id.slice(0, 8)}`;
         authSignoutButton.disabled = false;
       } catch (error) {
+        if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;
         clearSession();
-        renderSignedOutState();
         statusLine.textContent = "session expired";
       }
     }
@@ -3259,7 +3263,6 @@ def render_index_html() -> str:
     authSignoutButton.addEventListener("click", () => {
       clearSession();
       statusLine.textContent = "session cleared";
-      renderSignedOutState();
     });
     personalObserveButton.addEventListener("click", runPersonalObservation);
     dealDiscoveryButton.addEventListener("click", runDealDiscovery);
