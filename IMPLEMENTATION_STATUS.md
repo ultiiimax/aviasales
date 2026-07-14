@@ -37,7 +37,8 @@ This file is maintained by coding agents. Mark a slice done only after implement
     use the same builder without provider calls before explicit execution
     (Task 6 accepted by independent review at `8f7b39b`, with no
     Critical/Important/Minor findings after dynamic session-race verification).
-  - [ ] Persist the durable operation ledger.
+  - [x] Persist the durable operation ledger (Task 7 accepted by independent
+    review at `0babb2a`, with no Critical/Important/Minor findings).
   - [ ] Execute resumable Aviasales calendar/exact work in the worker.
   - [ ] Compose and rank split, self-transfer, open-jaw and multi-city routes.
   - [ ] Isolate hidden-city research behind a second acknowledgement.
@@ -126,7 +127,8 @@ tests and 4 integration tests pass, rendered web JavaScript parses, mypy checks
 independent re-review accepted the slice at `8f7b39b` with no findings.
 
 Task 7 implementation and three independent-review fix cycles are complete and
-pending independent re-review; its acceptance checkbox remains unchecked. The
+accepted by final independent re-review at `0babb2a`; its acceptance checkbox is
+complete. The
 third cycle reproduces the real stale-read/duplicate-INSERT race and now raises
 stable fingerprint or private-continuation conflicts only after leaving the
 `IntegrityError` handler. Public errors retain no SQL cause/context or formatted
@@ -144,7 +146,10 @@ lifecycle/API/UI regressions pass 77/77, all 912 unit tests and 4
 integration tests pass, the actual 0024 PostgreSQL offline compilation passes,
 targeted mypy and global Ruff format/check are clean, and `git diff --check`
 passes. The warning audit found only two unrelated third-party `lxml` warnings.
-No provider call was made and Task 8 was not started.
+No provider call was made and Task 8 was not started. The final reviewer repeated
+the stale-read duplicate race, prior 27-case re-review suite, focused Task 7 and
+integration gates and accepted the slice with no Critical, Important or Minor
+findings.
 
 Task 4 hardening is complete and accepted by independent review. Forward-only
 migration 0023 and matching Core metadata persist household-scoped immutable

@@ -1,6 +1,6 @@
 # Task 7 implementation report
 
-Status: review fixes complete; pending independent re-review and not accepted yet.
+Status: accepted by final independent review at `0babb2a` with no findings.
 
 ## RED evidence
 
@@ -225,7 +225,8 @@ Warning audit: the full unit run had no failure and reported two third-party
 `lxml` deprecation warnings plus eleven unrelated `aiosqlite` worker-thread
 cleanup warnings in `test_deal_candidate_repository`; none originates in the
 Task 7 files or changes gate status. No provider network I/O was performed.
-Task 7 remains pending independent re-review and is not accepted by this report.
+At that checkpoint Task 7 remained pending independent re-review; later
+sections record the additional fixes and final acceptance.
 
 ## Second independent re-review fix RED evidence
 
@@ -329,8 +330,8 @@ then passed. An intermediate `uv` re-review run exposed only a namespace-package
 test harness import (`26 passed, 1 harness failure`); loading the actual migration
 by absolute file path fixed the harness without changing production behavior.
 
-No provider network I/O was performed. Task 7 remains pending independent
-re-review and is not accepted by this report.
+No provider network I/O was performed. At that checkpoint Task 7 remained
+pending independent re-review; the traceback follow-up below closes it.
 
 ## Traceback secrecy re-review RED evidence
 
@@ -384,5 +385,16 @@ git diff --check:                       clean
 ```
 
 The two unit warnings are unrelated third-party `lxml` deprecations. No provider
-network I/O was performed, Task 8 was not started, and Task 7 remains pending
-independent re-review rather than accepted by this report.
+network I/O was performed and Task 8 was not started during this slice.
+
+## Final independent acceptance
+
+The same independent reviewer re-ran the forced stale-read/duplicate-INSERT
+privacy race on `0babb2a`. Both private sentinels were absent from `str`, `repr`
+and the complete formatted traceback; `__cause__` and `__context__` were `None`,
+no raw `IntegrityError` escaped, identical replay remained idempotent, and the
+caller-owned transaction rollback remained intact. The reviewer also repeated
+the prior 27-case re-review suite, focused Task 7 gate, integration, Ruff, mypy
+and diff checks.
+
+Final verdict: **ACCEPTED**. Critical: 0. Important: 0. Minor: 0.
