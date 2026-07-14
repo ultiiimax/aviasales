@@ -29,7 +29,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [x] Add provider-neutral intent, evidence and plan contracts.
   - [x] Freeze generic geographic scopes with commercial provenance.
   - [ ] Parse typed intents, freeze provider capabilities and estimate bounded plans
-    (review fixes implemented; acceptance pending).
+    (final frozen-surface budget fix implemented; acceptance pending).
   - [ ] Persist immutable revisions, approvals, runs and operation ledger.
   - [ ] Expose the plan lifecycle and approval-gated web flow.
   - [ ] Execute resumable Aviasales calendar/exact work in the worker.
@@ -69,6 +69,20 @@ frozen Cartesian surface; overlay/date dependencies fail as typed
 clarifications. The fresh focused suite has 88 tests, Task 1/2 regressions have
 25 tests, all 617 unit tests pass, mypy checks 110 source files, and global Ruff
 format/check pass.
+
+Task 3 final budget-accounting fix on 2026-07-14: broad QUICK surfaces are no
+longer estimate-clamped after their executable scopes/rules are frozen. Exact
+one-origin `anywhere` remains 40 calendar + 20 exact and awaits approval;
+rolling-90 `anywhere` is honestly 180 + 20 and finite LED-to-France is 360 +
+360, so both remain drafts with `quick_budget_too_large`, immutable actual
+counts, and narrowing/full actions. Typed budget errors carry stable
+reason/actual/limit fields; the builder handles only QUICK-limit reasons, while
+the absolute ceiling still raises in QUICK and FULL. FULL budget revision
+behavior is unchanged. Final gates: 20 planning tests, 91 focused Task 3/scope
+tests and 30 Task 1/2 domain/scope regressions pass; mypy checks 110 source files
+and global Ruff checks 267 files. The immediately preceding full-unit gate had
+619 passes; the final typed-reason follow-up was limited to the focused gates by
+coordinator direction.
 
 Implementation status on 2026-07-13: the user-approved design and reviewed
 implementation plan are complete. Production implementation now includes the

@@ -6,6 +6,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import date, timedelta
 from types import MappingProxyType
 from typing import Protocol
@@ -112,6 +113,15 @@ class IntentClarification:
     message_ru: str
     actions: tuple[ClarificationAction, ...] = ()
     geography: GeographyClarification | None = None
+    details: Mapping[str, int | str] = dataclass_field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.details, Mapping) or not all(
+            isinstance(key, str) and not isinstance(value, bool) and isinstance(value, (int, str))
+            for key, value in self.details.items()
+        ):
+            raise TypeError("clarification details must map strings to integers or strings")
+        object.__setattr__(self, "details", MappingProxyType(dict(self.details)))
 
 
 @dataclass(frozen=True, slots=True)

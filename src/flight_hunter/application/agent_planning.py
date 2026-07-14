@@ -32,8 +32,36 @@ from flight_hunter.domain.agent_search import (
 )
 
 
+class PlanBudgetExceededReason(StrEnum):
+    ABSOLUTE_LOGICAL_LIMIT = "absolute_logical_limit"
+    QUICK_LOGICAL_LIMIT = "quick_logical_limit"
+    QUICK_CALENDAR_LIMIT = "quick_calendar_limit"
+    QUICK_EXACT_LIMIT = "quick_exact_limit"
+
+
+_QUICK_BUDGET_REASONS = frozenset(
+    {
+        PlanBudgetExceededReason.QUICK_LOGICAL_LIMIT,
+        PlanBudgetExceededReason.QUICK_CALENDAR_LIMIT,
+        PlanBudgetExceededReason.QUICK_EXACT_LIMIT,
+    }
+)
+
+
 class PlanBudgetExceededError(ValueError):
     code = "budget_too_large"
+
+    def __init__(
+        self,
+        reason: PlanBudgetExceededReason,
+        *,
+        actual: int,
+        limit: int,
+    ) -> None:
+        self.reason = PlanBudgetExceededReason(reason)
+        self.actual = actual
+        self.limit = limit
+        super().__init__(f"{self.reason.value} exceeded: {actual} > {limit}")
 
 
 class PlanRevisionStatus(StrEnum):
@@ -160,26 +188,29 @@ class PlanEstimator:
         logical_operations = surface.calendar_searches + surface.exact_searches
         if logical_operations > self._settings.agent_absolute_logical_limit:
             raise PlanBudgetExceededError(
-                "absolute_logical_limit exceeded: "
-                f"{logical_operations} > {self._settings.agent_absolute_logical_limit}"
+                PlanBudgetExceededReason.ABSOLUTE_LOGICAL_LIMIT,
+                actual=logical_operations,
+                limit=self._settings.agent_absolute_logical_limit,
             )
 
         if surface.coverage is CoverageMode.QUICK:
             if logical_operations > self._settings.agent_quick_logical_limit:
                 raise PlanBudgetExceededError(
-                    "quick_logical_limit exceeded: "
-                    f"{logical_operations} > {self._settings.agent_quick_logical_limit}"
+                    PlanBudgetExceededReason.QUICK_LOGICAL_LIMIT,
+                    actual=logical_operations,
+                    limit=self._settings.agent_quick_logical_limit,
                 )
             if surface.calendar_searches > self._settings.agent_quick_calendar_limit:
                 raise PlanBudgetExceededError(
-                    "quick_calendar_limit exceeded: "
-                    f"{surface.calendar_searches} > "
-                    f"{self._settings.agent_quick_calendar_limit}"
+                    PlanBudgetExceededReason.QUICK_CALENDAR_LIMIT,
+                    actual=surface.calendar_searches,
+                    limit=self._settings.agent_quick_calendar_limit,
                 )
             if surface.exact_searches > self._settings.agent_quick_exact_limit:
                 raise PlanBudgetExceededError(
-                    "quick_exact_limit exceeded: "
-                    f"{surface.exact_searches} > {self._settings.agent_quick_exact_limit}"
+                    PlanBudgetExceededReason.QUICK_EXACT_LIMIT,
+                    actual=surface.exact_searches,
+                    limit=self._settings.agent_quick_exact_limit,
                 )
             requested_limit = self._settings.agent_quick_logical_limit
             deadline_seconds = self._settings.agent_quick_deadline_seconds
@@ -288,10 +319,25 @@ class AgentPlanBuilder:
         surface = _surface_for_frozen_legs(
             frozen_legs,
             normalized_coverage,
-            quick_calendar_limit=self._settings.agent_quick_calendar_limit,
-            quick_exact_limit=self._settings.agent_quick_exact_limit,
         )
-        estimate = self._estimator.estimate(surface, snapshot.cost_model)
+        try:
+            estimate = self._estimator.estimate(surface, snapshot.cost_model)
+        except PlanBudgetExceededError as error:
+            if (
+                normalized_coverage is not CoverageMode.QUICK
+                or error.reason not in _QUICK_BUDGET_REASONS
+            ):
+                raise
+            return _draft_revision(
+                parsed=parsed,
+                travel_intent=travel_intent,
+                coverage=normalized_coverage,
+                snapshot=snapshot,
+                frozen_legs=frozen_legs,
+                clarifications=(_quick_budget_clarification(surface),),
+                created_at=created_at,
+                expires_at=expires_at,
+            )
         if estimate.requires_budget_revision:
             return _draft_revision(
                 parsed=parsed,
@@ -402,9 +448,6 @@ class AgentPlanBuilder:
 def _surface_for_frozen_legs(
     frozen_legs: tuple[FrozenPlanLeg, ...],
     coverage: CoverageMode,
-    *,
-    quick_calendar_limit: int,
-    quick_exact_limit: int,
 ) -> SearchSurface:
     calendar_searches = 0
     exact_searches = 0
@@ -429,9 +472,6 @@ def _surface_for_frozen_legs(
             operations = route_pairs * date_count
             calendar_searches += operations
             exact_searches += operations
-    if coverage is CoverageMode.QUICK:
-        calendar_searches = min(calendar_searches, quick_calendar_limit)
-        exact_searches = min(exact_searches, quick_exact_limit)
     return SearchSurface(
         coverage=coverage,
         calendar_searches=calendar_searches,
@@ -537,4 +577,33 @@ def _budget_revision_clarification(estimate: PlanEstimate) -> IntentClarificatio
                 selections={"logical_limit": str(estimate.requested_logical_limit)},
             ),
         ),
+    )
+
+
+def _quick_budget_clarification(surface: SearchSurface) -> IntentClarification:
+    logical_operations = surface.calendar_searches + surface.exact_searches
+    return IntentClarification(
+        field="budget",
+        code="quick_budget_too_large",
+        message_ru=(
+            "Быстрый поиск не вмещает весь замороженный объём. "
+            "Сузьте географию или даты либо выберите полный поиск."
+        ),
+        actions=(
+            ClarificationAction(
+                action_id="narrow_scope_or_dates",
+                label_ru="Сузить географию или даты",
+                selections={},
+            ),
+            ClarificationAction(
+                action_id="choose_full_coverage",
+                label_ru="Выбрать полный поиск",
+                selections={"coverage": CoverageMode.FULL.value},
+            ),
+        ),
+        details={
+            "calendar_searches": surface.calendar_searches,
+            "exact_searches": surface.exact_searches,
+            "logical_operations": logical_operations,
+        },
     )

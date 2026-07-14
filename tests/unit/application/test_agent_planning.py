@@ -214,6 +214,37 @@ async def test_quick_anywhere_freezes_rule_and_estimates_seed_worst_case() -> No
 
 
 @pytest.mark.anyio
+async def test_quick_anywhere_rolling_window_rejects_complete_unclamped_surface() -> None:
+    parsed = IntentParser().parse(
+        "LED → anywhere",
+        preset=None,
+        selections={"date_mode": "rolling_90_days"},
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.QUICK)
+
+    assert revision.status is PlanRevisionStatus.DRAFT
+    assert revision.estimate is None
+    assert len(revision.frozen_legs) == 1
+    frozen = revision.frozen_legs[0]
+    assert frozen.anywhere_rule is not None
+    assert frozen.anywhere_rule.date_start == date(2026, 7, 14)
+    assert frozen.anywhere_rule.date_end == date(2026, 10, 11)
+    (clarification,) = revision.clarifications
+    assert clarification.code == "quick_budget_too_large"
+    assert clarification.details == {
+        "calendar_searches": 180,
+        "exact_searches": 20,
+        "logical_operations": 200,
+    }
+    assert tuple(action.action_id for action in clarification.actions) == (
+        "narrow_scope_or_dates",
+        "choose_full_coverage",
+    )
+    assert clarification.actions[1].selections == {"coverage": "full"}
+
+
+@pytest.mark.anyio
 async def test_full_anywhere_uses_full_bounds_and_requires_budget_revision() -> None:
     parsed = IntentParser().parse(
         "LED → anywhere",
@@ -276,7 +307,25 @@ async def test_full_frozen_surface_above_absolute_limit_is_rejected() -> None:
 
 
 @pytest.mark.anyio
-async def test_complete_plan_auto_finalizes_and_rolling_window_uses_injected_clock() -> None:
+async def test_quick_frozen_surface_above_absolute_limit_is_rejected() -> None:
+    airports = (
+        _airport("LED", "RU", "Saint Petersburg"),
+        *_generated_airports(20, country="FR"),
+    )
+    parsed = IntentParser().parse(
+        "LED → France",
+        preset=None,
+        selections={"date_mode": "rolling_90_days"},
+    )
+
+    with pytest.raises(PlanBudgetExceededError, match="absolute_logical_limit") as exc_info:
+        await _builder(airports).build(parsed, CoverageMode.QUICK)
+
+    assert exc_info.value.reason == "absolute_logical_limit"
+
+
+@pytest.mark.anyio
+async def test_rolling_finite_quick_scope_keeps_window_and_rejects_complete_surface() -> None:
     parsed = IntentParser().parse(
         "СПб → Франция",
         preset=None,
@@ -285,17 +334,27 @@ async def test_complete_plan_auto_finalizes_and_rolling_window_uses_injected_clo
 
     revision = await _builder().build(parsed, CoverageMode.QUICK)
 
-    assert revision.status is PlanRevisionStatus.AWAITING_APPROVAL
+    assert revision.status is PlanRevisionStatus.DRAFT
     assert revision.travel_intent is not None
     constraint = revision.travel_intent.legs[0].date_constraint
     assert constraint.mode is DateMode.ROLLING_90_DAYS
     assert constraint.start_date == date(2026, 7, 14)
     assert constraint.end_date == date(2026, 10, 11)
-    assert revision.estimate is not None
-    assert revision.estimate.calendar_searches == 40
-    assert revision.estimate.exact_searches == 20
+    assert revision.estimate is None
+    assert len(revision.frozen_legs) == 1
+    assert revision.frozen_legs[0].date_constraint == constraint
     assert revision.capability_snapshot is not None
-    assert revision.clarifications == ()
+    (clarification,) = revision.clarifications
+    assert clarification.code == "quick_budget_too_large"
+    assert clarification.details == {
+        "calendar_searches": 360,
+        "exact_searches": 360,
+        "logical_operations": 720,
+    }
+    assert tuple(action.action_id for action in clarification.actions) == (
+        "narrow_scope_or_dates",
+        "choose_full_coverage",
+    )
 
 
 @pytest.mark.anyio
