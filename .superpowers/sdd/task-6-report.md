@@ -133,8 +133,10 @@ deprecation warnings; there were no test failures. Provider test doubles record
 zero calls before explicit execution in every compatibility and chat acceptance
 test.
 
-## Review note
+## Independent review acceptance
 
-This report records implementation and review-fix evidence only. Task 6 remains
-unchecked in `IMPLEMENTATION_STATUS.md` until independent re-review accepts the
-slice.
+Independent re-review accepted Task 6 at `8f7b39b` with no Critical, Important
+or Minor findings. In addition to the listed gates, the reviewer reproduced the
+late-401 and late-200 session A-to-B races in headless Chromium, verified that
+both stale responses leave token B and its UI unchanged, and confirmed that
+current-session expiry and initial signed-out bootstrap clear exactly once.
