@@ -135,6 +135,23 @@ class ScopeResolver:
             taxonomy_version=self._countries.version,
         )
 
+    def resolve_region_text(
+        self,
+        text: str,
+    ) -> GeographyChoice | GeographyClarification:
+        normalized = _normalize_geography_text(text)
+        region_ids = self._regions.text_index.get(normalized, ())
+        choices = tuple(self._region_choice(region_id, ()) for region_id in region_ids)
+        if len(choices) == 1:
+            return choices[0]
+        return GeographyClarification(
+            query=text,
+            kind=LocationScopeKind.REGION,
+            reason="ambiguous_geography" if choices else "unknown_geography",
+            choices=choices,
+            taxonomy_version=self._regions.version,
+        )
+
     async def resolve_city_text(
         self,
         text: str,

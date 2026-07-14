@@ -190,6 +190,23 @@ def test_country_names_resolve_only_through_versioned_country_taxonomy() -> None
     assert unknown.choices == ()
 
 
+def test_region_names_resolve_only_through_versioned_region_taxonomy() -> None:
+    resolver = ScopeResolver(repository=MutableAirportCatalog(_french_catalog()))
+
+    english = resolver.resolve_region_text("Southern Europe")
+    russian = resolver.resolve_region_text("Южная Европа")
+    unknown = resolver.resolve_region_text("Atlantis")
+
+    assert isinstance(english, GeographyChoice)
+    assert isinstance(russian, GeographyChoice)
+    assert english.scope == LocationScope(LocationScopeKind.REGION, "southern_europe")
+    assert russian.scope == english.scope
+    assert english.taxonomy_version.startswith("regions-v1-")
+    assert isinstance(unknown, GeographyClarification)
+    assert unknown.reason == "unknown_geography"
+    assert unknown.choices == ()
+
+
 @pytest.mark.anyio
 async def test_city_text_groups_catalog_matches_and_asks_when_name_is_ambiguous() -> None:
     catalog = (

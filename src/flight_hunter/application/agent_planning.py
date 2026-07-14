@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 
 from flight_hunter.application.agent_capabilities import ProviderCapabilityRegistry
@@ -13,10 +13,18 @@ from flight_hunter.application.agent_intent import (
     IntentClarification,
     ParsedIntent,
 )
-from flight_hunter.application.agent_scope import CoverageMode
+from flight_hunter.application.agent_scope import (
+    AnywhereDiscoveryRule,
+    CoverageMode,
+    FrozenAirportScope,
+    GeographyClarification,
+    ScopeResolver,
+)
 from flight_hunter.config import AppSettings
 from flight_hunter.domain.agent_search import (
+    DateConstraint,
     DateMode,
+    LocationScopeKind,
     PlanBudget,
     ProviderCapabilitySnapshot,
     ProviderHttpCostModel,
@@ -71,6 +79,32 @@ class PlanEstimate:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenPlanLeg:
+    origin_scope: FrozenAirportScope
+    destination_scope: FrozenAirportScope | None
+    anywhere_rule: AnywhereDiscoveryRule | None
+    date_constraint: DateConstraint
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.origin_scope, FrozenAirportScope):
+            raise TypeError("origin_scope must be FrozenAirportScope")
+        if (self.destination_scope is None) == (self.anywhere_rule is None):
+            raise ValueError("exactly one destination scope representation is required")
+        if self.destination_scope is not None and not isinstance(
+            self.destination_scope,
+            FrozenAirportScope,
+        ):
+            raise TypeError("destination_scope must be FrozenAirportScope")
+        if self.anywhere_rule is not None and not isinstance(
+            self.anywhere_rule,
+            AnywhereDiscoveryRule,
+        ):
+            raise TypeError("anywhere_rule must be AnywhereDiscoveryRule")
+        if not isinstance(self.date_constraint, DateConstraint):
+            raise TypeError("date_constraint must be DateConstraint")
+
+
+@dataclass(frozen=True, slots=True)
 class ProposedPlanRevision:
     status: PlanRevisionStatus
     parsed_intent: ParsedIntent
@@ -78,10 +112,11 @@ class ProposedPlanRevision:
     coverage: CoverageMode
     capability_snapshot: ProviderCapabilitySnapshot | None
     estimate: PlanEstimate | None
+    frozen_legs: tuple[FrozenPlanLeg, ...]
     clarifications: tuple[IntentClarification, ...]
     created_at: datetime
     expires_at: datetime
-    builder_version: str = "agent-plan-builder-v1"
+    builder_version: str = "agent-plan-builder-v2"
 
 
 class PlanEstimator:
@@ -181,13 +216,15 @@ class AgentPlanBuilder:
         settings: AppSettings | None = None,
         capabilities: ProviderCapabilityRegistry | None = None,
         estimator: PlanEstimator | None = None,
+        scope_resolver: ScopeResolver | None = None,
     ) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._settings = settings or AppSettings.from_env()
         self._capabilities = capabilities or ProviderCapabilityRegistry()
         self._estimator = estimator or PlanEstimator(settings=self._settings)
+        self._scope_resolver = scope_resolver
 
-    def build(
+    async def build(
         self,
         parsed: ParsedIntent,
         coverage: CoverageMode | str,
@@ -202,13 +239,10 @@ class AgentPlanBuilder:
         snapshot = self._capabilities.snapshot()
 
         if parsed.clarifications:
-            return ProposedPlanRevision(
-                status=PlanRevisionStatus.DRAFT,
-                parsed_intent=parsed,
-                travel_intent=None,
+            return _draft_revision(
+                parsed=parsed,
                 coverage=normalized_coverage,
-                capability_snapshot=snapshot,
-                estimate=None,
+                snapshot=snapshot,
                 clarifications=parsed.clarifications,
                 created_at=created_at,
                 expires_at=expires_at,
@@ -216,33 +250,56 @@ class AgentPlanBuilder:
 
         travel_intent = parsed.to_travel_intent(today=created_at.date())
         if travel_intent is None:
-            return ProposedPlanRevision(
-                status=PlanRevisionStatus.DRAFT,
-                parsed_intent=parsed,
-                travel_intent=None,
+            return _draft_revision(
+                parsed=parsed,
                 coverage=normalized_coverage,
-                capability_snapshot=snapshot,
-                estimate=None,
+                snapshot=snapshot,
                 clarifications=(_incomplete_intent_clarification(),),
                 created_at=created_at,
                 expires_at=expires_at,
             )
 
-        surface = _surface_for(
+        if self._scope_resolver is None:
+            return _draft_revision(
+                parsed=parsed,
+                travel_intent=travel_intent,
+                coverage=normalized_coverage,
+                snapshot=snapshot,
+                clarifications=(_geography_catalog_clarification(),),
+                created_at=created_at,
+                expires_at=expires_at,
+            )
+
+        frozen_legs, geography_clarifications = await self._freeze_legs(
             travel_intent,
+            normalized_coverage,
+        )
+        if geography_clarifications:
+            return _draft_revision(
+                parsed=parsed,
+                travel_intent=travel_intent,
+                coverage=normalized_coverage,
+                snapshot=snapshot,
+                clarifications=geography_clarifications,
+                created_at=created_at,
+                expires_at=expires_at,
+            )
+
+        surface = _surface_for_frozen_legs(
+            frozen_legs,
             normalized_coverage,
             quick_calendar_limit=self._settings.agent_quick_calendar_limit,
             quick_exact_limit=self._settings.agent_quick_exact_limit,
         )
         estimate = self._estimator.estimate(surface, snapshot.cost_model)
         if estimate.requires_budget_revision:
-            return ProposedPlanRevision(
-                status=PlanRevisionStatus.DRAFT,
-                parsed_intent=parsed,
+            return _draft_revision(
+                parsed=parsed,
                 travel_intent=travel_intent,
                 coverage=normalized_coverage,
-                capability_snapshot=snapshot,
+                snapshot=snapshot,
                 estimate=estimate,
+                frozen_legs=frozen_legs,
                 clarifications=(_budget_revision_clarification(estimate),),
                 created_at=created_at,
                 expires_at=expires_at,
@@ -254,30 +311,116 @@ class AgentPlanBuilder:
             coverage=normalized_coverage,
             capability_snapshot=snapshot,
             estimate=estimate,
+            frozen_legs=frozen_legs,
             clarifications=(),
             created_at=created_at,
             expires_at=expires_at,
         )
 
+    async def _freeze_legs(
+        self,
+        intent: TravelIntent,
+        coverage: CoverageMode,
+    ) -> tuple[tuple[FrozenPlanLeg, ...], tuple[IntentClarification, ...]]:
+        assert self._scope_resolver is not None
+        frozen_legs: list[FrozenPlanLeg] = []
+        clarifications: list[IntentClarification] = []
+        quick_limit = (
+            self._settings.agent_quick_exact_limit if coverage is CoverageMode.QUICK else None
+        )
+        for index, leg in enumerate(intent.legs):
+            if leg.origin.kind is LocationScopeKind.ANYWHERE:
+                clarifications.append(_anywhere_origin_clarification(index))
+                continue
+            frozen_origin = await self._scope_resolver.resolve_finite(
+                leg.origin,
+                coverage=coverage,
+                quick_limit=quick_limit,
+            )
+            if isinstance(frozen_origin, GeographyClarification):
+                clarifications.append(_scope_clarification(index, "origin", frozen_origin))
+                continue
 
-def _surface_for(
-    intent: TravelIntent,
+            if leg.destination.kind is LocationScopeKind.ANYWHERE:
+                date_start, date_end = _date_bounds(leg.date_constraint)
+                max_destination_seeds = (
+                    self._settings.agent_quick_calendar_limit
+                    if coverage is CoverageMode.QUICK
+                    else self._settings.agent_full_logical_limit
+                )
+                exact_verification_limit = min(
+                    self._settings.agent_quick_exact_limit,
+                    max_destination_seeds,
+                )
+                anywhere_rule = self._scope_resolver.build_anywhere_rule(
+                    frozen_origins=frozen_origin,
+                    date_start=date_start,
+                    date_end=date_end,
+                    max_destination_seeds=max_destination_seeds,
+                    exact_verification_limit=exact_verification_limit,
+                )
+                frozen_legs.append(
+                    FrozenPlanLeg(
+                        origin_scope=frozen_origin,
+                        destination_scope=None,
+                        anywhere_rule=anywhere_rule,
+                        date_constraint=leg.date_constraint,
+                    )
+                )
+                continue
+
+            frozen_destination = await self._scope_resolver.resolve_finite(
+                leg.destination,
+                coverage=coverage,
+                quick_limit=quick_limit,
+            )
+            if isinstance(frozen_destination, GeographyClarification):
+                clarifications.append(
+                    _scope_clarification(index, "destination", frozen_destination)
+                )
+                continue
+            if frozen_origin.catalog_checksum != frozen_destination.catalog_checksum:
+                clarifications.append(_catalog_changed_clarification(index))
+                continue
+            frozen_legs.append(
+                FrozenPlanLeg(
+                    origin_scope=frozen_origin,
+                    destination_scope=frozen_destination,
+                    anywhere_rule=None,
+                    date_constraint=leg.date_constraint,
+                )
+            )
+        if clarifications:
+            return (), tuple(clarifications)
+        return tuple(frozen_legs), ()
+
+
+def _surface_for_frozen_legs(
+    frozen_legs: tuple[FrozenPlanLeg, ...],
     coverage: CoverageMode,
     *,
     quick_calendar_limit: int,
     quick_exact_limit: int,
 ) -> SearchSurface:
     calendar_searches = 0
-    exact_searches = len(intent.legs)
-    for leg in intent.legs:
-        constraint = leg.date_constraint
-        if constraint.mode is DateMode.FLEXIBLE:
-            calendar_searches += constraint.flex_days * 2 + 1
-        elif constraint.mode in {DateMode.RANGE, DateMode.ROLLING_90_DAYS}:
-            assert constraint.end_date is not None
-            calendar_searches += (constraint.end_date - constraint.start_date).days + 1
-    if calendar_searches:
-        exact_searches = min(calendar_searches, quick_exact_limit)
+    exact_searches = 0
+    for frozen_leg in frozen_legs:
+        origin_count = len(frozen_leg.origin_scope.airport_codes)
+        date_count = _date_count(frozen_leg.date_constraint)
+        if frozen_leg.anywhere_rule is not None:
+            calendar_searches += (
+                origin_count * date_count * len(frozen_leg.anywhere_rule.discovery_source_ids)
+            )
+            exact_searches += frozen_leg.anywhere_rule.exact_verification_limit
+            continue
+        assert frozen_leg.destination_scope is not None
+        route_pairs = origin_count * len(frozen_leg.destination_scope.airport_codes)
+        if frozen_leg.date_constraint.mode is DateMode.EXACT:
+            exact_searches += route_pairs
+        else:
+            operations = route_pairs * date_count
+            calendar_searches += operations
+            exact_searches += operations
     if coverage is CoverageMode.QUICK:
         calendar_searches = min(calendar_searches, quick_calendar_limit)
         exact_searches = min(exact_searches, quick_exact_limit)
@@ -285,6 +428,84 @@ def _surface_for(
         coverage=coverage,
         calendar_searches=calendar_searches,
         exact_searches=exact_searches,
+    )
+
+
+def _date_count(constraint: DateConstraint) -> int:
+    start_date, end_date = _date_bounds(constraint)
+    return (end_date - start_date).days + 1
+
+
+def _date_bounds(constraint: DateConstraint) -> tuple[date, date]:
+    if constraint.mode is DateMode.EXACT:
+        return constraint.start_date, constraint.start_date
+    if constraint.mode is DateMode.FLEXIBLE:
+        delta = timedelta(days=constraint.flex_days)
+        return constraint.start_date - delta, constraint.start_date + delta
+    assert constraint.end_date is not None
+    return constraint.start_date, constraint.end_date
+
+
+def _draft_revision(
+    *,
+    parsed: ParsedIntent,
+    coverage: CoverageMode,
+    snapshot: ProviderCapabilitySnapshot,
+    clarifications: tuple[IntentClarification, ...],
+    created_at: datetime,
+    expires_at: datetime,
+    travel_intent: TravelIntent | None = None,
+    estimate: PlanEstimate | None = None,
+    frozen_legs: tuple[FrozenPlanLeg, ...] = (),
+) -> ProposedPlanRevision:
+    return ProposedPlanRevision(
+        status=PlanRevisionStatus.DRAFT,
+        parsed_intent=parsed,
+        travel_intent=travel_intent,
+        coverage=coverage,
+        capability_snapshot=snapshot,
+        estimate=estimate,
+        frozen_legs=frozen_legs,
+        clarifications=clarifications,
+        created_at=created_at,
+        expires_at=expires_at,
+    )
+
+
+def _scope_clarification(
+    leg_index: int,
+    role: str,
+    geography: GeographyClarification,
+) -> IntentClarification:
+    return IntentClarification(
+        field=f"legs.{leg_index}.{role}_scope",
+        code=geography.reason,
+        message_ru="Уточните географию маршрута.",
+        geography=geography,
+    )
+
+
+def _anywhere_origin_clarification(leg_index: int) -> IntentClarification:
+    return IntentClarification(
+        field=f"legs.{leg_index}.origin_scope",
+        code="unknown_geography",
+        message_ru="Для поиска куда угодно нужен конечный пункт отправления.",
+    )
+
+
+def _catalog_changed_clarification(leg_index: int) -> IntentClarification:
+    return IntentClarification(
+        field=f"legs.{leg_index}.scope",
+        code="catalog_changed_during_planning",
+        message_ru="Каталог аэропортов изменился. Повторите построение плана.",
+    )
+
+
+def _geography_catalog_clarification() -> IntentClarification:
+    return IntentClarification(
+        field="geography_catalog",
+        code="geography_catalog_required",
+        message_ru="Для заморозки маршрута нужен локальный каталог аэропортов.",
     )
 
 

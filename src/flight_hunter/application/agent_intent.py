@@ -7,11 +7,17 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
+from types import MappingProxyType
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from flight_hunter.agent.presets import AgentPresetId
+from flight_hunter.application.agent_scope import (
+    GeographyChoice,
+    GeographyClarification,
+    ScopeResolver,
+)
 from flight_hunter.domain.agent_search import (
     DateConstraint,
     DateMode,
@@ -22,6 +28,7 @@ from flight_hunter.domain.agent_search import (
     TravelLeg,
     TripShape,
 )
+from flight_hunter.geo.airports import AirportCatalogSnapshot
 
 _ROUTE_SEPARATOR_RE = re.compile(r"\s*(?:→|->|⟶)\s*")
 _EXACT_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
@@ -33,6 +40,24 @@ _ROLLING_DATE_RE = re.compile(
 )
 _IATA_RE = re.compile(r"^[A-Z]{3}$")
 _COUNTRY_CODE_RE = re.compile(r"^[A-Z]{2}$")
+_TRIP_SHAPE_PATTERNS = (
+    (
+        TripShape.ROUND_TRIP,
+        re.compile(r"\b(?:round[\s-]*trip|туда[\s-]*обратно)\b", re.IGNORECASE),
+    ),
+    (
+        TripShape.OPEN_JAW,
+        re.compile(r"\b(?:open[\s-]*jaw|разомкнутый\s+маршрут)\b", re.IGNORECASE),
+    ),
+    (
+        TripShape.MULTI_CITY,
+        re.compile(r"\b(?:multi[\s-]*city|сложный\s+маршрут)\b", re.IGNORECASE),
+    ),
+    (
+        TripShape.ONE_WAY,
+        re.compile(r"\b(?:one[\s-]*way|в\s+одну\s+сторону)\b", re.IGNORECASE),
+    ),
+)
 
 _CITY_ALIASES = {
     "москва": "MOW",
@@ -45,20 +70,6 @@ _CITY_ALIASES = {
     "st petersburg": "LED",
     "спб": "LED",
 }
-_COUNTRY_ALIASES = {
-    "france": "FR",
-    "japan": "JP",
-    "russia": "RU",
-    "россия": "RU",
-    "франция": "FR",
-    "япония": "JP",
-}
-_REGION_ALIASES = {
-    "southern europe": "southern-europe",
-    "western europe": "western-europe",
-    "южная европа": "southern-europe",
-    "западная европа": "western-europe",
-}
 _ANYWHERE_ALIASES = {
     "anywhere",
     "куда угодно",
@@ -68,12 +79,30 @@ _ANYWHERE_ALIASES = {
 }
 
 
+class _TaxonomyOnlyAirportCatalog:
+    async def catalog_snapshot(self) -> AirportCatalogSnapshot:
+        raise RuntimeError("taxonomy-only resolver cannot access an airport catalog")
+
+
+_TAXONOMY_RESOLVER = ScopeResolver(repository=_TaxonomyOnlyAirportCatalog())
+
+
 @dataclass(frozen=True, slots=True)
 class ClarificationAction:
     action_id: str
     label_ru: str
-    selections: dict[str, str]
+    selections: Mapping[str, str]
     date_mode: DateMode | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.selections, Mapping) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in self.selections.items()
+        ):
+            raise TypeError("clarification selections must map strings to strings")
+        object.__setattr__(self, "selections", MappingProxyType(dict(self.selections)))
+        if self.date_mode is not None:
+            object.__setattr__(self, "date_mode", DateMode(self.date_mode))
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +111,7 @@ class IntentClarification:
     code: str
     message_ru: str
     actions: tuple[ClarificationAction, ...] = ()
+    geography: GeographyClarification | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +123,46 @@ class ParsedDateConstraint:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", DateMode(self.mode))
+        if self.start_date is not None and type(self.start_date) is not date:
+            raise TypeError("start_date must be a date")
+        if self.end_date is not None and type(self.end_date) is not date:
+            raise TypeError("end_date must be a date")
+        if type(self.flex_days) is not int:
+            raise TypeError("flex_days must be an integer")
+
+    def clarifications(self, *, field: str) -> tuple[IntentClarification, ...]:
+        if self.mode is DateMode.ROLLING_90_DAYS:
+            return ()
+        if self.start_date is None:
+            return (_date_clarification(field=field),)
+        if self.mode is DateMode.FLEXIBLE:
+            if self.flex_days <= 0:
+                return (
+                    IntentClarification(
+                        field=field,
+                        code="date_flex_days_invalid",
+                        message_ru="Гибкость дат должна быть больше нуля.",
+                    ),
+                )
+            return ()
+        if self.mode is DateMode.RANGE:
+            if self.end_date is None:
+                return (
+                    IntentClarification(
+                        field=field,
+                        code="date_range_end_required",
+                        message_ru="Для диапазона нужна конечная дата.",
+                    ),
+                )
+            if self.end_date < self.start_date:
+                return (
+                    IntentClarification(
+                        field=field,
+                        code="date_range_end_before_start",
+                        message_ru="Конечная дата не может быть раньше начальной.",
+                    ),
+                )
+        return ()
 
     def materialize(
         self,
@@ -100,29 +170,30 @@ class ParsedDateConstraint:
         today: date | None,
         mode: DateMode | None = None,
     ) -> DateConstraint | None:
-        effective_mode = mode or self.mode
-        if effective_mode is DateMode.ROLLING_90_DAYS:
+        effective = replace(self, mode=mode or self.mode)
+        if effective.clarifications(field="date_constraint"):
+            return None
+        if effective.mode is DateMode.ROLLING_90_DAYS:
             if today is None:
                 return None
             return DateConstraint(
-                effective_mode,
+                effective.mode,
                 today,
                 today + timedelta(days=89),
             )
-        if self.start_date is None:
-            return None
-        if effective_mode is DateMode.EXACT:
-            return DateConstraint(effective_mode, self.start_date)
-        if effective_mode is DateMode.FLEXIBLE:
+        assert effective.start_date is not None
+        if effective.mode is DateMode.EXACT:
+            return DateConstraint(effective.mode, effective.start_date)
+        if effective.mode is DateMode.FLEXIBLE:
             return DateConstraint(
-                effective_mode,
-                self.start_date,
-                flex_days=self.flex_days or 3,
+                effective.mode,
+                effective.start_date,
+                flex_days=effective.flex_days,
             )
         return DateConstraint(
-            effective_mode,
-            self.start_date,
-            self.end_date,
+            effective.mode,
+            effective.start_date,
+            effective.end_date,
         )
 
 
@@ -151,11 +222,13 @@ class ParsedIntent:
     def __post_init__(self) -> None:
         object.__setattr__(self, "trip_shape", TripShape(self.trip_shape))
         object.__setattr__(self, "date_mode", DateMode(self.date_mode))
+        object.__setattr__(self, "legs", tuple(self.legs))
         object.__setattr__(
             self,
             "requested_strategies",
             tuple(RouteStrategy(value) for value in self.requested_strategies),
         )
+        object.__setattr__(self, "clarifications", tuple(self.clarifications))
 
     @property
     def origin_scope(self) -> LocationScope | None:
@@ -178,7 +251,7 @@ class ParsedIntent:
         return self.travel_intent
 
     def to_travel_intent(self, *, today: date | None) -> TravelIntent | None:
-        if self.clarifications or not self.legs:
+        if self.clarifications or not _leg_count_is_valid(self.trip_shape, len(self.legs)):
             return None
         materialized: list[TravelLeg] = []
         for leg in self.legs:
@@ -207,13 +280,26 @@ class IntentOverlay(BaseModel):
     requested_strategy_ids: tuple[RouteStrategy, ...] = ()
 
 
+class IntentOverlayTransportError(RuntimeError):
+    """Expected optional-model transport failure with deterministic fallback."""
+
+
 def merge_overlay(base: ParsedIntent, overlay: IntentOverlay) -> ParsedIntent:
-    return replace(
+    retained = list(base.clarifications)
+    if overlay.date_mode is not None:
+        retained = [item for item in retained if item.field != "date_constraint"]
+    if overlay.trip_shape is not None:
+        retained = [
+            item for item in retained if item.field not in {"return_date_constraint", "trip_legs"}
+        ]
+    merged = replace(
         base,
         trip_shape=overlay.trip_shape or base.trip_shape,
         date_mode=overlay.date_mode or base.date_mode,
         requested_strategies=overlay.requested_strategy_ids or base.requested_strategies,
+        clarifications=tuple(retained),
     )
+    return _with_semantic_clarifications(merged)
 
 
 class IntentOverlayProvider(Protocol):
@@ -225,9 +311,21 @@ class IntentOverlayProvider(Protocol):
     ) -> IntentOverlay | Mapping[str, object]: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _ScopeParseResult:
+    scope: LocationScope | None
+    geography: GeographyClarification | None = None
+
+
 class IntentParser:
-    def __init__(self, *, overlay_provider: IntentOverlayProvider | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        overlay_provider: IntentOverlayProvider | None = None,
+        taxonomy_resolver: ScopeResolver | None = None,
+    ) -> None:
         self._overlay_provider = overlay_provider
+        self._taxonomy_resolver = taxonomy_resolver or _TAXONOMY_RESOLVER
 
     def parse(
         self,
@@ -245,7 +343,7 @@ class IntentParser:
         clarifications: list[IntentClarification] = []
         raw_legs = selected.get("legs")
         if raw_legs is not None:
-            legs = _parse_explicit_legs(raw_legs, clarifications)
+            legs = _parse_explicit_legs(raw_legs, clarifications, self._taxonomy_resolver)
             origin_text = _scope_text(legs[0].origin) if legs else None
             destination_text = _scope_text(legs[0].destination) if legs else None
         else:
@@ -254,21 +352,21 @@ class IntentParser:
             destination_value = selected.get("destination", route_parts[1])
             origin_text = _optional_text(origin_value)
             destination_text = _optional_text(destination_value)
-            origin = _parse_scope(origin_value)
-            destination = _parse_scope(destination_value)
-            if origin is None:
-                clarifications.append(_location_clarification("origin"))
-            if destination is None:
-                clarifications.append(_location_clarification("destination"))
+            origin_result = _parse_scope(origin_value, self._taxonomy_resolver)
+            destination_result = _parse_scope(destination_value, self._taxonomy_resolver)
+            _append_scope_clarification(clarifications, "origin", origin_result)
+            _append_scope_clarification(clarifications, "destination", destination_result)
             date_constraint = _parse_date_constraint(text, selected)
-            if (
-                date_constraint.start_date is None
-                and date_constraint.mode is not DateMode.ROLLING_90_DAYS
-            ):
-                clarifications.append(_date_clarification())
-            legs = (ParsedLeg(origin, destination, date_constraint),)
+            clarifications.extend(date_constraint.clarifications(field="date_constraint"))
+            legs = (
+                ParsedLeg(
+                    origin_result.scope,
+                    destination_result.scope,
+                    date_constraint,
+                ),
+            )
 
-        trip_shape = _trip_shape(selected, legs)
+        trip_shape = _trip_shape(selected, legs, text)
         if raw_legs is None and trip_shape is TripShape.ROUND_TRIP:
             return_constraint = _return_constraint(selected)
             if return_constraint.start_date is None:
@@ -280,34 +378,40 @@ class IntentParser:
             )
 
         date_mode = legs[0].date_constraint.mode if legs else DateMode.EXACT
-        parsed = ParsedIntent(
-            origin_text=origin_text,
-            destination_text=destination_text,
-            trip_shape=trip_shape,
-            date_mode=date_mode,
-            legs=legs,
-            adults=_positive_int(selected.get("adults", 1), "adults"),
-            children=_non_negative_int(selected.get("children", 0), "children"),
-            infants=_non_negative_int(selected.get("infants", 0), "infants"),
-            currency=_string(selected.get("currency", "RUB"), "currency"),
-            requested_strategies=_strategies(selected, normalized_preset),
-            clarifications=tuple(_unique_clarifications(clarifications)),
-            preset_id=normalized_preset,
+        parsed = _with_semantic_clarifications(
+            ParsedIntent(
+                origin_text=origin_text,
+                destination_text=destination_text,
+                trip_shape=trip_shape,
+                date_mode=date_mode,
+                legs=legs,
+                adults=_positive_int(selected.get("adults", 1), "adults"),
+                children=_non_negative_int(selected.get("children", 0), "children"),
+                infants=_non_negative_int(selected.get("infants", 0), "infants"),
+                currency=_string(selected.get("currency", "RUB"), "currency"),
+                requested_strategies=_strategies(selected, normalized_preset),
+                clarifications=tuple(_unique_clarifications(clarifications)),
+                preset_id=normalized_preset,
+            )
         )
         if self._overlay_provider is None:
             return parsed
-        raw_overlay = self._overlay_provider(text, normalized_preset, selected)
-        overlay = (
-            raw_overlay
-            if isinstance(raw_overlay, IntentOverlay)
-            else IntentOverlay.model_validate(raw_overlay)
-        )
+        try:
+            raw_overlay = self._overlay_provider(text, normalized_preset, selected)
+            overlay = (
+                raw_overlay
+                if isinstance(raw_overlay, IntentOverlay)
+                else IntentOverlay.model_validate(raw_overlay)
+            )
+        except (IntentOverlayTransportError, ValidationError):
+            return parsed
         return merge_overlay(parsed, overlay)
 
 
 def _parse_explicit_legs(
     value: object,
     clarifications: list[IntentClarification],
+    taxonomy_resolver: ScopeResolver,
 ) -> tuple[ParsedLeg, ...]:
     if isinstance(value, (str, bytes)) or not isinstance(value, (tuple, list)):
         raise TypeError("legs must be an ordered collection")
@@ -315,20 +419,17 @@ def _parse_explicit_legs(
     for index, item in enumerate(value):
         if not isinstance(item, Mapping):
             raise TypeError("each leg must be a mapping")
-        origin = _parse_scope(item.get("origin"))
-        destination = _parse_scope(item.get("destination"))
-        if origin is None:
-            clarifications.append(_location_clarification(f"legs.{index}.origin"))
-        if destination is None:
-            clarifications.append(_location_clarification(f"legs.{index}.destination"))
+        origin = _parse_scope(item.get("origin"), taxonomy_resolver)
+        destination = _parse_scope(item.get("destination"), taxonomy_resolver)
+        _append_scope_clarification(clarifications, f"legs.{index}.origin", origin)
+        _append_scope_clarification(clarifications, f"legs.{index}.destination", destination)
         date_value = item.get("date")
         constraint = ParsedDateConstraint(
             DateMode.EXACT,
             _parse_date(date_value) if date_value is not None else None,
         )
-        if constraint.start_date is None:
-            clarifications.append(_date_clarification(field=f"legs.{index}.date_constraint"))
-        result.append(ParsedLeg(origin, destination, constraint))
+        clarifications.extend(constraint.clarifications(field=f"legs.{index}.date_constraint"))
+        result.append(ParsedLeg(origin.scope, destination.scope, constraint))
     return tuple(result)
 
 
@@ -357,7 +458,7 @@ def _parse_date_constraint(
             return ParsedDateConstraint(
                 DateMode.FLEXIBLE,
                 parsed_departure,
-                flex_days=_positive_int(selections.get("flex_days", 3), "flex_days"),
+                flex_days=_integer(selections.get("flex_days", 3), "flex_days"),
             )
         return ParsedDateConstraint(DateMode.EXACT, parsed_departure)
 
@@ -376,6 +477,12 @@ def _parse_date_constraint(
             flex_days=int(flex_match.group(2)),
         )
     exact_match = _EXACT_DATE_RE.search(text)
+    if mode is DateMode.FLEXIBLE:
+        return ParsedDateConstraint(
+            DateMode.FLEXIBLE,
+            date.fromisoformat(exact_match.group(1)) if exact_match else None,
+            flex_days=_integer(selections.get("flex_days", 3), "flex_days"),
+        )
     return ParsedDateConstraint(
         DateMode.EXACT,
         date.fromisoformat(exact_match.group(1)) if exact_match else None,
@@ -390,10 +497,17 @@ def _return_constraint(selections: Mapping[str, object]) -> ParsedDateConstraint
     )
 
 
-def _trip_shape(selections: Mapping[str, object], legs: tuple[ParsedLeg, ...]) -> TripShape:
+def _trip_shape(
+    selections: Mapping[str, object],
+    legs: tuple[ParsedLeg, ...],
+    text: str,
+) -> TripShape:
     explicit = selections.get("trip_shape")
     if explicit is not None:
         return TripShape(_string(explicit, "trip_shape"))
+    detected = _trip_shape_from_text(text)
+    if detected is not None:
+        return detected
     if len(legs) > 1:
         return TripShape.MULTI_CITY
     if selections.get("return_date") is not None:
@@ -426,17 +540,24 @@ def _route_parts(text: str) -> tuple[str | None, str | None]:
     route_text = _FLEX_DATE_RE.sub("", route_text)
     route_text = _EXACT_DATE_RE.sub("", route_text)
     route_text = _ROLLING_DATE_RE.sub("", route_text)
+    for _, pattern in _TRIP_SHAPE_PATTERNS:
+        route_text = pattern.sub("", route_text)
     parts = _ROUTE_SEPARATOR_RE.split(route_text, maxsplit=1)
     if len(parts) != 2:
         return None, None
-    return parts[0].strip() or None, parts[1].strip() or None
+    return parts[0].strip(" ,") or None, parts[1].strip(" ,") or None
 
 
-def _parse_scope(value: object) -> LocationScope | None:
+def _trip_shape_from_text(text: str) -> TripShape | None:
+    found = tuple(shape for shape, pattern in _TRIP_SHAPE_PATTERNS if pattern.search(text))
+    return found[0] if len(found) == 1 else None
+
+
+def _parse_scope(value: object, taxonomy_resolver: ScopeResolver) -> _ScopeParseResult:
     if isinstance(value, LocationScope):
-        return value
+        return _ScopeParseResult(value)
     if not isinstance(value, str) or not value.strip():
-        return None
+        return _ScopeParseResult(None)
     raw = value.strip()
     normalized = _normalize_text(raw)
     prefixes = (
@@ -453,21 +574,92 @@ def _parse_scope(value: object) -> LocationScope | None:
         marker = f"{prefix}:"
         if normalized.startswith(marker):
             scope_value = raw.split(":", 1)[1].strip()
-            return LocationScope(kind, scope_value)
+            return _resolve_prefixed_scope(kind, scope_value, taxonomy_resolver)
     if normalized in _ANYWHERE_ALIASES:
-        return LocationScope(LocationScopeKind.ANYWHERE, None)
+        return _ScopeParseResult(LocationScope(LocationScopeKind.ANYWHERE, None))
     if normalized in _CITY_ALIASES:
-        return LocationScope(LocationScopeKind.CITY, _CITY_ALIASES[normalized])
-    if normalized in _COUNTRY_ALIASES:
-        return LocationScope(LocationScopeKind.COUNTRY, _COUNTRY_ALIASES[normalized])
-    if normalized in _REGION_ALIASES:
-        return LocationScope(LocationScopeKind.REGION, _REGION_ALIASES[normalized])
+        return _ScopeParseResult(LocationScope(LocationScopeKind.CITY, _CITY_ALIASES[normalized]))
     upper = raw.upper()
     if _IATA_RE.fullmatch(upper):
-        return LocationScope(LocationScopeKind.AIRPORT, upper)
+        return _ScopeParseResult(LocationScope(LocationScopeKind.AIRPORT, upper))
     if _COUNTRY_CODE_RE.fullmatch(upper):
-        return LocationScope(LocationScopeKind.COUNTRY, upper)
-    return None
+        return _ScopeParseResult(LocationScope(LocationScopeKind.COUNTRY, upper))
+    country = taxonomy_resolver.resolve_country_text(raw)
+    if isinstance(country, GeographyChoice):
+        return _ScopeParseResult(country.scope)
+    if country.reason == "ambiguous_geography":
+        return _ScopeParseResult(None, country)
+    region = taxonomy_resolver.resolve_region_text(raw)
+    if isinstance(region, GeographyChoice):
+        return _ScopeParseResult(region.scope)
+    return _ScopeParseResult(None)
+
+
+def _resolve_prefixed_scope(
+    kind: LocationScopeKind,
+    value: str,
+    taxonomy_resolver: ScopeResolver,
+) -> _ScopeParseResult:
+    if kind is LocationScopeKind.COUNTRY and not _COUNTRY_CODE_RE.fullmatch(value.upper()):
+        resolved = taxonomy_resolver.resolve_country_text(value)
+        return _scope_result_from_geography(resolved)
+    if kind is LocationScopeKind.REGION:
+        resolved = taxonomy_resolver.resolve_region_text(value)
+        return _scope_result_from_geography(resolved)
+    return _ScopeParseResult(LocationScope(kind, value))
+
+
+def _scope_result_from_geography(
+    resolved: GeographyChoice | GeographyClarification,
+) -> _ScopeParseResult:
+    if isinstance(resolved, GeographyChoice):
+        return _ScopeParseResult(resolved.scope)
+    return _ScopeParseResult(None, resolved)
+
+
+def _append_scope_clarification(
+    clarifications: list[IntentClarification],
+    field: str,
+    result: _ScopeParseResult,
+) -> None:
+    if result.geography is not None:
+        clarifications.append(
+            IntentClarification(
+                field=f"{field}_scope",
+                code=result.geography.reason,
+                message_ru="Уточните географию маршрута.",
+                geography=result.geography,
+            )
+        )
+    elif result.scope is None:
+        clarifications.append(_location_clarification(field))
+
+
+def _with_semantic_clarifications(parsed: ParsedIntent) -> ParsedIntent:
+    clarifications = list(parsed.clarifications)
+    if parsed.legs:
+        effective = replace(parsed.legs[0].date_constraint, mode=parsed.date_mode)
+        clarifications.extend(effective.clarifications(field="date_constraint"))
+    if parsed.trip_shape is TripShape.ROUND_TRIP:
+        if len(parsed.legs) < 2 or parsed.legs[1].date_constraint.start_date is None:
+            clarifications.append(_return_date_clarification())
+    elif parsed.trip_shape in {TripShape.OPEN_JAW, TripShape.MULTI_CITY} and len(parsed.legs) < 2:
+        clarifications.append(
+            IntentClarification(
+                field="trip_legs",
+                code="trip_legs_required",
+                message_ru="Для этой формы маршрута нужны как минимум два упорядоченных плеча.",
+            )
+        )
+    return replace(parsed, clarifications=tuple(_unique_clarifications(clarifications)))
+
+
+def _leg_count_is_valid(shape: TripShape, count: int) -> bool:
+    if shape is TripShape.ONE_WAY:
+        return count == 1
+    if shape in {TripShape.ROUND_TRIP, TripShape.OPEN_JAW}:
+        return count == 2
+    return count >= 2
 
 
 def _normalize_text(value: str) -> str:
@@ -516,11 +708,12 @@ def _location_clarification(field: str) -> IntentClarification:
 def _unique_clarifications(
     values: list[IntentClarification],
 ) -> tuple[IntentClarification, ...]:
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     result: list[IntentClarification] = []
     for value in values:
-        if value.field not in seen:
-            seen.add(value.field)
+        key = (value.field, value.code)
+        if key not in seen:
+            seen.add(key)
             result.append(value)
     return tuple(result)
 
@@ -533,16 +726,24 @@ def _parse_date(value: object) -> date:
     return date.fromisoformat(value)
 
 
-def _positive_int(value: object, field: str) -> int:
-    if type(value) is not int or value <= 0:
-        raise ValueError(f"{field} must be a positive integer")
+def _integer(value: object, field: str) -> int:
+    if type(value) is not int:
+        raise ValueError(f"{field} must be an integer")
     return value
+
+
+def _positive_int(value: object, field: str) -> int:
+    parsed = _integer(value, field)
+    if parsed <= 0:
+        raise ValueError(f"{field} must be a positive integer")
+    return parsed
 
 
 def _non_negative_int(value: object, field: str) -> int:
-    if type(value) is not int or value < 0:
+    parsed = _integer(value, field)
+    if parsed < 0:
         raise ValueError(f"{field} must be a non-negative integer")
-    return value
+    return parsed
 
 
 def _string(value: object, field: str) -> str:

@@ -28,7 +28,8 @@ This file is maintained by coding agents. Mark a slice done only after implement
 - Progress:
   - [x] Add provider-neutral intent, evidence and plan contracts.
   - [x] Freeze generic geographic scopes with commercial provenance.
-  - [x] Parse typed intents, freeze provider capabilities and estimate bounded plans.
+  - [ ] Parse typed intents, freeze provider capabilities and estimate bounded plans
+    (review fixes implemented; acceptance pending).
   - [ ] Persist immutable revisions, approvals, runs and operation ledger.
   - [ ] Expose the plan lifecycle and approval-gated web flow.
   - [ ] Execute resumable Aviasales calendar/exact work in the worker.
@@ -59,6 +60,15 @@ registry/config/env tests, 23 Task 1/2/preset regressions and all 593 unit tests
 pass. Focused mypy and global Ruff format/check pass. Rolling 90-day bounds use
 the injected plan-builder clock; quick 60, full 240 and absolute 1,000 boundaries
 are covered.
+
+Task 3 review fix cycle on 2026-07-14: implementation is complete but remains
+pending review acceptance. Planning is now async and cannot reach approval until
+every finite leg scope is frozen from the local airport catalog or an `anywhere`
+leg has a bounded immutable discovery rule. FULL estimates use the untruncated
+frozen Cartesian surface; overlay/date dependencies fail as typed
+clarifications. The fresh focused suite has 88 tests, Task 1/2 regressions have
+25 tests, all 617 unit tests pass, mypy checks 110 source files, and global Ruff
+format/check pass.
 
 Implementation status on 2026-07-13: the user-approved design and reviewed
 implementation plan are complete. Production implementation now includes the
