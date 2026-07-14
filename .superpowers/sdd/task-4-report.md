@@ -61,3 +61,57 @@ runs (0.67s, 0.94s, 0.74s, 0.68s, and 0.79s).
 The full unit and persistence regression runs still emit existing `aiosqlite` worker-thread
 shutdown warnings from older tests that do not dispose their engines. The new focused tests
 dispose their engines and run without warnings. No live provider calls are part of this slice.
+
+## Re-review hardening addendum (2026-07-14)
+
+Task 4 was returned with four Important findings. This addendum records the separate hardening
+pass; Task 4 remains pending independent re-review.
+
+### TDD evidence
+
+The first test-only RED imported the required exact integrity classifier and immutable approval
+snapshot types before production edits. The focused command failed during collection with one
+missing-import error in 0.89 seconds. After the initial implementation, the same command exposed
+28 failures and 35 passes: the first root was SQLite savepoint-first-write persistence after an
+outer rollback, while canonical serialization of immutable mappings caused the bulk of the
+remaining failures.
+
+Focused tests then reached 63 passes. Self-review added stricter rollback cases with a committed
+source revision and a precommitted approval. Both failed before the transaction fix: the successor
+survived caller rollback and execute left its approval/revision consumed. A global SQLite hook was
+rejected because deferred read-to-write upgrades produced `database is locked` under the active-run
+race. The final local solution acquires `BEGIN IMMEDIATE` before successor/execute prechecks only
+when the aiosqlite driver reports no physical transaction. It neither retries nor commits or rolls
+back caller state. The two rollback tests then passed, and the simultaneous clone, execute,
+active-run, and successor race selection passed eight tests without a lock leak.
+
+### Corrected contracts
+
+- Approval rows now contain a frozen typed snapshot with non-null revision hash, approving session,
+  canonical budget JSON, canonical strategy JSON, and canonical risk-warning version JSON. Approval
+  and execution both verify the snapshot hash against the immutable revision being consumed.
+- Every repository datetime write converts aware input to UTC. Naive writes are rejected; reads
+  interpret legacy naive values as UTC and normalize aware values to UTC. `+03:00` round trips are
+  covered for plans, revisions, approvals, runs, and transitions.
+- PostgreSQL integrity handling uses only `diag.constraint_name`. SQLite handling accepts only exact
+  known `UNIQUE constraint failed` signatures. Foreign-key, check, primary-key, unknown, and
+  near-match errors are re-raised rather than translated.
+- Run statuses are exactly `queued`, `running`, `cancel_requested`, `completed`, `partial`, `failed`,
+  and `cancelled`. Compare-and-swap transitions, lifecycle timestamps, terminal immutability, and
+  error-field compatibility match the reviewed state machine.
+- Awaiting-approval estimates must be complete, positive/non-negative as applicable, and internally
+  consistent in both typed validation and the database check. Draft revisions may omit estimates.
+- Migration 0023 and Core metadata have matching SQLite/PostgreSQL active-run predicates for only
+  `queued`, `running`, and `cancel_requested`; terminal history is allowed. Migration 0022 remains
+  unchanged.
+
+### Fresh verification
+
+- Exact focused repository/migration/pre-v1 upgrade gate: `65 passed in 7.27s`.
+- Full persistence unit directory: `122 passed in 12.79s`.
+- SQLite engine/concurrency plus focused migration gate: `69 passed in 7.91s`.
+- Full unit suite: `680 passed, 23 existing aiosqlite shutdown warnings in 45.94s`.
+- Full integration suite: `4 passed in 2.99s`.
+- Global format: `271 files already formatted`; global Ruff: `All checks passed`.
+- Global mypy: `Success: no issues found in 111 source files`.
+- `git diff --check`: clean.

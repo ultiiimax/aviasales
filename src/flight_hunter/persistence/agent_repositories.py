@@ -5,6 +5,8 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -31,7 +33,8 @@ AgentRunStatus = Literal[
     "queued",
     "running",
     "cancel_requested",
-    "succeeded",
+    "completed",
+    "partial",
     "failed",
     "cancelled",
 ]
@@ -39,9 +42,73 @@ AgentRunStatus = Literal[
 _NEW_REVISION_STATES = frozenset({"draft", "awaiting_approval"})
 _ACTIVE_RUN_STATUSES = ("queued", "running", "cancel_requested")
 _RUN_STATUSES = frozenset(
-    {"queued", "running", "cancel_requested", "succeeded", "failed", "cancelled"}
+    {
+        "queued",
+        "running",
+        "cancel_requested",
+        "completed",
+        "partial",
+        "failed",
+        "cancelled",
+    }
 )
-_TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+_TERMINAL_RUN_STATUSES = frozenset({"completed", "partial", "failed", "cancelled"})
+_TRANSITION_SOURCES: dict[str, tuple[str, ...]] = {
+    "running": ("queued",),
+    "cancel_requested": ("queued", "running"),
+    "completed": ("running",),
+    "partial": ("running",),
+    "failed": ("running",),
+    "cancelled": ("cancel_requested",),
+}
+
+
+class AgentIntegrityConstraint(StrEnum):
+    REVISION_NUMBER = "uq_agent_plan_revision_number"
+    REVISION_HASH = "uq_agent_plan_revision_hash"
+    CLONE_IDEMPOTENCY = "ix_agent_plan_revision_clone_idempotency"
+    EXECUTE_IDEMPOTENCY = "uq_agent_run_execute_idempotency"
+    ACTIVE_RUN = "ix_agent_plan_one_active_run"
+    APPROVAL_RUN = "uq_agent_approval_run"
+    RUN_APPROVAL = "uq_agent_run_approval"
+
+
+_SQLITE_INTEGRITY_SIGNATURES = {
+    (
+        "UNIQUE constraint failed: agent_search_plan_revisions.plan_id, "
+        "agent_search_plan_revisions.revision_number"
+    ): AgentIntegrityConstraint.REVISION_NUMBER,
+    (
+        "UNIQUE constraint failed: agent_search_plan_revisions.plan_id, "
+        "agent_search_plan_revisions.content_hash"
+    ): AgentIntegrityConstraint.REVISION_HASH,
+    (
+        "UNIQUE constraint failed: agent_search_plan_revisions.household_id, "
+        "agent_search_plan_revisions.clone_idempotency_key"
+    ): AgentIntegrityConstraint.CLONE_IDEMPOTENCY,
+    (
+        "UNIQUE constraint failed: agent_plan_runs.household_id, "
+        "agent_plan_runs.execute_idempotency_key"
+    ): AgentIntegrityConstraint.EXECUTE_IDEMPOTENCY,
+    "UNIQUE constraint failed: agent_plan_runs.plan_id": AgentIntegrityConstraint.ACTIVE_RUN,
+    (
+        "UNIQUE constraint failed: agent_plan_execution_approvals.run_id"
+    ): AgentIntegrityConstraint.APPROVAL_RUN,
+    "UNIQUE constraint failed: agent_plan_runs.approval_id": AgentIntegrityConstraint.RUN_APPROVAL,
+}
+
+
+def classify_agent_integrity_constraint(
+    error: IntegrityError,
+) -> AgentIntegrityConstraint | None:
+    diagnostic = getattr(error.orig, "diag", None)
+    constraint_name = getattr(diagnostic, "constraint_name", None)
+    if isinstance(constraint_name, str):
+        try:
+            return AgentIntegrityConstraint(constraint_name)
+        except ValueError:
+            return None
+    return _SQLITE_INTEGRITY_SIGNATURES.get(str(error.orig))
 
 
 class AgentPlanError(RuntimeError):
@@ -56,6 +123,28 @@ class AgentPlanNotFound(AgentPlanError):
 
 class AgentPlanConflict(AgentPlanError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class AgentPlanApprovalSnapshot:
+    revision_content_hash: str
+    approved_by_session_id: UUID
+    approved_budget: Mapping[str, object]
+    approved_strategies: tuple[str, ...]
+    risk_warning_versions: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "approved_budget",
+            MappingProxyType(dict(self.approved_budget)),
+        )
+        object.__setattr__(self, "approved_strategies", tuple(self.approved_strategies))
+        object.__setattr__(
+            self,
+            "risk_warning_versions",
+            MappingProxyType(dict(self.risk_warning_versions)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +218,7 @@ class NewAgentPlanApproval:
     approved_by_user_id: UUID
     approved_at: datetime
     expires_at: datetime
+    snapshot: AgentPlanApprovalSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +230,7 @@ class AgentPlanApprovalRecord:
     approved_by_user_id: UUID
     approved_at: datetime
     expires_at: datetime
+    snapshot: AgentPlanApprovalSnapshot
     consumed_at: datetime | None
     run_id: UUID | None
 
@@ -165,7 +256,7 @@ class AgentPlanRunRecord:
     deadline_at: datetime
     started_at: datetime | None
     cancel_requested_at: datetime | None
-    completed_at: datetime | None
+    finished_at: datetime | None
     error_code: str | None
     error_message: str | None
 
@@ -182,28 +273,33 @@ class AgentPlanRepository:
         _require_aware(plan.created_at, "created_at")
         _validate_new_revision(initial_revision)
         try:
-            async with self._session.begin_nested():
-                await self._session.execute(
-                    insert(agent_search_plans_table).values(
-                        id=str(plan.id),
-                        household_id=str(plan.household_id),
-                        created_by_user_id=str(plan.created_by_user_id),
-                        created_at=plan.created_at,
+            await self._session.execute(
+                insert(agent_search_plans_table).values(
+                    id=str(plan.id),
+                    household_id=str(plan.household_id),
+                    created_by_user_id=str(plan.created_by_user_id),
+                    created_at=_utc_datetime(plan.created_at),
+                )
+            )
+            await self._session.execute(
+                insert(agent_search_plan_revisions_table).values(
+                    **_revision_values(
+                        plan_id=plan.id,
+                        household_id=plan.household_id,
+                        source_revision_id=None,
+                        revision_number=1,
+                        revision=initial_revision,
                     )
                 )
-                await self._session.execute(
-                    insert(agent_search_plan_revisions_table).values(
-                        **_revision_values(
-                            plan_id=plan.id,
-                            household_id=plan.household_id,
-                            source_revision_id=None,
-                            revision_number=1,
-                            revision=initial_revision,
-                        )
-                    )
-                )
+            )
         except IntegrityError as error:
-            raise AgentPlanConflict("agent_plan_conflict") from error
+            constraint = classify_agent_integrity_constraint(error)
+            if constraint in {
+                AgentIntegrityConstraint.REVISION_NUMBER,
+                AgentIntegrityConstraint.REVISION_HASH,
+            }:
+                raise AgentPlanConflict("agent_plan_conflict") from error
+            raise
 
         stored = await self.get_revision(plan.household_id, initial_revision.id)
         if stored is None:
@@ -268,13 +364,7 @@ class AgentPlanRepository:
         revision: NewAgentPlanRevision,
     ) -> AgentPlanRevisionRecord:
         _validate_new_revision(revision)
-        if revision.clone_idempotency_key is not None:
-            existing = await self._find_clone(
-                household_id,
-                revision.clone_idempotency_key,
-            )
-            if existing is not None:
-                return existing
+        await _acquire_sqlite_write_transaction(self._session)
 
         try:
             async with self._session.begin_nested():
@@ -288,7 +378,10 @@ class AgentPlanRepository:
                         )
                     )
                     .where(agent_search_plan_revisions_table.c.superseded_at.is_(None))
-                    .values(state="superseded", superseded_at=revision.created_at)
+                    .values(
+                        state="superseded",
+                        superseded_at=_utc_datetime(revision.created_at),
+                    )
                 )
                 if cast(CursorResult[Any], result).rowcount != 1:
                     if revision.clone_idempotency_key is not None:
@@ -331,14 +424,23 @@ class AgentPlanRepository:
                     )
                 )
         except IntegrityError as error:
-            if revision.clone_idempotency_key is not None:
+            constraint = classify_agent_integrity_constraint(error)
+            if (
+                constraint is AgentIntegrityConstraint.CLONE_IDEMPOTENCY
+                and revision.clone_idempotency_key is not None
+            ):
                 existing = await self._find_clone(
                     household_id,
                     revision.clone_idempotency_key,
                 )
                 if existing is not None:
                     return existing
-            raise AgentPlanConflict("agent_plan_duplicate_revision") from error
+            if constraint in {
+                AgentIntegrityConstraint.REVISION_NUMBER,
+                AgentIntegrityConstraint.REVISION_HASH,
+            }:
+                raise AgentPlanConflict("agent_plan_duplicate_revision") from error
+            raise
 
         stored = await self.get_revision(household_id, revision.id)
         if stored is None:
@@ -377,6 +479,7 @@ class AgentRunRepository:
     ) -> AgentPlanApprovalRecord:
         _require_aware(approval.approved_at, "approved_at")
         _require_aware(approval.expires_at, "expires_at")
+        _validate_approval_snapshot(approval.snapshot)
         if approval.expires_at <= approval.approved_at:
             raise ValueError("approval expires_at must be after approved_at")
 
@@ -394,24 +497,31 @@ class AgentRunRepository:
             raise AgentPlanConflict("agent_plan_stale")
         if revision.expires_at <= approval.approved_at:
             raise AgentPlanConflict("agent_plan_expired")
+        if revision.content_hash != approval.snapshot.revision_content_hash:
+            raise AgentPlanConflict("agent_approval_snapshot_mismatch")
 
-        try:
-            async with self._session.begin_nested():
-                await self._session.execute(
-                    insert(agent_plan_execution_approvals_table).values(
-                        id=str(approval.id),
-                        household_id=str(approval.household_id),
-                        plan_id=str(revision.plan_id),
-                        revision_id=str(approval.revision_id),
-                        approved_by_user_id=str(approval.approved_by_user_id),
-                        approved_at=approval.approved_at,
-                        expires_at=approval.expires_at,
-                        consumed_at=None,
-                        run_id=None,
-                    )
-                )
-        except IntegrityError as error:
-            raise AgentPlanConflict("agent_approval_conflict") from error
+        await self._session.execute(
+            insert(agent_plan_execution_approvals_table).values(
+                id=str(approval.id),
+                household_id=str(approval.household_id),
+                plan_id=str(revision.plan_id),
+                revision_id=str(approval.revision_id),
+                approved_by_user_id=str(approval.approved_by_user_id),
+                revision_content_hash=approval.snapshot.revision_content_hash,
+                approved_by_session_id=str(approval.snapshot.approved_by_session_id),
+                approved_budget_json=_canonical_json(dict(approval.snapshot.approved_budget)),
+                approved_strategies_json=_canonical_json(
+                    list(approval.snapshot.approved_strategies)
+                ),
+                risk_warning_versions_json=_canonical_json(
+                    dict(approval.snapshot.risk_warning_versions)
+                ),
+                approved_at=_utc_datetime(approval.approved_at),
+                expires_at=_utc_datetime(approval.expires_at),
+                consumed_at=None,
+                run_id=None,
+            )
+        )
 
         stored = await self.get_approval(approval.household_id, approval.id)
         if stored is None:
@@ -444,6 +554,7 @@ class AgentRunRepository:
         run: NewAgentPlanRun,
     ) -> AgentPlanRunRecord:
         _validate_new_run(run)
+        await _acquire_sqlite_write_transaction(self._session)
         existing = await self._get_by_execute_idempotency(
             household_id,
             run.execute_idempotency_key,
@@ -457,8 +568,20 @@ class AgentRunRepository:
 
         active = await self._get_active_run(household_id, approval.plan_id)
         if active is not None:
+            existing = await self._get_by_execute_idempotency(
+                household_id,
+                run.execute_idempotency_key,
+            )
+            if existing is not None:
+                return existing
             raise AgentPlanConflict("agent_plan_active_run")
         if approval.run_id is not None or approval.consumed_at is not None:
+            existing = await self._get_by_execute_idempotency(
+                household_id,
+                run.execute_idempotency_key,
+            )
+            if existing is not None:
+                return existing
             raise AgentPlanConflict("agent_approval_consumed")
         if approval.expires_at <= run.created_at:
             raise AgentPlanConflict("agent_approval_expired")
@@ -474,9 +597,20 @@ class AgentRunRepository:
             or revision.superseded_at is not None
             or revision.consumed_at is not None
         ):
+            existing = await self._get_by_execute_idempotency(
+                household_id,
+                run.execute_idempotency_key,
+            )
+            if existing is not None:
+                return existing
             raise AgentPlanConflict("agent_plan_stale")
         if revision.expires_at <= run.created_at:
             raise AgentPlanConflict("agent_plan_expired")
+        if approval.snapshot.revision_content_hash != revision.content_hash:
+            raise AgentPlanConflict("agent_approval_snapshot_mismatch")
+
+        created_at = _utc_datetime(run.created_at)
+        deadline_at = _utc_datetime(run.deadline_at)
 
         try:
             async with self._session.begin_nested():
@@ -489,11 +623,11 @@ class AgentRunRepository:
                         approval_id=str(approval.id),
                         execute_idempotency_key=run.execute_idempotency_key,
                         status="queued",
-                        created_at=run.created_at,
-                        deadline_at=run.deadline_at,
+                        created_at=created_at,
+                        deadline_at=deadline_at,
                         started_at=None,
                         cancel_requested_at=None,
-                        completed_at=None,
+                        finished_at=None,
                         error_code=None,
                         error_message=None,
                     )
@@ -504,7 +638,7 @@ class AgentRunRepository:
                     .where(agent_plan_execution_approvals_table.c.household_id == str(household_id))
                     .where(agent_plan_execution_approvals_table.c.run_id.is_(None))
                     .where(agent_plan_execution_approvals_table.c.consumed_at.is_(None))
-                    .values(run_id=str(run.id), consumed_at=run.created_at)
+                    .values(run_id=str(run.id), consumed_at=created_at)
                 )
                 if cast(CursorResult[Any], approval_result).rowcount != 1:
                     raise AgentPlanConflict("agent_approval_consumed")
@@ -516,21 +650,32 @@ class AgentRunRepository:
                     .where(agent_search_plan_revisions_table.c.state == "awaiting_approval")
                     .where(agent_search_plan_revisions_table.c.superseded_at.is_(None))
                     .where(agent_search_plan_revisions_table.c.consumed_at.is_(None))
-                    .values(state="consumed", consumed_at=run.created_at)
+                    .where(
+                        agent_search_plan_revisions_table.c.content_hash
+                        == approval.snapshot.revision_content_hash
+                    )
+                    .values(state="consumed", consumed_at=created_at)
                 )
                 if cast(CursorResult[Any], revision_result).rowcount != 1:
                     raise AgentPlanConflict("agent_plan_stale")
         except IntegrityError as error:
-            existing = await self._get_by_execute_idempotency(
-                household_id,
-                run.execute_idempotency_key,
-            )
-            if existing is not None:
-                return existing
-            active = await self._get_active_run(household_id, approval.plan_id)
-            if active is not None:
+            constraint = classify_agent_integrity_constraint(error)
+            if constraint is AgentIntegrityConstraint.EXECUTE_IDEMPOTENCY:
+                existing = await self._get_by_execute_idempotency(
+                    household_id,
+                    run.execute_idempotency_key,
+                )
+                if existing is not None:
+                    return existing
+                raise AgentPlanConflict("agent_run_idempotency_conflict") from error
+            if constraint is AgentIntegrityConstraint.ACTIVE_RUN:
                 raise AgentPlanConflict("agent_plan_active_run") from error
-            raise AgentPlanConflict("agent_plan_run_conflict") from error
+            if constraint in {
+                AgentIntegrityConstraint.APPROVAL_RUN,
+                AgentIntegrityConstraint.RUN_APPROVAL,
+            }:
+                raise AgentPlanConflict("agent_approval_consumed") from error
+            raise
 
         stored = await self.get_run(household_id, run.id)
         if stored is None:
@@ -608,28 +753,39 @@ class AgentRunRepository:
         error_message: str | None = None,
     ) -> AgentPlanRunRecord:
         _require_aware(changed_at, "changed_at")
-        if status not in _RUN_STATUSES:
+        if status not in _RUN_STATUSES or status not in _TRANSITION_SOURCES:
             raise ValueError("unsupported agent run status")
+        if status not in {"partial", "failed"} and (
+            error_code is not None or error_message is not None
+        ):
+            raise ValueError("error fields are only allowed for partial or failed runs")
+        if status == "failed" and error_code is None:
+            raise ValueError("failed transition requires error_code")
+        normalized_changed_at = _utc_datetime(changed_at)
         values: dict[str, object] = {
             "status": status,
             "error_code": error_code,
             "error_message": error_message,
         }
         if status == "running":
-            values["started_at"] = changed_at
+            values["started_at"] = normalized_changed_at
         elif status == "cancel_requested":
-            values["cancel_requested_at"] = changed_at
+            values["cancel_requested_at"] = normalized_changed_at
         elif status in _TERMINAL_RUN_STATUSES:
-            values["completed_at"] = changed_at
+            values["finished_at"] = normalized_changed_at
 
         result = await self._session.execute(
             update(agent_plan_runs_table)
             .where(agent_plan_runs_table.c.id == str(run_id))
             .where(agent_plan_runs_table.c.household_id == str(household_id))
+            .where(agent_plan_runs_table.c.status.in_(_TRANSITION_SOURCES[status]))
             .values(**values)
         )
         if cast(CursorResult[Any], result).rowcount != 1:
-            raise AgentPlanNotFound("agent_plan_not_found")
+            stored = await self.get_run(household_id, run_id)
+            if stored is None:
+                raise AgentPlanNotFound("agent_plan_not_found")
+            raise AgentPlanConflict("agent_run_transition_conflict")
         stored = await self.get_run(household_id, run_id)
         if stored is None:
             raise RuntimeError("updated agent run is missing")
@@ -711,8 +867,8 @@ def _revision_values(
         "estimated_deadline_seconds": revision.estimated_deadline_seconds,
         "content_hash": _content_hash(revision),
         "clone_idempotency_key": revision.clone_idempotency_key,
-        "created_at": revision.created_at,
-        "expires_at": revision.expires_at,
+        "created_at": _utc_datetime(revision.created_at),
+        "expires_at": _utc_datetime(revision.expires_at),
         "superseded_at": None,
         "consumed_at": None,
     }
@@ -739,7 +895,7 @@ def _content_hash(revision: NewAgentPlanRevision) -> str:
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _canonical_json(value: Mapping[str, object]) -> str:
+def _canonical_json(value: object) -> str:
     return json.dumps(
         value,
         ensure_ascii=False,
@@ -760,16 +916,60 @@ def _validate_new_revision(revision: NewAgentPlanRevision) -> None:
         raise ValueError("parser and planner versions are required")
     if revision.clone_idempotency_key is not None and not revision.clone_idempotency_key.strip():
         raise ValueError("clone_idempotency_key must not be blank")
+    if revision.state == "awaiting_approval":
+        estimates = (
+            revision.estimated_calendar_searches,
+            revision.estimated_exact_searches,
+            revision.estimated_logical_operations,
+            revision.estimated_http_attempts,
+            revision.estimated_deadline_seconds,
+        )
+        if any(value is None for value in estimates):
+            raise ValueError("awaiting_approval estimates must be complete")
+        calendar, exact, logical, http_attempts, deadline_seconds = cast(
+            tuple[int, int, int, int, int], estimates
+        )
+        if (
+            type(calendar) is not int
+            or calendar < 0
+            or type(exact) is not int
+            or exact < 0
+            or type(logical) is not int
+            or logical <= 0
+            or type(http_attempts) is not int
+            or http_attempts <= 0
+            or type(deadline_seconds) is not int
+            or deadline_seconds <= 0
+        ):
+            raise ValueError("awaiting_approval estimates must be valid")
+        if logical != calendar + exact:
+            raise ValueError("awaiting_approval estimates must be consistent")
+    for field_name in ("estimated_calendar_searches", "estimated_exact_searches"):
+        value = getattr(revision, field_name)
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError(f"{field_name} must be a non-negative integer or None")
     for field_name in (
-        "estimated_calendar_searches",
-        "estimated_exact_searches",
         "estimated_logical_operations",
         "estimated_http_attempts",
         "estimated_deadline_seconds",
     ):
         value = getattr(revision, field_name)
-        if value is not None and (type(value) is not int or value < 0):
-            raise ValueError(f"{field_name} must be a non-negative integer or None")
+        if value is not None and (type(value) is not int or value <= 0):
+            raise ValueError(f"{field_name} must be a positive integer or None")
+
+
+def _validate_approval_snapshot(snapshot: AgentPlanApprovalSnapshot) -> None:
+    if len(snapshot.revision_content_hash) != 71 or not snapshot.revision_content_hash.startswith(
+        "sha256:"
+    ):
+        raise ValueError("revision_content_hash must be a sha256 checksum")
+    if any(not strategy.strip() for strategy in snapshot.approved_strategies):
+        raise ValueError("approved strategies must not be blank")
+    if any(
+        not warning_id.strip() or not version.strip()
+        for warning_id, version in snapshot.risk_warning_versions.items()
+    ):
+        raise ValueError("risk warning ids and versions must not be blank")
 
 
 def _validate_new_run(run: NewAgentPlanRun) -> None:
@@ -834,6 +1034,13 @@ def _approval_record(row: RowMapping) -> AgentPlanApprovalRecord:
         approved_by_user_id=UUID(str(row["approved_by_user_id"])),
         approved_at=_aware_datetime(row["approved_at"]),
         expires_at=_aware_datetime(row["expires_at"]),
+        snapshot=AgentPlanApprovalSnapshot(
+            revision_content_hash=str(row["revision_content_hash"]),
+            approved_by_session_id=UUID(str(row["approved_by_session_id"])),
+            approved_budget=_json_object(str(row["approved_budget_json"])),
+            approved_strategies=_json_string_tuple(str(row["approved_strategies_json"])),
+            risk_warning_versions=_json_string_mapping(str(row["risk_warning_versions_json"])),
+        ),
         consumed_at=_aware_datetime(consumed_at) if consumed_at is not None else None,
         run_id=UUID(str(run_id)) if run_id is not None else None,
     )
@@ -842,7 +1049,7 @@ def _approval_record(row: RowMapping) -> AgentPlanApprovalRecord:
 def _run_record(row: RowMapping) -> AgentPlanRunRecord:
     started_at = row["started_at"]
     cancel_requested_at = row["cancel_requested_at"]
-    completed_at = row["completed_at"]
+    finished_at = row["finished_at"]
     return AgentPlanRunRecord(
         id=UUID(str(row["id"])),
         household_id=UUID(str(row["household_id"])),
@@ -857,7 +1064,7 @@ def _run_record(row: RowMapping) -> AgentPlanRunRecord:
         cancel_requested_at=(
             _aware_datetime(cancel_requested_at) if cancel_requested_at is not None else None
         ),
-        completed_at=_aware_datetime(completed_at) if completed_at is not None else None,
+        finished_at=_aware_datetime(finished_at) if finished_at is not None else None,
         error_code=row["error_code"],
         error_message=row["error_message"],
     )
@@ -868,7 +1075,51 @@ def _require_aware(value: datetime, field_name: str) -> None:
         raise ValueError(f"{field_name} must be timezone-aware")
 
 
+def _utc_datetime(value: datetime) -> datetime:
+    _require_aware(value, "datetime")
+    return value.astimezone(UTC)
+
+
+async def _acquire_sqlite_write_transaction(session: AsyncSession) -> None:
+    connection = await session.connection()
+    if connection.dialect.name != "sqlite":
+        return
+    sync_connection = connection.sync_connection
+    if sync_connection is None:
+        raise RuntimeError("SQLite synchronous connection is unavailable")
+    pooled_connection = sync_connection.connection
+    if pooled_connection is None:
+        raise RuntimeError("SQLite pooled connection is unavailable")
+    driver_connection = pooled_connection.driver_connection
+    in_transaction = getattr(driver_connection, "in_transaction", None)
+    if not isinstance(in_transaction, bool):
+        raise RuntimeError("SQLite driver does not expose transaction state")
+    if not in_transaction:
+        await connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
 def _aware_datetime(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=UTC)
-    return value
+    return value.astimezone(UTC)
+
+
+def _json_object(raw: str) -> dict[str, object]:
+    payload: object = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise RuntimeError("stored approval JSON must be an object")
+    return {str(key): value for key, value in payload.items()}
+
+
+def _json_string_tuple(raw: str) -> tuple[str, ...]:
+    payload: object = json.loads(raw)
+    if not isinstance(payload, list) or not all(isinstance(value, str) for value in payload):
+        raise RuntimeError("stored approved strategies JSON must be a string array")
+    return tuple(payload)
+
+
+def _json_string_mapping(raw: str) -> dict[str, str]:
+    payload = _json_object(raw)
+    if not all(isinstance(value, str) for value in payload.values()):
+        raise RuntimeError("stored risk warning versions JSON must contain strings")
+    return {key: cast(str, value) for key, value in payload.items()}

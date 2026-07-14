@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
 import pytest
+from sqlalchemy import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from flight_hunter.persistence.agent_repositories import (
@@ -16,7 +19,7 @@ from flight_hunter.persistence.agent_repositories import (
     NewAgentPlanRevision,
 )
 from flight_hunter.persistence.database import create_database_engine
-from flight_hunter.persistence.models import mapper_registry
+from flight_hunter.persistence.models import agent_search_plan_revisions_table, mapper_registry
 
 HOUSEHOLD_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 OTHER_HOUSEHOLD_ID = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
@@ -189,6 +192,234 @@ async def test_clone_idempotency_returns_the_original_cloned_revision(tmp_path: 
     await engine.dispose()
 
 
+@pytest.mark.anyio
+async def test_concurrent_same_key_clones_converge_to_one_revision(tmp_path: Path) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "clone-idempotency-race.db")
+    async with session_factory() as session:
+        await AgentPlanRepository(session).create_plan(_plan(), _revision())
+        await session.commit()
+
+    ready = 0
+    ready_lock = asyncio.Lock()
+    start = asyncio.Event()
+
+    async def clone(id_value: UUID, destination: str) -> UUID:
+        nonlocal ready
+        async with session_factory() as session:
+            async with ready_lock:
+                ready += 1
+                if ready == 2:
+                    start.set()
+            await start.wait()
+            stored = await AgentPlanRepository(session).create_successor(
+                household_id=HOUSEHOLD_ID,
+                source_revision_id=REVISION_ID,
+                revision=_revision(
+                    id_value=id_value,
+                    plan={"route": ["MOW", destination]},
+                    created_at=NOW + timedelta(minutes=1),
+                    clone_idempotency_key="clone:race:1",
+                ),
+            )
+            await session.commit()
+            return stored.id
+
+    clone_ids = await asyncio.gather(
+        clone(UUID("44444444-4444-4444-4444-444444444444"), "KZN"),
+        clone(UUID("55555555-5555-5555-5555-555555555555"), "AER"),
+    )
+
+    assert clone_ids[0] == clone_ids[1]
+    async with session_factory() as session:
+        revisions = await AgentPlanRepository(session).list_revisions(HOUSEHOLD_ID, PLAN_ID)
+        assert [revision.revision_number for revision in revisions] == [1, 2]
+        assert revisions[1].clone_idempotency_key == "clone:race:1"
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_plan_and_revision_are_removed_by_external_transaction_rollback(
+    tmp_path: Path,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "plan-rollback.db")
+    async with session_factory() as session:
+        await AgentPlanRepository(session).create_plan(_plan(), _revision())
+        await session.rollback()
+
+    async with session_factory() as session:
+        repository = AgentPlanRepository(session)
+        assert await repository.get_plan(HOUSEHOLD_ID, PLAN_ID) is None
+        assert await repository.get_revision(HOUSEHOLD_ID, REVISION_ID) is None
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_successor_is_removed_by_external_transaction_rollback(
+    tmp_path: Path,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "successor-rollback.db")
+    async with session_factory() as session:
+        await AgentPlanRepository(session).create_plan(_plan(), _revision())
+        await session.commit()
+
+    async with session_factory() as session:
+        await AgentPlanRepository(session).create_successor(
+            household_id=HOUSEHOLD_ID,
+            source_revision_id=REVISION_ID,
+            revision=_revision(
+                id_value=UUID("44444444-4444-4444-4444-444444444444"),
+                plan={"route": ["MOW", "KZN"]},
+                created_at=NOW + timedelta(minutes=1),
+            ),
+        )
+        await session.rollback()
+
+    async with session_factory() as session:
+        revisions = await AgentPlanRepository(session).list_revisions(HOUSEHOLD_ID, PLAN_ID)
+        assert len(revisions) == 1
+        assert revisions[0].state == "awaiting_approval"
+        assert revisions[0].superseded_at is None
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("estimated_calendar_searches", None),
+        ("estimated_exact_searches", None),
+        ("estimated_logical_operations", None),
+        ("estimated_http_attempts", None),
+        ("estimated_deadline_seconds", None),
+        ("estimated_calendar_searches", -1),
+        ("estimated_exact_searches", -1),
+        ("estimated_logical_operations", 0),
+        ("estimated_http_attempts", 0),
+        ("estimated_deadline_seconds", 0),
+        ("estimated_logical_operations", 4),
+    ],
+)
+async def test_awaiting_approval_requires_complete_consistent_estimates(
+    tmp_path: Path,
+    field_name: str,
+    invalid_value: int | None,
+) -> None:
+    engine, session_factory = await _session_factory(
+        tmp_path,
+        f"invalid-estimate-{field_name}-{invalid_value}.db",
+    )
+    invalid_revision = replace(_revision(), **{field_name: invalid_value})
+
+    async with session_factory() as session:
+        with pytest.raises(ValueError, match="awaiting_approval estimates"):
+            await AgentPlanRepository(session).create_plan(_plan(), invalid_revision)
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_draft_revision_may_omit_estimates(tmp_path: Path) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "draft-without-estimates.db")
+    draft = replace(
+        _revision(),
+        state="draft",
+        estimated_calendar_searches=None,
+        estimated_exact_searches=None,
+        estimated_logical_operations=None,
+        estimated_http_attempts=None,
+        estimated_deadline_seconds=None,
+    )
+
+    async with session_factory() as session:
+        stored = await AgentPlanRepository(session).create_plan(_plan(), draft)
+        await session.commit()
+
+        assert stored.state == "draft"
+        assert stored.estimated_logical_operations is None
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_database_check_rejects_incomplete_awaiting_approval_estimates(
+    tmp_path: Path,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "estimate-check.db")
+    async with session_factory() as session:
+        await AgentPlanRepository(session).create_plan(_plan(), _revision())
+        await session.commit()
+
+    async with session_factory() as session:
+        with pytest.raises(IntegrityError, match="ck_agent_plan_revision_estimates"):
+            async with session.begin_nested():
+                await session.execute(
+                    insert(agent_search_plan_revisions_table).values(
+                        id="44444444-4444-4444-4444-444444444444",
+                        plan_id=str(PLAN_ID),
+                        household_id=str(HOUSEHOLD_ID),
+                        revision_number=2,
+                        state="awaiting_approval",
+                        plan_json='{"route":["MOW","KZN"]}',
+                        scope_snapshot_json='{"airport_codes":["KZN","MOW"]}',
+                        capability_snapshot_json='{"version":"v1"}',
+                        cost_model_snapshot_json='{"version":"cost-v1"}',
+                        parser_version="intent-parser-v1",
+                        planner_version="agent-plan-builder-v2",
+                        estimated_calendar_searches=None,
+                        estimated_exact_searches=1,
+                        estimated_logical_operations=1,
+                        estimated_http_attempts=1,
+                        estimated_deadline_seconds=60,
+                        content_hash="sha256:" + "4" * 64,
+                        created_at=NOW,
+                        expires_at=NOW + timedelta(hours=1),
+                    )
+                )
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_naive_plan_and_revision_datetimes_are_rejected(tmp_path: Path) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "naive-plan-time.db")
+    naive = NOW.replace(tzinfo=None)
+
+    async with session_factory() as session:
+        with pytest.raises(ValueError, match="timezone-aware"):
+            await AgentPlanRepository(session).create_plan(
+                _plan(created_at=naive),
+                _revision(),
+            )
+        with pytest.raises(ValueError, match="timezone-aware"):
+            await AgentPlanRepository(session).create_plan(
+                _plan(),
+                replace(_revision(), expires_at=naive),
+            )
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_unknown_primary_key_integrity_error_is_not_reclassified(tmp_path: Path) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "unknown-integrity.db")
+    async with session_factory() as session:
+        await AgentPlanRepository(session).create_plan(_plan(), _revision())
+        await session.commit()
+
+    async with session_factory() as session:
+        with pytest.raises(IntegrityError, match=r"agent_search_plans\.id"):
+            await AgentPlanRepository(session).create_plan(
+                _plan(),
+                _revision(id_value=UUID("44444444-4444-4444-4444-444444444444")),
+            )
+        await session.rollback()
+
+    await engine.dispose()
+
+
 async def _session_factory(
     tmp_path: Path,
     filename: str,
@@ -200,12 +431,12 @@ async def _session_factory(
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
-def _plan() -> NewAgentPlan:
+def _plan(*, created_at: datetime = NOW) -> NewAgentPlan:
     return NewAgentPlan(
         id=PLAN_ID,
         household_id=HOUSEHOLD_ID,
         created_by_user_id=USER_ID,
-        created_at=NOW,
+        created_at=created_at,
     )
 
 

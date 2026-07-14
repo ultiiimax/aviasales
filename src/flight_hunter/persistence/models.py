@@ -582,6 +582,17 @@ agent_search_plan_revisions_table = Table(
         "state IN ('draft', 'awaiting_approval', 'superseded', 'consumed', 'expired')",
         name="ck_agent_plan_revision_state",
     ),
+    CheckConstraint(
+        "state != 'awaiting_approval' OR ("
+        "estimated_calendar_searches IS NOT NULL AND estimated_calendar_searches >= 0 AND "
+        "estimated_exact_searches IS NOT NULL AND estimated_exact_searches >= 0 AND "
+        "estimated_logical_operations IS NOT NULL AND estimated_logical_operations > 0 AND "
+        "estimated_logical_operations = "
+        "estimated_calendar_searches + estimated_exact_searches AND "
+        "estimated_http_attempts IS NOT NULL AND estimated_http_attempts > 0 AND "
+        "estimated_deadline_seconds IS NOT NULL AND estimated_deadline_seconds > 0)",
+        name="ck_agent_plan_revision_estimates",
+    ),
 )
 
 Index(
@@ -614,6 +625,11 @@ agent_plan_execution_approvals_table = Table(
         index=True,
     ),
     Column("approved_by_user_id", String(36), nullable=False),
+    Column("revision_content_hash", String(71), nullable=False),
+    Column("approved_by_session_id", String(36), nullable=False),
+    Column("approved_budget_json", Text, nullable=False),
+    Column("approved_strategies_json", Text, nullable=False),
+    Column("risk_warning_versions_json", Text, nullable=False),
     Column("approved_at", DateTime(timezone=True), nullable=False),
     Column("expires_at", DateTime(timezone=True), nullable=False),
     Column("consumed_at", DateTime(timezone=True), nullable=True),
@@ -653,7 +669,7 @@ agent_plan_runs_table = Table(
     Column("deadline_at", DateTime(timezone=True), nullable=False),
     Column("started_at", DateTime(timezone=True), nullable=True),
     Column("cancel_requested_at", DateTime(timezone=True), nullable=True),
-    Column("completed_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
     Column("error_code", String(80), nullable=True),
     Column("error_message", String(500), nullable=True),
     UniqueConstraint(
@@ -663,7 +679,8 @@ agent_plan_runs_table = Table(
     ),
     UniqueConstraint("approval_id", name="uq_agent_run_approval"),
     CheckConstraint(
-        "status IN ('queued', 'running', 'cancel_requested', 'succeeded', 'failed', 'cancelled')",
+        "status IN ('queued', 'running', 'cancel_requested', "
+        "'completed', 'partial', 'failed', 'cancelled')",
         name="ck_agent_plan_run_status",
     ),
 )

@@ -85,12 +85,15 @@ and global Ruff checks 267 files. The immediately preceding full-unit gate had
 coordinator direction. Independent final review accepted Task 3 with no
 Critical, Important or Minor findings at `655a069`.
 
-Task 4 is complete: forward-only migration 0023 and matching Core metadata now
-persist household-scoped immutable plan revisions, approvals, and runs without
-raw prompts. Canonical JSON snapshots and checksums, CAS successor creation,
-clone/execute idempotency, caller-owned execution transactions, approval
-consumption, exact latest-run ordering, and the active-run partial index are
-covered by real file-backed SQLite races and populated-0021 upgrade tests. The
+Task 4 hardening is complete and pending independent re-review. Forward-only
+migration 0023 and matching Core metadata persist household-scoped immutable
+plan revisions, approval snapshots, and runs without raw prompts. The rejected
+review findings are covered by immutable canonical approval evidence, UTC-only
+writes and reads, exact PostgreSQL/SQLite integrity classification, the reviewed
+run state machine, complete approval estimates, caller-owned rollback proofs,
+and same-key concurrency tests. SQLite successor/execute writers acquire a
+local `BEGIN IMMEDIATE` only when no physical caller transaction exists; no
+repository commits, rolls back, or retries the caller's transaction. Fresh
 focused, migration, persistence, mypy, Ruff, unit, and integration gates pass.
 
 Implementation status on 2026-07-13: the user-approved design and reviewed

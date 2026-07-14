@@ -6,9 +6,15 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from sqlalchemy.dialects import postgresql, sqlite
 
 from flight_hunter.ops.structured_logging import LOGGER_NAME
-from flight_hunter.persistence.models import agent_plan_runs_table, airports_table
+from flight_hunter.persistence.models import (
+    agent_plan_execution_approvals_table,
+    agent_plan_runs_table,
+    agent_search_plan_revisions_table,
+    airports_table,
+)
 
 
 def test_airport_core_metadata_does_not_invent_commercial_defaults() -> None:
@@ -22,9 +28,47 @@ def test_agent_run_core_partial_index_has_only_active_statuses() -> None:
         for index in agent_plan_runs_table.indexes
         if index.name == "ix_agent_plan_one_active_run"
     )
-    predicate = str(active_index.dialect_options["sqlite"]["where"])
+    sqlite_predicate = active_index.dialect_options["sqlite"]["where"]
+    postgres_predicate = active_index.dialect_options["postgresql"]["where"]
 
-    assert predicate == "status IN ('queued', 'running', 'cancel_requested')"
+    assert str(sqlite_predicate.compile(dialect=sqlite.dialect())) == (
+        "status IN ('queued', 'running', 'cancel_requested')"
+    )
+    assert str(postgres_predicate.compile(dialect=postgresql.dialect())) == (
+        "status IN ('queued', 'running', 'cancel_requested')"
+    )
+
+
+def test_agent_core_metadata_has_reviewed_checks_and_approval_snapshot() -> None:
+    revision_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in agent_search_plan_revisions_table.constraints
+        if constraint.name is not None and hasattr(constraint, "sqltext")
+    }
+    run_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in agent_plan_runs_table.constraints
+        if constraint.name is not None and hasattr(constraint, "sqltext")
+    }
+
+    assert "ck_agent_plan_revision_estimates" in revision_checks
+    assert "estimated_logical_operations = " in revision_checks["ck_agent_plan_revision_estimates"]
+    assert (
+        "estimated_calendar_searches + estimated_exact_searches"
+        in revision_checks["ck_agent_plan_revision_estimates"]
+    )
+    assert run_checks["ck_agent_plan_run_status"] == (
+        "status IN ('queued', 'running', 'cancel_requested', "
+        "'completed', 'partial', 'failed', 'cancelled')"
+    )
+    for column_name in (
+        "revision_content_hash",
+        "approved_by_session_id",
+        "approved_budget_json",
+        "approved_strategies_json",
+        "risk_warning_versions_json",
+    ):
+        assert not agent_plan_execution_approvals_table.c[column_name].nullable
 
 
 def test_alembic_upgrade_does_not_disable_application_loggers(tmp_path: Path) -> None:
@@ -116,12 +160,26 @@ def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
         agent_run_columns = {
             row[1] for row in connection.execute("pragma table_info(agent_plan_runs)").fetchall()
         }
+        agent_approval_info = {
+            row[1]: row
+            for row in connection.execute(
+                "pragma table_info(agent_plan_execution_approvals)"
+            ).fetchall()
+        }
         agent_run_indexes = {
             row[1] for row in connection.execute("pragma index_list(agent_plan_runs)").fetchall()
         }
         active_run_index_sql = connection.execute(
             "select sql from sqlite_master where type = 'index' and name = ?",
             ("ix_agent_plan_one_active_run",),
+        ).fetchone()
+        agent_run_table_sql = connection.execute(
+            "select sql from sqlite_master where type = 'table' and name = ?",
+            ("agent_plan_runs",),
+        ).fetchone()
+        agent_revision_table_sql = connection.execute(
+            "select sql from sqlite_master where type = 'table' and name = ?",
+            ("agent_search_plan_revisions",),
         ).fetchone()
 
     assert {
@@ -276,10 +334,28 @@ def test_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> None:
         "status",
         "created_at",
         "deadline_at",
+        "finished_at",
     }.issubset(agent_run_columns)
+    assert "completed_at" not in agent_run_columns
+    for column_name in (
+        "revision_content_hash",
+        "approved_by_session_id",
+        "approved_budget_json",
+        "approved_strategies_json",
+        "risk_warning_versions_json",
+    ):
+        assert agent_approval_info[column_name][3] == 1
     assert "ix_agent_plan_one_active_run" in agent_run_indexes
     assert active_run_index_sql is not None
     assert "WHERE status IN ('queued', 'running', 'cancel_requested')" in active_run_index_sql[0]
+    assert agent_run_table_sql is not None
+    assert (
+        "status IN ('queued', 'running', 'cancel_requested', "
+        "'completed', 'partial', 'failed', 'cancelled')"
+    ) in " ".join(agent_run_table_sql[0].split())
+    assert "'succeeded'" not in agent_run_table_sql[0]
+    assert agent_revision_table_sql is not None
+    assert "ck_agent_plan_revision_estimates" in agent_revision_table_sql[0]
 
 
 def test_airport_commercial_migration_backfills_legacy_rows(tmp_path: Path) -> None:

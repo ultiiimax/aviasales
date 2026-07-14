@@ -68,6 +68,19 @@ def upgrade() -> None:
             "state IN ('draft', 'awaiting_approval', 'superseded', 'consumed', 'expired')",
             name="ck_agent_plan_revision_state",
         ),
+        sa.CheckConstraint(
+            "state != 'awaiting_approval' OR ("
+            "estimated_calendar_searches IS NOT NULL AND "
+            "estimated_calendar_searches >= 0 AND "
+            "estimated_exact_searches IS NOT NULL AND estimated_exact_searches >= 0 AND "
+            "estimated_logical_operations IS NOT NULL AND "
+            "estimated_logical_operations > 0 AND "
+            "estimated_logical_operations = "
+            "estimated_calendar_searches + estimated_exact_searches AND "
+            "estimated_http_attempts IS NOT NULL AND estimated_http_attempts > 0 AND "
+            "estimated_deadline_seconds IS NOT NULL AND estimated_deadline_seconds > 0)",
+            name="ck_agent_plan_revision_estimates",
+        ),
     )
     op.create_index(
         "ix_agent_search_plan_revisions_plan_id",
@@ -110,6 +123,11 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("approved_by_user_id", sa.String(length=36), nullable=False),
+        sa.Column("revision_content_hash", sa.String(length=71), nullable=False),
+        sa.Column("approved_by_session_id", sa.String(length=36), nullable=False),
+        sa.Column("approved_budget_json", sa.Text(), nullable=False),
+        sa.Column("approved_strategies_json", sa.Text(), nullable=False),
+        sa.Column("risk_warning_versions_json", sa.Text(), nullable=False),
         sa.Column("approved_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("consumed_at", sa.DateTime(timezone=True), nullable=True),
@@ -160,7 +178,7 @@ def upgrade() -> None:
         sa.Column("deadline_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("cancel_requested_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("error_code", sa.String(length=80), nullable=True),
         sa.Column("error_message", sa.String(length=500), nullable=True),
         sa.UniqueConstraint(
@@ -171,7 +189,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("approval_id", name="uq_agent_run_approval"),
         sa.CheckConstraint(
             "status IN ('queued', 'running', 'cancel_requested', "
-            "'succeeded', 'failed', 'cancelled')",
+            "'completed', 'partial', 'failed', 'cancelled')",
             name="ck_agent_plan_run_status",
         ),
     )
