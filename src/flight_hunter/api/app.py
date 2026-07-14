@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import text
@@ -32,6 +33,7 @@ from flight_hunter.agent.presets import AgentPlan, AgentPlanBuilder, AgentPlanSt
 from flight_hunter.api.agent_routes import (
     AgentRouteError,
     agent_route_error_handler,
+    agent_validation_error_handler,
     create_agent_router,
 )
 from flight_hunter.api.web import (
@@ -1240,6 +1242,7 @@ def create_app(
     )
     session_factory = watch_session_factory or _watch_session_factory(settings.database_url)
     app.add_exception_handler(AgentRouteError, agent_route_error_handler)
+    app.add_exception_handler(RequestValidationError, agent_validation_error_handler)
     app.include_router(
         create_agent_router(
             session_factory=session_factory,

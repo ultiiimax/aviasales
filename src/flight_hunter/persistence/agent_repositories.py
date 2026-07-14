@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from types import MappingProxyType
@@ -549,6 +549,11 @@ class AgentPlanRepository:
                     raise AgentPlanConflict("agent_plan_stale")
 
                 latest_row = (await self._session.execute(latest_statement)).mappings().one()
+                next_revision_number = int(latest_row["revision_number"]) + 1
+                generated_revision = _with_clone_approval_generation(
+                    revision,
+                    generation=next_revision_number,
+                )
                 await self._session.execute(
                     update(agent_search_plan_revisions_table)
                     .where(agent_search_plan_revisions_table.c.plan_id == str(plan_id))
@@ -561,7 +566,7 @@ class AgentPlanRepository:
                     .where(agent_search_plan_revisions_table.c.superseded_at.is_(None))
                     .values(
                         state="superseded",
-                        superseded_at=_utc_datetime(revision.created_at),
+                        superseded_at=_utc_datetime(generated_revision.created_at),
                     )
                 )
                 await self._session.execute(
@@ -570,8 +575,8 @@ class AgentPlanRepository:
                             plan_id=plan_id,
                             household_id=household_id,
                             source_revision_id=source_revision_id,
-                            revision_number=int(latest_row["revision_number"]) + 1,
-                            revision=revision,
+                            revision_number=next_revision_number,
+                            revision=generated_revision,
                         )
                     )
                 )
@@ -1087,6 +1092,19 @@ def _content_hash(revision: NewAgentPlanRevision) -> str:
         }
     )
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _with_clone_approval_generation(
+    revision: NewAgentPlanRevision,
+    *,
+    generation: int,
+) -> NewAgentPlanRevision:
+    plan = dict(revision.plan)
+    plan["approval"] = {
+        "generation": generation,
+        "expires_at": _utc_datetime(revision.expires_at).isoformat(),
+    }
+    return replace(revision, plan=plan)
 
 
 def _canonical_json(value: object) -> str:

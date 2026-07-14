@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from flight_hunter.application.agent_intent import IntentParser
@@ -14,6 +18,7 @@ from flight_hunter.application.agent_lifecycle import (
     HIDDEN_CITY_WARNING_VERSION,
     AgentLifecycleError,
     AgentLifecycleService,
+    CancelAgentRun,
     CloneAgentPlan,
     CreateAgentPlan,
     EditAgentPlan,
@@ -30,7 +35,10 @@ from flight_hunter.geo.airports import (
     freeze_airport_catalog,
 )
 from flight_hunter.persistence.agent_repositories import AgentPlanRepository, AgentRunRepository
-from flight_hunter.persistence.models import mapper_registry
+from flight_hunter.persistence.models import (
+    agent_plan_execution_approvals_table,
+    mapper_registry,
+)
 
 NOW = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
 HOUSEHOLD_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -232,6 +240,338 @@ async def test_execute_surfaces_typed_sqlite_nested_transaction_boundary() -> No
     assert runs == ()
 
 
+@pytest.mark.anyio
+async def test_failed_execute_rolls_back_orphan_approval_and_reuses_session() -> None:
+    async with _lifecycle_harness() as harness:
+        source = await _create(harness.service)
+        active = await _execute(harness.service, source, "active-run")
+        cloned = await harness.service.clone_revision(
+            CloneAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                plan_id=source.plan_id,
+                source_revision_id=source.revision_id,
+                expected_revision=source.revision,
+                idempotency_key="clone-for-conflict",
+            )
+        )
+
+        with pytest.raises(AgentLifecycleError) as exc_info:
+            await _execute(harness.service, cloned, "blocked-by-active-run")
+
+        recovered = await _create(harness.service)
+        approval_count = await harness.session.scalar(
+            select(func.count()).select_from(agent_plan_execution_approvals_table)
+        )
+        stored_clone = await AgentPlanRepository(harness.session).get_revision(
+            HOUSEHOLD_ID,
+            cloned.revision_id,
+        )
+
+    assert exc_info.value.code == "agent_run_already_active"
+    assert approval_count == 1
+    assert stored_clone is not None and stored_clone.state == "awaiting_approval"
+    assert recovered.state == "awaiting_approval"
+    assert active.status == "queued"
+
+
+@pytest.mark.anyio
+async def test_execute_unknown_fault_after_approval_insert_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _lifecycle_harness() as harness:
+        plan = await _create(harness.service)
+
+        async def fail_execute(
+            _repository: AgentRunRepository,
+            **_kwargs: object,
+        ) -> object:
+            raise RuntimeError("execute fault")
+
+        monkeypatch.setattr(AgentRunRepository, "execute", fail_execute)
+        with pytest.raises(RuntimeError, match="execute fault"):
+            await _execute(harness.service, plan, "fault-after-approval")
+        recovered = await _create(harness.service)
+        approval_count = await harness.session.scalar(
+            select(func.count()).select_from(agent_plan_execution_approvals_table)
+        )
+        revision = await AgentPlanRepository(harness.session).get_revision(
+            HOUSEHOLD_ID,
+            plan.revision_id,
+        )
+
+    assert approval_count == 0
+    assert revision is not None and revision.state == "awaiting_approval"
+    assert recovered.state == "awaiting_approval"
+
+
+@pytest.mark.anyio
+async def test_edit_clone_and_cancel_unknown_faults_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _lifecycle_harness() as harness:
+        editable = await _create(harness.service)
+        original_successor = AgentPlanRepository.create_successor
+
+        async def fail_after_successor(
+            repository: AgentPlanRepository,
+            **kwargs: object,
+        ) -> object:
+            await original_successor(repository, **kwargs)  # type: ignore[arg-type]
+            raise RuntimeError("edit fault")
+
+        monkeypatch.setattr(AgentPlanRepository, "create_successor", fail_after_successor)
+        with pytest.raises(RuntimeError, match="edit fault"):
+            await harness.service.edit_plan(
+                EditAgentPlan(
+                    household_id=HOUSEHOLD_ID,
+                    user_id=USER_ID,
+                    plan_id=editable.plan_id,
+                    source_revision_id=editable.revision_id,
+                    expected_revision=editable.revision,
+                    selections={"departure_date": "2026-09-11"},
+                )
+            )
+        revisions = await AgentPlanRepository(harness.session).list_revisions(
+            HOUSEHOLD_ID,
+            editable.plan_id,
+        )
+        assert [(item.revision_number, item.state) for item in revisions] == [
+            (1, "awaiting_approval")
+        ]
+        await harness.session.rollback()
+        monkeypatch.setattr(AgentPlanRepository, "create_successor", original_successor)
+
+        terminal = await _create(harness.service)
+        run = await _execute(harness.service, terminal, "terminal-run")
+        await _terminalize_run(harness.session, run)
+        original_clone = AgentPlanRepository.create_clone
+
+        async def fail_after_clone(
+            repository: AgentPlanRepository,
+            **kwargs: object,
+        ) -> object:
+            await original_clone(repository, **kwargs)  # type: ignore[arg-type]
+            raise RuntimeError("clone fault")
+
+        monkeypatch.setattr(AgentPlanRepository, "create_clone", fail_after_clone)
+        with pytest.raises(RuntimeError, match="clone fault"):
+            await harness.service.clone_revision(
+                CloneAgentPlan(
+                    household_id=HOUSEHOLD_ID,
+                    user_id=USER_ID,
+                    plan_id=terminal.plan_id,
+                    source_revision_id=terminal.revision_id,
+                    expected_revision=terminal.revision,
+                    idempotency_key="faulty-clone",
+                )
+            )
+        revisions = await AgentPlanRepository(harness.session).list_revisions(
+            HOUSEHOLD_ID,
+            terminal.plan_id,
+        )
+        assert len(revisions) == 1
+        await harness.session.rollback()
+        monkeypatch.setattr(AgentPlanRepository, "create_clone", original_clone)
+
+        cancellable = await _create(harness.service)
+        queued = await _execute(harness.service, cancellable, "cancel-fault-run")
+        original_status = AgentRunRepository.set_status
+
+        async def fail_after_status(
+            repository: AgentRunRepository,
+            **kwargs: object,
+        ) -> object:
+            await original_status(repository, **kwargs)  # type: ignore[arg-type]
+            raise RuntimeError("cancel fault")
+
+        monkeypatch.setattr(AgentRunRepository, "set_status", fail_after_status)
+        with pytest.raises(RuntimeError, match="cancel fault"):
+            await harness.service.cancel_run(
+                CancelAgentRun(
+                    household_id=HOUSEHOLD_ID,
+                    user_id=USER_ID,
+                    plan_id=cancellable.plan_id,
+                    run_id=queued.run_id,
+                )
+            )
+        stored_run = await AgentRunRepository(harness.session).get_run(
+            HOUSEHOLD_ID,
+            queued.run_id,
+        )
+
+    assert stored_run is not None and stored_run.status == "queued"
+
+
+@pytest.mark.anyio
+async def test_repeated_unchanged_clone_generations_are_unique_and_idempotent() -> None:
+    async with _lifecycle_harness() as harness:
+        first = await _create(harness.service)
+        first_run = await _execute(harness.service, first, "generation-run-1")
+        await _terminalize_run(harness.session, first_run)
+        harness.clock.advance(timedelta(minutes=1))
+        second = await harness.service.clone_revision(
+            CloneAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                plan_id=first.plan_id,
+                source_revision_id=first.revision_id,
+                expected_revision=first.revision,
+                idempotency_key="generation-clone-1",
+            )
+        )
+        second_run = await _execute(harness.service, second, "generation-run-2")
+        await _terminalize_run(harness.session, second_run)
+        harness.clock.advance(timedelta(minutes=1))
+        third = await harness.service.clone_revision(
+            CloneAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                plan_id=first.plan_id,
+                source_revision_id=second.revision_id,
+                expected_revision=second.revision,
+                idempotency_key="generation-clone-2",
+            )
+        )
+        retry = await harness.service.clone_revision(
+            CloneAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                plan_id=first.plan_id,
+                source_revision_id=second.revision_id,
+                expected_revision=second.revision,
+                idempotency_key="generation-clone-2",
+            )
+        )
+        records = await AgentPlanRepository(harness.session).list_revisions(
+            HOUSEHOLD_ID,
+            first.plan_id,
+        )
+
+    approval_evidence = [json.loads(item.plan_json)["approval"] for item in records]
+    assert [item.revision_number for item in records] == [1, 2, 3]
+    assert [item["generation"] for item in approval_evidence] == [1, 2, 3]
+    assert len({item.content_hash for item in records}) == 3
+    assert first.expires_at < second.expires_at < third.expires_at
+    assert retry.revision_id == third.revision_id
+
+
+@pytest.mark.anyio
+async def test_execute_rechecks_idempotency_after_revision_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _lifecycle_harness() as harness:
+        plan = await _create(harness.service)
+        original = await _execute(harness.service, plan, "locked-idempotency")
+        real_lookup = AgentRunRepository.get_by_execute_idempotency
+        calls = 0
+
+        async def miss_then_find(
+            repository: AgentRunRepository,
+            household_id: UUID,
+            idempotency_key: str,
+        ):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return None
+            return await real_lookup(repository, household_id, idempotency_key)
+
+        monkeypatch.setattr(
+            AgentRunRepository,
+            "get_by_execute_idempotency",
+            miss_then_find,
+        )
+        retried = await _execute(harness.service, plan, "locked-idempotency")
+
+    assert calls == 2
+    assert retried.run_id == original.run_id
+
+
+@pytest.mark.anyio
+async def test_two_session_execute_race_converges_on_one_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "agent-execute-race.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path.as_posix()}")
+    async with engine.begin() as connection:
+        await connection.run_sync(mapper_registry.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    provider = CountingProviderGateway()
+
+    def service(session: AsyncSession) -> AgentLifecycleService:
+        return AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(
+                clock=lambda: NOW,
+                scope_resolver=ScopeResolver(repository=StaticAirportCatalog()),
+            ),
+            clock=lambda: NOW,
+            provider_gateway=provider,
+        )
+
+    async with factory() as setup_session:
+        plan = await _create(service(setup_session))
+
+    real_lookup = AgentRunRepository.get_by_execute_idempotency
+    gate = asyncio.Event()
+    lock = asyncio.Lock()
+    synchronized_repositories: set[int] = set()
+
+    async def synchronize_initial_lookup(
+        repository: AgentRunRepository,
+        household_id: UUID,
+        idempotency_key: str,
+    ):
+        identity = id(repository)
+        if identity not in synchronized_repositories:
+            async with lock:
+                synchronized_repositories.add(identity)
+                if len(synchronized_repositories) == 2:
+                    gate.set()
+            await gate.wait()
+        return await real_lookup(repository, household_id, idempotency_key)
+
+    monkeypatch.setattr(
+        AgentRunRepository,
+        "get_by_execute_idempotency",
+        synchronize_initial_lookup,
+    )
+    async with factory() as first_session, factory() as second_session:
+        first, second = await asyncio.gather(
+            _execute(service(first_session), plan, "two-session-key"),
+            _execute(service(second_session), plan, "two-session-key"),
+        )
+
+    async with factory() as check_session:
+        runs = await AgentRunRepository(check_session).list_runs(HOUSEHOLD_ID, plan.plan_id)
+
+    assert first.run_id == second.run_id
+    assert len(runs) == 1
+    assert provider.calls == 0
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_direct_invalid_parser_input_is_stable_and_rolls_back() -> None:
+    async with _lifecycle_harness() as harness:
+        with pytest.raises(AgentLifecycleError) as exc_info:
+            await harness.service.create_plan(
+                CreateAgentPlan(
+                    household_id=HOUSEHOLD_ID,
+                    user_id=USER_ID,
+                    text="LED → CDG",
+                    selections={"adults": "two"},
+                )
+            )
+        valid = await _create(harness.service)
+
+    assert exc_info.value.code == "agent_plan_invalid_input"
+    assert valid.state == "awaiting_approval"
+
+
 @asynccontextmanager
 async def _lifecycle_harness() -> AsyncIterator[LifecycleHarness]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -299,6 +639,24 @@ async def _execute(
             hidden_city_warning_version=hidden_city_warning_version,
         )
     )
+
+
+async def _terminalize_run(session: AsyncSession, run: RunView) -> None:
+    repository = AgentRunRepository(session)
+    changed_at = run.created_at + timedelta(seconds=1)
+    await repository.set_status(
+        household_id=HOUSEHOLD_ID,
+        run_id=run.run_id,
+        status="cancel_requested",
+        changed_at=changed_at,
+    )
+    await repository.set_status(
+        household_id=HOUSEHOLD_ID,
+        run_id=run.run_id,
+        status="cancelled",
+        changed_at=changed_at,
+    )
+    await session.commit()
 
 
 def _airport(code: str, country: str, municipality: str) -> Airport:

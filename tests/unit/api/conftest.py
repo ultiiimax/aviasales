@@ -72,7 +72,12 @@ async def agent_api_harness() -> AsyncIterator[AgentApiHarness]:
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         airport_repository = AirportReferenceRepository(session)
-        airports = (_airport("LED", "RU", "Saint Petersburg"), _airport("CDG", "FR", "Paris"))
+        airports = (
+            _airport("LED", "RU", "Saint Petersburg"),
+            _airport("CDG", "FR", "Paris"),
+            _airport("SVO", "RU", "Moscow"),
+            _airport("JFK", "US", "New York"),
+        )
         await airport_repository.import_airports(
             AirportImportBatch(
                 source_path="task5-fixture.csv",
@@ -97,7 +102,8 @@ async def agent_api_harness() -> AsyncIterator[AgentApiHarness]:
             watch_session_factory=session_factory,
             settings=settings,
             agent_provider_gateway=provider,
-        )
+        ),
+        raise_server_exceptions=False,
     )
     invitation = client.post(
         "/api/v1/auth/bootstrap-invitation",

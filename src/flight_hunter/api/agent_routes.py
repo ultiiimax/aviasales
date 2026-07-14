@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -37,6 +39,8 @@ from flight_hunter.domain.auth import AuthSession, token_hash
 from flight_hunter.persistence.repositories import AirportReferenceRepository, IdentityRepository
 
 ERROR_STATUS = {
+    "auth_context_missing": 401,
+    "idempotency_key_required": 400,
     "agent_plan_incomplete": 409,
     "agent_plan_stale": 409,
     "agent_plan_consumed": 409,
@@ -45,15 +49,24 @@ ERROR_STATUS = {
     "agent_plan_approval_required": 403,
     "agent_hidden_city_ack_required": 403,
     "agent_run_already_active": 409,
+    "agent_plan_invalid_input": 422,
+    "agent_plan_not_found": 404,
+    "agent_run_not_found": 404,
+    "agent_sqlite_nested_transaction_unsupported": 409,
+    "agent_run_idempotency_conflict": 409,
+    "agent_run_transition_conflict": 409,
+    "agent_run_cancelled": 409,
+    "agent_plan_duplicate_revision": 409,
+    "agent_plan_conflict": 409,
 }
 
 _BEARER = HTTPBearer(auto_error=False)
 
 
 class AgentRouteError(RuntimeError):
-    def __init__(self, code: str, *, status_code: int | None = None) -> None:
+    def __init__(self, code: str) -> None:
         self.code = code
-        self.status_code = status_code or _status_for_error(code)
+        self.status_code = _status_for_error(code)
         super().__init__(code)
 
 
@@ -69,6 +82,25 @@ async def agent_route_error_handler(
     )
 
 
+async def agent_validation_error_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    if not isinstance(error, RequestValidationError):
+        raise error
+    if request.url.path == "/api/v1/agent/search-plans" or request.url.path.startswith(
+        "/api/v1/agent/search-plans/"
+    ):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "code": "agent_plan_invalid_input",
+                "message": _error_message("agent_plan_invalid_input"),
+            },
+        )
+    return await request_validation_exception_handler(request, error)
+
+
 def create_agent_router(
     *,
     session_factory: async_sessionmaker[AsyncSession],
@@ -82,14 +114,14 @@ def create_agent_router(
         credentials: HTTPAuthorizationCredentials | None = Depends(_BEARER),
     ) -> AuthSession:
         if credentials is None or credentials.scheme.lower() != "bearer":
-            raise AgentRouteError("auth_context_missing", status_code=401)
+            raise AgentRouteError("auth_context_missing")
         async with session_factory() as session:
             auth_session = await IdentityRepository(session).session_by_token_hash(
                 token_hash=token_hash(credentials.credentials),
                 now=datetime.now(UTC),
             )
         if auth_session is None:
-            raise AgentRouteError("auth_context_missing", status_code=401)
+            raise AgentRouteError("auth_context_missing")
         return auth_session
 
     def service(session: AsyncSession) -> AgentLifecycleService:
@@ -114,13 +146,13 @@ def create_agent_router(
                         household_id=auth.household_id,
                         user_id=auth.user_id,
                         text=body.text,
-                        selections=body.selections,
+                        selections=body.selections.to_parser_mapping(),
                         coverage=body.coverage,
                         preset_id=body.preset_id,
                     )
                 )
             except AgentLifecycleError as error:
-                raise AgentRouteError(error.code) from error
+                raise _route_lifecycle_error(error) from error
         return AgentPlanResponse.from_view(view)
 
     @router.get("/{plan_id}", response_model=AgentPlanResponse)
@@ -132,7 +164,7 @@ def create_agent_router(
             try:
                 view = await service(session).get_plan(auth.household_id, plan_id)
             except AgentLifecycleError as error:
-                raise AgentRouteError(error.code) from error
+                raise _route_lifecycle_error(error) from error
         return AgentPlanResponse.from_view(view)
 
     @router.patch("/{plan_id}", response_model=AgentPlanResponse)
@@ -151,13 +183,13 @@ def create_agent_router(
                         source_revision_id=body.source_revision_id,
                         expected_revision=body.expected_revision,
                         text=body.text,
-                        selections=body.selections,
+                        selections=body.selections.to_parser_mapping(),
                         coverage=body.coverage,
                         preset_id=body.preset_id,
                     )
                 )
             except AgentLifecycleError as error:
-                raise AgentRouteError(error.code) from error
+                raise _route_lifecycle_error(error) from error
         return AgentPlanResponse.from_view(view)
 
     @router.post("/{plan_id}/revisions", response_model=AgentPlanResponse, status_code=201)
@@ -178,12 +210,12 @@ def create_agent_router(
                         source_revision_id=body.source_revision_id,
                         expected_revision=body.expected_revision,
                         idempotency_key=key,
-                        selections=body.selections,
+                        selections=body.selections.to_parser_mapping(),
                         coverage=body.coverage,
                     )
                 )
             except AgentLifecycleError as error:
-                raise AgentRouteError(error.code) from error
+                raise _route_lifecycle_error(error) from error
         return AgentPlanResponse.from_view(view)
 
     @router.post("/{plan_id}/execute", response_model=AgentRunResponse, status_code=202)
@@ -210,7 +242,7 @@ def create_agent_router(
                     )
                 )
             except AgentLifecycleError as error:
-                raise AgentRouteError(error.code) from error
+                raise _route_lifecycle_error(error) from error
         return AgentRunResponse.from_view(view)
 
     @router.get("/{plan_id}/runs", response_model=AgentRunListResponse)
@@ -222,7 +254,7 @@ def create_agent_router(
             try:
                 views = await service(session).list_runs(auth.household_id, plan_id)
             except AgentLifecycleError as error:
-                raise AgentRouteError(error.code) from error
+                raise _route_lifecycle_error(error) from error
         return AgentRunListResponse(runs=[AgentRunResponse.from_view(view) for view in views])
 
     @router.get("/{plan_id}/runs/latest", response_model=AgentRunResponse)
@@ -234,7 +266,7 @@ def create_agent_router(
             try:
                 view = await service(session).get_latest_run(auth.household_id, plan_id)
             except AgentLifecycleError as error:
-                raise AgentRouteError(error.code) from error
+                raise _route_lifecycle_error(error) from error
         return AgentRunResponse.from_view(view)
 
     @router.get("/{plan_id}/runs/{run_id}", response_model=AgentRunResponse)
@@ -247,7 +279,7 @@ def create_agent_router(
             try:
                 view = await service(session).get_run(auth.household_id, plan_id, run_id)
             except AgentLifecycleError as error:
-                raise AgentRouteError(error.code) from error
+                raise _route_lifecycle_error(error) from error
         return AgentRunResponse.from_view(view)
 
     @router.post("/{plan_id}/runs/{run_id}/cancel", response_model=AgentRunResponse)
@@ -267,7 +299,7 @@ def create_agent_router(
                     )
                 )
             except AgentLifecycleError as error:
-                raise AgentRouteError(error.code) from error
+                raise _route_lifecycle_error(error) from error
         return AgentRunResponse.from_view(view)
 
     @router.get("/{plan_id}/runs/{run_id}/results", response_model=AgentRunResultsResponse)
@@ -284,7 +316,7 @@ def create_agent_router(
                     run_id,
                 )
             except AgentLifecycleError as error:
-                raise AgentRouteError(error.code) from error
+                raise _route_lifecycle_error(error) from error
         return AgentRunResultsResponse.from_view(view)
 
     return router
@@ -292,16 +324,18 @@ def create_agent_router(
 
 def _required_idempotency_key(value: str | None) -> str:
     if value is None or not value.strip():
-        raise AgentRouteError("idempotency_key_required", status_code=400)
+        raise AgentRouteError("idempotency_key_required")
     return value.strip()
 
 
 def _status_for_error(code: str) -> int:
-    if code in ERROR_STATUS:
-        return ERROR_STATUS[code]
-    if code in {"agent_plan_not_found", "agent_run_not_found"}:
-        return 404
-    return 409
+    return ERROR_STATUS[code]
+
+
+def _route_lifecycle_error(error: AgentLifecycleError) -> AgentRouteError:
+    if error.code not in ERROR_STATUS:
+        raise error
+    return AgentRouteError(error.code)
 
 
 def _error_message(code: str) -> str:
@@ -310,5 +344,6 @@ def _error_message(code: str) -> str:
         "idempotency_key_required": "Idempotency-Key header is required",
         "agent_plan_not_found": "agent plan or run was not found",
         "agent_run_not_found": "agent run was not found",
+        "agent_plan_invalid_input": "agent plan input is invalid",
     }
     return messages.get(code, "agent lifecycle transition was rejected")

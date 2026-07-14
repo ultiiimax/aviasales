@@ -1,6 +1,6 @@
 # Task 5 Report — Approval-Gated Plan Lifecycle API
 
-Status: implemented; pending independent review.
+Status: review hardening implemented; pending independent re-review.
 
 ## RED
 
@@ -65,3 +65,54 @@ focused rerun passed 23 tests in 5.31s; global `ruff format --check .` reported
 ## Concerns
 
 - Worker/provider execution and web UI are deliberately outside this slice.
+
+## Review hardening addendum (2026-07-14)
+
+The review returned six Important and two Minor findings. Production remained
+unchanged while the focused review tests were added. The exact lifecycle/API/auth
+command then produced `14 failed, 22 passed in 8.59s`. Those failures reproduced
+the missing outer rollback, duplicate unchanged clone hash, PATCH text
+contamination, missing post-lock idempotency lookup and binding, diagnostic
+leakage, open selection/result schemas, and incomplete error mapping.
+
+The service now opens one outer SQLAlchemy transaction before every lifecycle
+read or mutation in create/edit/clone/execute/cancel (and expiry-mutating GET).
+Any mapped or unknown exception rolls it back; successful exits commit once.
+Fault injection covers approval insertion, successor/clone insertion and cancel
+status mutation, and proves the session is reusable.
+
+Clone revisions carry canonical approval generation and refreshed-expiry evidence
+inside the hashed plan payload. The repository assigns the generation while it
+holds the latest-revision write boundary, preserving Task 4's
+`(plan_id, content_hash)` uniqueness. Execute performs a fast idempotency lookup,
+locks the revision, repeats the household lookup, verifies exact plan/revision
+binding, and converges under a synchronized two-session SQLite race.
+
+New PATCH text preserves only independent passenger/currency/strategy settings;
+route, legs, dates and trip shape are reparsed from the replacement text plus
+explicit selections. Agent selection payloads are closed typed Pydantic models,
+and agent-path validation plus direct parser/builder input failures return
+`agent_plan_invalid_input` without raw exception text.
+
+Run responses map internal failure diagnostics through a closed public allowlist.
+Persisted `error_message`, provider references, continuation values, signatures
+and tokens remain internal. Unknown error codes become `agent_run_failed` with no
+public message. Results expose only the literal `not_ready` state and evidence
+availability until a typed evidence contract exists.
+
+Fresh verification before the final commit:
+
+- Focused lifecycle/API/auth: `38 passed in 8.43s`.
+- Task 3/4 regression set: `146 passed in 8.68s`.
+- Full unit suite: `727 passed, 4 warnings in 56.70s`.
+- Full integration suite: `4 passed in 3.30s`.
+- Named source mypy: no issues in five source files.
+- Named Ruff check and format: clean across eight changed code/test files.
+- Final focused rerun: `38 passed in 8.04s`.
+- Global format: `276 files already formatted`; global Ruff passed.
+- Global mypy: no issues in 114 source files.
+- `git diff --check`: clean.
+
+The unit warnings are aiosqlite event-loop shutdown races and two existing lxml
+deprecations; there were no test failures. Task 6 execution, provider calls and
+web UI remain outside this hardening pass.

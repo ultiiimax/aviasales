@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,6 +51,10 @@ from flight_hunter.persistence.agent_repositories import (
 
 HIDDEN_CITY_WARNING_VERSION = "hidden-city-v1"
 PARSER_VERSION = "intent-parser-v1"
+_PUBLIC_RUN_ERRORS: dict[str, str] = {
+    "deadline_exceeded": "Search deadline exceeded.",
+    "provider_unavailable": "Flight provider is temporarily unavailable.",
+}
 
 
 class AgentLifecycleError(RuntimeError):
@@ -151,15 +156,14 @@ class RunView:
     cancel_requested_at: datetime | None
     finished_at: datetime | None
     error_code: str | None
-    error_message: str | None
+    public_message: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class RunResultsView:
     run_id: UUID
-    state: str = "not_ready"
+    state: Literal["not_ready"] = "not_ready"
     evidence_available: bool = False
-    items: tuple[object, ...] = ()
 
 
 class AgentLifecycleService:
@@ -181,196 +185,204 @@ class AgentLifecycleService:
         self._runs = AgentRunRepository(session)
 
     async def create_plan(self, command: CreateAgentPlan) -> PlanView:
-        now = self._now()
-        try:
-            proposed = await self._build(
-                text=command.text,
-                preset_id=command.preset_id,
-                selections=command.selections,
-                coverage=CoverageMode(command.coverage),
-            )
-        except PlanBudgetExceededError as error:
-            raise AgentLifecycleError("agent_plan_budget_too_large") from error
-        plan_id = uuid4()
-        revision = _new_revision(proposed)
-        try:
-            stored = await self._plans.create_plan(
-                NewAgentPlan(
-                    id=plan_id,
-                    household_id=command.household_id,
-                    created_by_user_id=command.user_id,
-                    created_at=now,
-                ),
-                revision,
-            )
-            await self._session.commit()
-        except AgentPlanError as error:
-            raise _lifecycle_error(error) from error
+        async with self._owned_transaction():
+            now = self._now()
+            try:
+                proposed = await self._build(
+                    text=command.text,
+                    preset_id=command.preset_id,
+                    selections=command.selections,
+                    coverage=CoverageMode(command.coverage),
+                )
+                stored = await self._plans.create_plan(
+                    NewAgentPlan(
+                        id=uuid4(),
+                        household_id=command.household_id,
+                        created_by_user_id=command.user_id,
+                        created_at=now,
+                    ),
+                    _new_revision(proposed, approval_generation=1),
+                )
+            except PlanBudgetExceededError as error:
+                raise AgentLifecycleError("agent_plan_budget_too_large") from error
+            except (TypeError, ValueError) as error:
+                raise AgentLifecycleError("agent_plan_invalid_input") from error
+            except AgentPlanError as error:
+                raise _lifecycle_error(error) from error
         return _plan_view(stored)
 
     async def edit_plan(self, command: EditAgentPlan) -> PlanView:
-        source = await self._require_revision(
-            command.household_id,
-            command.plan_id,
-            command.source_revision_id,
-        )
-        source = await self._expire_if_due(source)
-        if source.state == "expired":
-            await self._session.commit()
-            raise AgentLifecycleError("agent_plan_expired")
-        if source.revision_number != command.expected_revision or source.state not in {
-            "draft",
-            "awaiting_approval",
-        }:
-            raise AgentLifecycleError("agent_plan_stale")
-        parsed = _parsed_intent(source)
-        coverage = CoverageMode(command.coverage or _stored_coverage(source))
-        try:
-            proposed = await self._build_from_existing(
-                parsed,
-                text=command.text,
-                preset_id=command.preset_id,
-                edits=command.selections,
-                coverage=coverage,
+        async with self._owned_transaction():
+            source = await self._require_revision(
+                command.household_id,
+                command.plan_id,
+                command.source_revision_id,
             )
-            stored = await self._plans.create_successor(
-                household_id=command.household_id,
-                source_revision_id=source.id,
-                revision=_new_revision(proposed),
-            )
-            await self._session.commit()
-        except PlanBudgetExceededError as error:
-            raise AgentLifecycleError("agent_plan_budget_too_large") from error
-        except AgentPlanError as error:
-            raise _lifecycle_error(error) from error
+            source = await self._expire_if_due(source)
+            if source.state == "expired":
+                raise AgentLifecycleError("agent_plan_expired")
+            if source.revision_number != command.expected_revision or source.state not in {
+                "draft",
+                "awaiting_approval",
+            }:
+                raise AgentLifecycleError("agent_plan_stale")
+            parsed = _parsed_intent(source)
+            try:
+                proposed = await self._build_from_existing(
+                    parsed,
+                    text=command.text,
+                    preset_id=command.preset_id,
+                    edits=command.selections,
+                    coverage=CoverageMode(command.coverage or _stored_coverage(source)),
+                )
+                stored = await self._plans.create_successor(
+                    household_id=command.household_id,
+                    source_revision_id=source.id,
+                    revision=_new_revision(
+                        proposed,
+                        approval_generation=source.revision_number + 1,
+                    ),
+                )
+            except PlanBudgetExceededError as error:
+                raise AgentLifecycleError("agent_plan_budget_too_large") from error
+            except (TypeError, ValueError) as error:
+                raise AgentLifecycleError("agent_plan_invalid_input") from error
+            except AgentPlanError as error:
+                raise _lifecycle_error(error) from error
         return _plan_view(stored)
 
     async def clone_revision(self, command: CloneAgentPlan) -> PlanView:
         if not command.idempotency_key.strip():
             raise AgentLifecycleError("agent_plan_approval_required")
-        source = await self._require_revision(
-            command.household_id,
-            command.plan_id,
-            command.source_revision_id,
-        )
-        source = await self._expire_if_due(source)
-        if source.revision_number != command.expected_revision:
-            raise AgentLifecycleError("agent_plan_stale")
-        if source.state not in {"consumed", "expired", "superseded"}:
-            raise AgentLifecycleError("agent_plan_stale")
-        parsed = _parsed_intent(source)
-        coverage = CoverageMode(command.coverage or _stored_coverage(source))
-        try:
-            proposed = await self._build_from_existing(
-                parsed,
-                text=None,
-                preset_id=None,
-                edits=command.selections,
-                coverage=coverage,
+        async with self._owned_transaction():
+            source = await self._require_revision(
+                command.household_id,
+                command.plan_id,
+                command.source_revision_id,
             )
-            stored = await self._plans.create_clone(
-                household_id=command.household_id,
-                plan_id=command.plan_id,
-                source_revision_id=source.id,
-                revision=_new_revision(
-                    proposed,
-                    clone_idempotency_key=command.idempotency_key,
-                ),
-            )
-            await self._session.commit()
-        except PlanBudgetExceededError as error:
-            raise AgentLifecycleError("agent_plan_budget_too_large") from error
-        except AgentPlanError as error:
-            raise _lifecycle_error(error) from error
+            source = await self._expire_if_due(source)
+            if source.revision_number != command.expected_revision:
+                raise AgentLifecycleError("agent_plan_stale")
+            if source.state not in {"consumed", "expired", "superseded"}:
+                raise AgentLifecycleError("agent_plan_stale")
+            parsed = _parsed_intent(source)
+            try:
+                proposed = await self._build_from_existing(
+                    parsed,
+                    text=None,
+                    preset_id=None,
+                    edits=command.selections,
+                    coverage=CoverageMode(command.coverage or _stored_coverage(source)),
+                )
+                stored = await self._plans.create_clone(
+                    household_id=command.household_id,
+                    plan_id=command.plan_id,
+                    source_revision_id=source.id,
+                    revision=_new_revision(
+                        proposed,
+                        approval_generation=source.revision_number + 1,
+                        clone_idempotency_key=command.idempotency_key,
+                    ),
+                )
+            except PlanBudgetExceededError as error:
+                raise AgentLifecycleError("agent_plan_budget_too_large") from error
+            except (TypeError, ValueError) as error:
+                raise AgentLifecycleError("agent_plan_invalid_input") from error
+            except AgentPlanError as error:
+                raise _lifecycle_error(error) from error
         return _plan_view(stored)
 
     async def execute_plan(self, command: ExecuteAgentPlan) -> RunView:
         if not command.idempotency_key.strip():
             raise AgentLifecycleError("agent_plan_approval_required")
-        existing = await self._runs.get_by_execute_idempotency(
-            command.household_id,
-            command.idempotency_key,
-        )
-        if existing is not None:
-            return _run_view(existing)
-        if (
-            command.revision_id is None
-            or command.expected_revision is None
-            or command.content_hash is None
-        ):
-            raise AgentLifecycleError("agent_plan_approval_required")
-        revision = await self._require_revision(
-            command.household_id,
-            command.plan_id,
-            command.revision_id,
-        )
-        revision = await self._expire_if_due(revision)
-        if revision.state == "expired":
-            await self._session.commit()
-            raise AgentLifecycleError("agent_plan_expired")
-        if revision.state == "draft":
-            raise AgentLifecycleError("agent_plan_incomplete")
-        if revision.state == "consumed":
-            raise AgentLifecycleError("agent_plan_consumed")
-        if revision.state != "awaiting_approval":
-            raise AgentLifecycleError("agent_plan_stale")
-        if (
-            revision.revision_number != command.expected_revision
-            or revision.content_hash != command.content_hash
-        ):
-            raise AgentLifecycleError("agent_plan_stale")
+        async with self._owned_transaction():
+            existing = await self._runs.get_by_execute_idempotency(
+                command.household_id,
+                command.idempotency_key,
+            )
+            if existing is not None:
+                return _bound_idempotent_run(existing, command)
+            if (
+                command.revision_id is None
+                or command.expected_revision is None
+                or command.content_hash is None
+            ):
+                raise AgentLifecycleError("agent_plan_approval_required")
+            revision = await self._require_revision(
+                command.household_id,
+                command.plan_id,
+                command.revision_id,
+            )
+            existing = await self._runs.get_by_execute_idempotency(
+                command.household_id,
+                command.idempotency_key,
+            )
+            if existing is not None:
+                return _bound_idempotent_run(existing, command)
+            revision = await self._expire_if_due(revision)
+            if revision.state == "expired":
+                raise AgentLifecycleError("agent_plan_expired")
+            if revision.state == "draft":
+                raise AgentLifecycleError("agent_plan_incomplete")
+            if revision.state == "consumed":
+                raise AgentLifecycleError("agent_plan_consumed")
+            if revision.state != "awaiting_approval":
+                raise AgentLifecycleError("agent_plan_stale")
+            if (
+                revision.revision_number != command.expected_revision
+                or revision.content_hash != command.content_hash
+            ):
+                raise AgentLifecycleError("agent_plan_stale")
 
-        budget = _approved_budget(revision)
-        strategies = _stored_strategies(revision)
-        warning_versions: dict[str, str] = {}
-        if RouteStrategy.HIDDEN_CITY.value in strategies:
-            if command.hidden_city_warning_version != HIDDEN_CITY_WARNING_VERSION:
-                raise AgentLifecycleError("agent_hidden_city_ack_required")
-            warning_versions[RouteStrategy.HIDDEN_CITY.value] = HIDDEN_CITY_WARNING_VERSION
+            budget = _approved_budget(revision)
+            strategies = _stored_strategies(revision)
+            warning_versions: dict[str, str] = {}
+            if RouteStrategy.HIDDEN_CITY.value in strategies:
+                if command.hidden_city_warning_version != HIDDEN_CITY_WARNING_VERSION:
+                    raise AgentLifecycleError("agent_hidden_city_ack_required")
+                warning_versions[RouteStrategy.HIDDEN_CITY.value] = HIDDEN_CITY_WARNING_VERSION
 
-        approved_at = self._now()
-        deadline_seconds = revision.estimated_deadline_seconds
-        assert deadline_seconds is not None
-        approval = NewAgentPlanApproval(
-            id=uuid4(),
-            household_id=command.household_id,
-            revision_id=revision.id,
-            approved_by_user_id=command.user_id,
-            approved_at=approved_at,
-            expires_at=revision.expires_at,
-            snapshot=AgentPlanApprovalSnapshot(
-                revision_content_hash=revision.content_hash,
-                approved_by_session_id=command.approved_by_session_id,
-                approved_budget=budget,
-                approved_strategies=strategies,
-                risk_warning_versions=warning_versions,
-            ),
-        )
-        run = NewAgentPlanRun(
-            id=uuid4(),
-            execute_idempotency_key=command.idempotency_key,
-            created_at=approved_at,
-            deadline_at=approved_at + timedelta(seconds=deadline_seconds),
-        )
-        try:
-            stored = await self._runs.approve_and_execute(approval=approval, run=run)
-            await self._session.commit()
-        except AgentPlanConflict as error:
-            raise _execution_error(error, revision.state) from error
-        except AgentPlanNotFound as error:
-            raise AgentLifecycleError("agent_plan_not_found") from error
-        return _run_view(stored)
+            approved_at = self._now()
+            deadline_seconds = revision.estimated_deadline_seconds
+            assert deadline_seconds is not None
+            approval = NewAgentPlanApproval(
+                id=uuid4(),
+                household_id=command.household_id,
+                revision_id=revision.id,
+                approved_by_user_id=command.user_id,
+                approved_at=approved_at,
+                expires_at=revision.expires_at,
+                snapshot=AgentPlanApprovalSnapshot(
+                    revision_content_hash=revision.content_hash,
+                    approved_by_session_id=command.approved_by_session_id,
+                    approved_budget=budget,
+                    approved_strategies=strategies,
+                    risk_warning_versions=warning_versions,
+                ),
+            )
+            run = NewAgentPlanRun(
+                id=uuid4(),
+                execute_idempotency_key=command.idempotency_key,
+                created_at=approved_at,
+                deadline_at=approved_at + timedelta(seconds=deadline_seconds),
+            )
+            try:
+                stored = await self._runs.approve_and_execute(approval=approval, run=run)
+            except AgentPlanConflict as error:
+                raise _execution_error(error, revision.state) from error
+            except AgentPlanNotFound as error:
+                raise AgentLifecycleError("agent_plan_not_found") from error
+            return _bound_idempotent_run(stored, command)
 
     async def get_plan(self, household_id: UUID, plan_id: UUID) -> PlanView:
-        plan = await self._plans.get_plan(household_id, plan_id)
-        if plan is None:
-            raise AgentLifecycleError("agent_plan_not_found")
-        revisions = await self._plans.list_revisions(household_id, plan_id)
-        if not revisions:
-            raise AgentLifecycleError("agent_plan_not_found")
-        latest = await self._expire_if_due(revisions[-1])
-        if latest is not revisions[-1]:
-            await self._session.commit()
+        async with self._owned_transaction():
+            plan = await self._plans.get_plan(household_id, plan_id)
+            if plan is None:
+                raise AgentLifecycleError("agent_plan_not_found")
+            revisions = await self._plans.list_revisions(household_id, plan_id)
+            if not revisions:
+                raise AgentLifecycleError("agent_plan_not_found")
+            latest = await self._expire_if_due(revisions[-1])
         return _plan_view(latest)
 
     async def list_runs(self, household_id: UUID, plan_id: UUID) -> tuple[RunView, ...]:
@@ -392,23 +404,23 @@ class AgentLifecycleService:
         return _run_view(run)
 
     async def cancel_run(self, command: CancelAgentRun) -> RunView:
-        run = await self._runs.get_run(command.household_id, command.run_id)
-        if run is None or run.plan_id != command.plan_id:
-            raise AgentLifecycleError("agent_plan_not_found")
-        if run.status == "cancel_requested":
-            return _run_view(run)
-        if run.status not in {"queued", "running"}:
-            raise AgentLifecycleError("agent_run_cancelled")
-        try:
-            stored = await self._runs.set_status(
-                household_id=command.household_id,
-                run_id=command.run_id,
-                status="cancel_requested",
-                changed_at=self._now(),
-            )
-            await self._session.commit()
-        except AgentPlanError as error:
-            raise _lifecycle_error(error) from error
+        async with self._owned_transaction():
+            run = await self._runs.get_run(command.household_id, command.run_id)
+            if run is None or run.plan_id != command.plan_id:
+                raise AgentLifecycleError("agent_plan_not_found")
+            if run.status == "cancel_requested":
+                return _run_view(run)
+            if run.status not in {"queued", "running"}:
+                raise AgentLifecycleError("agent_run_cancelled")
+            try:
+                stored = await self._runs.set_status(
+                    household_id=command.household_id,
+                    run_id=command.run_id,
+                    status="cancel_requested",
+                    changed_at=self._now(),
+                )
+            except AgentPlanError as error:
+                raise _lifecycle_error(error) from error
         return _run_view(stored)
 
     async def get_run_results(
@@ -442,7 +454,9 @@ class AgentLifecycleService:
         edits: Mapping[str, object],
         coverage: CoverageMode,
     ) -> ProposedPlanRevision:
-        selections = _parser_selections(parsed)
+        selections = (
+            _parser_selections(parsed) if text is None else _independent_parser_selections(parsed)
+        )
         selections.update(edits)
         rebuilt = self._parser.parse(
             text if text is not None else _route_text(parsed),
@@ -450,6 +464,13 @@ class AgentLifecycleService:
             selections,
         )
         return await self._builder.build(rebuilt, coverage)
+
+    @asynccontextmanager
+    async def _owned_transaction(self) -> AsyncIterator[None]:
+        if self._session.in_transaction():
+            raise AgentLifecycleError("agent_sqlite_nested_transaction_unsupported")
+        async with self._session.begin():
+            yield
 
     async def _require_plan(self, household_id: UUID, plan_id: UUID) -> AgentPlanRecord:
         plan = await self._plans.get_plan(household_id, plan_id)
@@ -496,13 +517,14 @@ class AgentLifecycleService:
 def _new_revision(
     proposed: ProposedPlanRevision,
     *,
+    approval_generation: int,
     clone_idempotency_key: str | None = None,
 ) -> NewAgentPlanRevision:
     estimate = proposed.estimate
     return NewAgentPlanRevision(
         id=uuid4(),
         state=proposed.status.value,
-        plan=_plan_payload(proposed),
+        plan=_plan_payload(proposed, approval_generation=approval_generation),
         scope_snapshot=_scope_payload(proposed),
         capability_snapshot=_capability_payload(proposed),
         cost_model_snapshot=_cost_model_payload(proposed),
@@ -519,9 +541,17 @@ def _new_revision(
     )
 
 
-def _plan_payload(proposed: ProposedPlanRevision) -> dict[str, object]:
+def _plan_payload(
+    proposed: ProposedPlanRevision,
+    *,
+    approval_generation: int,
+) -> dict[str, object]:
     return {
         "coverage": proposed.coverage.value,
+        "approval": {
+            "generation": approval_generation,
+            "expires_at": proposed.expires_at.isoformat(),
+        },
         "intent": _intent_payload(proposed.parsed_intent),
         "clarifications": [
             _clarification_payload(clarification) for clarification in proposed.clarifications
@@ -709,6 +739,7 @@ def _estimate_view(revision: AgentPlanRevisionRecord) -> EstimateView | None:
 
 
 def _run_view(run: AgentPlanRunRecord) -> RunView:
+    public_error_code, public_message = _public_run_error(run.error_code)
     return RunView(
         run_id=run.id,
         plan_id=run.plan_id,
@@ -719,9 +750,28 @@ def _run_view(run: AgentPlanRunRecord) -> RunView:
         started_at=run.started_at,
         cancel_requested_at=run.cancel_requested_at,
         finished_at=run.finished_at,
-        error_code=run.error_code,
-        error_message=run.error_message,
+        error_code=public_error_code,
+        public_message=public_message,
     )
+
+
+def _public_run_error(error_code: str | None) -> tuple[str | None, str | None]:
+    if error_code is None:
+        return None, None
+    if error_code in _PUBLIC_RUN_ERRORS:
+        return error_code, _PUBLIC_RUN_ERRORS[error_code]
+    return "agent_run_failed", None
+
+
+def _bound_idempotent_run(
+    run: AgentPlanRunRecord,
+    command: ExecuteAgentPlan,
+) -> RunView:
+    if command.revision_id is None or (
+        run.plan_id != command.plan_id or run.revision_id != command.revision_id
+    ):
+        raise AgentLifecycleError("agent_run_idempotency_conflict")
+    return _run_view(run)
 
 
 def _parsed_intent(revision: AgentPlanRevisionRecord) -> ParsedIntent:
@@ -853,6 +903,16 @@ def _parser_selections(parsed: ParsedIntent) -> dict[str, object]:
         if return_date is not None:
             values["return_date"] = return_date.isoformat()
     return values
+
+
+def _independent_parser_selections(parsed: ParsedIntent) -> dict[str, object]:
+    return {
+        "adults": parsed.adults,
+        "children": parsed.children,
+        "infants": parsed.infants,
+        "currency": parsed.currency,
+        "requested_strategies": [strategy.value for strategy in parsed.requested_strategies],
+    }
 
 
 def _route_text(parsed: ParsedIntent) -> str:

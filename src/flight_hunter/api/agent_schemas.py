@@ -1,20 +1,57 @@
 from __future__ import annotations
 
+from datetime import date as Date
 from datetime import datetime
+from typing import Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from flight_hunter.agent.presets import AgentPresetId
 from flight_hunter.application.agent_lifecycle import PlanView, RunResultsView, RunView
 from flight_hunter.application.agent_scope import CoverageMode
+from flight_hunter.domain.agent_search import DateMode, RouteStrategy, TripShape
+
+
+class AgentLegSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    origin: str = Field(min_length=1, max_length=200)
+    destination: str = Field(min_length=1, max_length=200)
+    date: Date | None = None
+
+
+class AgentPlanSelections(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    origin: str | None = Field(default=None, min_length=1, max_length=200)
+    destination: str | None = Field(default=None, min_length=1, max_length=200)
+    legs: list[AgentLegSelection] | None = Field(default=None, min_length=1, max_length=8)
+    date_mode: DateMode | None = None
+    departure_date: Date | None = None
+    date_start: Date | None = None
+    date_end: Date | None = None
+    flex_days: StrictInt | None = Field(default=None, ge=1, le=30)
+    return_date: Date | None = None
+    trip_shape: TripShape | None = None
+    adults: StrictInt | None = Field(default=None, ge=1, le=9)
+    children: StrictInt | None = Field(default=None, ge=0, le=9)
+    infants: StrictInt | None = Field(default=None, ge=0, le=9)
+    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    requested_strategies: list[RouteStrategy] | None = Field(default=None, max_length=5)
+
+    def to_parser_mapping(self) -> dict[str, object]:
+        return cast(
+            dict[str, object],
+            self.model_dump(mode="json", exclude_none=True),
+        )
 
 
 class CreateAgentPlanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    text: str = ""
-    selections: dict[str, object] = Field(default_factory=dict)
+    text: str = Field(default="", max_length=2_000)
+    selections: AgentPlanSelections = Field(default_factory=AgentPlanSelections)
     coverage: CoverageMode = CoverageMode.QUICK
     preset_id: AgentPresetId | None = None
 
@@ -24,8 +61,8 @@ class EditAgentPlanRequest(BaseModel):
 
     source_revision_id: UUID
     expected_revision: int = Field(ge=1)
-    text: str | None = None
-    selections: dict[str, object] = Field(default_factory=dict)
+    text: str | None = Field(default=None, max_length=2_000)
+    selections: AgentPlanSelections = Field(default_factory=AgentPlanSelections)
     coverage: CoverageMode | None = None
     preset_id: AgentPresetId | None = None
 
@@ -35,7 +72,7 @@ class CloneAgentPlanRequest(BaseModel):
 
     source_revision_id: UUID
     expected_revision: int = Field(ge=1)
-    selections: dict[str, object] = Field(default_factory=dict)
+    selections: AgentPlanSelections = Field(default_factory=AgentPlanSelections)
     coverage: CoverageMode | None = None
 
 
@@ -120,7 +157,7 @@ class AgentRunResponse(BaseModel):
     cancel_requested_at: datetime | None
     finished_at: datetime | None
     error_code: str | None
-    error_message: str | None
+    public_message: str | None
 
     @classmethod
     def from_view(cls, view: RunView) -> AgentRunResponse:
@@ -133,9 +170,8 @@ class AgentRunListResponse(BaseModel):
 
 class AgentRunResultsResponse(BaseModel):
     run_id: UUID
-    state: str
+    state: Literal["not_ready"]
     evidence_available: bool
-    items: list[object]
 
     @classmethod
     def from_view(cls, view: RunResultsView) -> AgentRunResultsResponse:
@@ -143,5 +179,4 @@ class AgentRunResultsResponse(BaseModel):
             run_id=view.run_id,
             state=view.state,
             evidence_available=view.evidence_available,
-            items=list(view.items),
         )

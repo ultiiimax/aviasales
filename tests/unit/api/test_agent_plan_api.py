@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Protocol
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from flight_hunter.api.agent_routes import ERROR_STATUS, _status_for_error
+from flight_hunter.persistence.agent_repositories import (
+    AgentPlanRepository,
+    AgentRunRepository,
+)
 from flight_hunter.persistence.models import agent_search_plan_revisions_table
 
 
@@ -88,6 +95,44 @@ async def test_patch_creates_an_immutable_successor_and_get_returns_latest(
     assert fetched.status_code == 200
     assert fetched.json()["revision_id"] == patched.json()["revision_id"]
     assert agent_api_harness.provider.calls == 0
+
+
+@pytest.mark.anyio
+async def test_patch_new_text_replaces_old_text_derived_route_and_date(
+    agent_api_harness: _Harness,
+) -> None:
+    first = _create_plan(agent_api_harness).json()
+    patched = agent_api_harness.client.patch(
+        f"/api/v1/agent/search-plans/{first['plan_id']}",
+        headers=agent_api_harness.auth_headers,
+        json={
+            "source_revision_id": first["revision_id"],
+            "expected_revision": first["revision"],
+            "text": "SVO → JFK 2026-10-20",
+        },
+    )
+    assert patched.status_code == 200
+
+    async with agent_api_harness.session_factory() as session:
+        repository = AgentPlanRepository(session)
+        old = await repository.get_revision(
+            UUID(agent_api_harness.household_id),
+            UUID(first["revision_id"]),
+        )
+        new = await repository.get_revision(
+            UUID(agent_api_harness.household_id),
+            UUID(patched.json()["revision_id"]),
+        )
+
+    assert old is not None and new is not None
+    old_intent = json.loads(old.plan_json)["intent"]
+    new_intent = json.loads(new.plan_json)["intent"]
+    assert old_intent["origin_text"] == "LED"
+    assert old_intent["destination_text"] == "CDG"
+    assert old_intent["legs"][0]["date_constraint"]["start_date"] == "2026-09-10"
+    assert new_intent["origin_text"] == "SVO"
+    assert new_intent["destination_text"] == "JFK"
+    assert new_intent["legs"][0]["date_constraint"]["start_date"] == "2026-10-20"
 
 
 @pytest.mark.anyio
@@ -274,6 +319,20 @@ async def test_execute_and_terminal_clone_retries_return_original_resources(
 
 
 @pytest.mark.anyio
+async def test_execute_idempotency_key_cannot_cross_plan_or_revision_binding(
+    agent_api_harness: _Harness,
+) -> None:
+    first = _create_plan(agent_api_harness).json()
+    second = _create_plan(agent_api_harness).json()
+    accepted = _execute(agent_api_harness, first, "household-shared-key")
+    conflict = _execute(agent_api_harness, second, "household-shared-key")
+
+    assert accepted.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "agent_run_idempotency_conflict"
+
+
+@pytest.mark.anyio
 async def test_clone_requires_idempotency_key(agent_api_harness: _Harness) -> None:
     plan = _create_plan(agent_api_harness).json()
 
@@ -328,8 +387,123 @@ async def test_cancel_list_latest_and_results_use_explicit_honest_states(
         "run_id": first_run["run_id"],
         "state": "not_ready",
         "evidence_available": False,
-        "items": [],
     }
+
+
+@pytest.mark.anyio
+async def test_run_endpoints_never_expose_internal_error_diagnostics(
+    agent_api_harness: _Harness,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    plan = _create_plan(agent_api_harness).json()
+    run = _execute(agent_api_harness, plan, "secret-safe-run").json()
+    secret_canaries = (
+        "provider_ref=secret-provider-ref",
+        "continuation=secret-continuation",
+        "X-Signature=secret-signature",
+        "token=secret-token",
+    )
+    async with agent_api_harness.session_factory() as session:
+        repository = AgentRunRepository(session)
+        stored = await repository.get_run(
+            UUID(agent_api_harness.household_id),
+            UUID(run["run_id"]),
+        )
+        assert stored is not None
+        started = stored.created_at + (datetime.resolution * 1_000_000)
+        await repository.set_status(
+            household_id=stored.household_id,
+            run_id=stored.id,
+            status="running",
+            changed_at=started,
+        )
+        await repository.set_status(
+            household_id=stored.household_id,
+            run_id=stored.id,
+            status="failed",
+            changed_at=started + (datetime.resolution * 1_000_000),
+            error_code="provider_ref_secret_failure",
+            error_message=" ".join(secret_canaries),
+        )
+        await session.commit()
+
+    responses = (
+        agent_api_harness.client.get(
+            f"/api/v1/agent/search-plans/{plan['plan_id']}/runs/{run['run_id']}",
+            headers=agent_api_harness.auth_headers,
+        ),
+        agent_api_harness.client.get(
+            f"/api/v1/agent/search-plans/{plan['plan_id']}/runs",
+            headers=agent_api_harness.auth_headers,
+        ),
+        agent_api_harness.client.get(
+            f"/api/v1/agent/search-plans/{plan['plan_id']}/runs/latest",
+            headers=agent_api_harness.auth_headers,
+        ),
+    )
+    output = " ".join(response.text for response in responses)
+
+    assert all(response.status_code == 200 for response in responses)
+    assert all("error_message" not in response.text for response in responses)
+    assert all("public_message" in response.text for response in responses)
+    assert all(
+        response.json().get("error_code") == "agent_run_failed" for response in responses[:1]
+    )
+    assert not any(secret in output or secret in caplog.text for secret in secret_canaries)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "selections",
+    (
+        {"adults": "2"},
+        {"legs": "LED-CDG"},
+        {"unexpected": "field"},
+    ),
+)
+async def test_agent_selection_validation_returns_stable_422(
+    agent_api_harness: _Harness,
+    selections: dict[str, object],
+) -> None:
+    response = agent_api_harness.client.post(
+        "/api/v1/agent/search-plans",
+        headers=agent_api_harness.auth_headers,
+        json={"text": "LED → CDG", "selections": selections},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "agent_plan_invalid_input",
+        "message": "agent plan input is invalid",
+    }
+
+
+@pytest.mark.anyio
+async def test_agent_validation_handler_preserves_unrelated_fastapi_errors(
+    agent_api_harness: _Harness,
+) -> None:
+    response = agent_api_harness.client.post("/api/v1/auth/accept-invitation", json={})
+
+    assert response.status_code == 422
+    assert "detail" in response.json()
+    assert "code" not in response.json()
+
+
+def test_agent_error_status_mapping_is_exhaustive_and_unknown_is_unhandled() -> None:
+    expected = {
+        "auth_context_missing": 401,
+        "idempotency_key_required": 400,
+        "agent_plan_invalid_input": 422,
+        "agent_plan_not_found": 404,
+        "agent_run_not_found": 404,
+        "agent_sqlite_nested_transaction_unsupported": 409,
+        "agent_run_idempotency_conflict": 409,
+        "agent_run_transition_conflict": 409,
+        "agent_run_cancelled": 409,
+    }
+    assert expected.items() <= ERROR_STATUS.items()
+    with pytest.raises(KeyError):
+        _status_for_error("unknown_internal_lifecycle_code")
 
 
 @pytest.mark.anyio
@@ -351,6 +525,11 @@ async def test_openapi_exposes_the_complete_agent_plan_lifecycle_surface(
     }
     for path, methods in expected_methods.items():
         assert methods <= set(paths[path])
+    result_schema = agent_api_harness.client.get("/openapi.json").json()["components"]["schemas"][
+        "AgentRunResultsResponse"
+    ]
+    assert result_schema["properties"]["state"]["const"] == "not_ready"
+    assert "items" not in result_schema["properties"]
 
 
 def _create_plan(
