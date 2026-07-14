@@ -28,8 +28,8 @@ This file is maintained by coding agents. Mark a slice done only after implement
 - Progress:
   - [x] Add provider-neutral intent, evidence and plan contracts.
   - [x] Freeze generic geographic scopes with commercial provenance.
-  - [ ] Parse typed intents, freeze provider capabilities and estimate bounded plans
-    (final frozen-surface budget fix implemented; acceptance pending).
+  - [x] Parse typed intents, freeze provider capabilities and estimate bounded plans
+    (accepted by independent review at `655a069`).
   - [ ] Persist immutable revisions, approvals, runs and operation ledger.
   - [ ] Expose the plan lifecycle and approval-gated web flow.
   - [ ] Execute resumable Aviasales calendar/exact work in the worker.
@@ -61,8 +61,8 @@ pass. Focused mypy and global Ruff format/check pass. Rolling 90-day bounds use
 the injected plan-builder clock; quick 60, full 240 and absolute 1,000 boundaries
 are covered.
 
-Task 3 review fix cycle on 2026-07-14: implementation is complete but remains
-pending review acceptance. Planning is now async and cannot reach approval until
+Task 3 review fix cycle on 2026-07-14 established that planning is async and
+cannot reach approval until
 every finite leg scope is frozen from the local airport catalog or an `anywhere`
 leg has a bounded immutable discovery rule. FULL estimates use the untruncated
 frozen Cartesian surface; overlay/date dependencies fail as typed
@@ -82,7 +82,8 @@ behavior is unchanged. Final gates: 20 planning tests, 91 focused Task 3/scope
 tests and 30 Task 1/2 domain/scope regressions pass; mypy checks 110 source files
 and global Ruff checks 267 files. The immediately preceding full-unit gate had
 619 passes; the final typed-reason follow-up was limited to the focused gates by
-coordinator direction.
+coordinator direction. Independent final review accepted Task 3 with no
+Critical, Important or Minor findings at `655a069`.
 
 Implementation status on 2026-07-13: the user-approved design and reviewed
 implementation plan are complete. Production implementation now includes the
