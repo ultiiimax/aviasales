@@ -30,7 +30,8 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [x] Freeze generic geographic scopes with commercial provenance.
   - [x] Parse typed intents, freeze provider capabilities and estimate bounded plans
     (accepted by independent review at `655a069`).
-  - [ ] Persist immutable revisions, approvals, runs and operation ledger.
+  - [x] Persist immutable revisions, approvals and runs.
+  - [ ] Persist the durable operation ledger.
   - [ ] Expose the plan lifecycle and approval-gated web flow.
   - [ ] Execute resumable Aviasales calendar/exact work in the worker.
   - [ ] Compose and rank split, self-transfer, open-jaw and multi-city routes.
@@ -85,7 +86,7 @@ and global Ruff checks 267 files. The immediately preceding full-unit gate had
 coordinator direction. Independent final review accepted Task 3 with no
 Critical, Important or Minor findings at `655a069`.
 
-Task 4 hardening is complete and pending independent re-review. Forward-only
+Task 4 hardening is complete and accepted by independent review. Forward-only
 migration 0023 and matching Core metadata persist household-scoped immutable
 plan revisions, approval snapshots, and runs without raw prompts. The rejected
 review findings are covered by immutable canonical approval evidence, UTC-only
@@ -103,7 +104,8 @@ and autobegin retain caller-owned rollback. PostgreSQL does not run this SQLite
 boundary SQL. No repository commits, rolls back, or retries the caller's
 transaction. Fresh focused, migration, persistence, mypy, Ruff, unit, and
 integration gates pass; the localized cancellation follow-up adds an 81-test
-focused green gate and remains pending final independent re-review.
+focused green gate. Final independent review accepted Task 4 at `253447e` with
+no Critical, Important or Minor findings.
 
 Implementation status on 2026-07-13: the user-approved design and reviewed
 implementation plan are complete. Production implementation now includes the
