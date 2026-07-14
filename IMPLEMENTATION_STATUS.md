@@ -31,10 +31,11 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [x] Parse typed intents, freeze provider capabilities and estimate bounded plans
     (accepted by independent review at `655a069`).
   - [x] Persist immutable revisions, approvals and runs.
-  - [x] Expose the bearer-authenticated plan lifecycle API (Task 5 boundary
-    hardening implemented test-first; pending final independent review).
+  - [x] Expose the bearer-authenticated plan lifecycle API (Task 5 accepted by
+    independent review at `2bf8dbe`, with no Critical/Important/Minor findings).
+  - [ ] Make free text, all seven presets and the approval-gated web plan card
+    use the same builder without provider calls before explicit execution.
   - [ ] Persist the durable operation ledger.
-  - [ ] Expose the approval-gated web flow.
   - [ ] Execute resumable Aviasales calendar/exact work in the worker.
   - [ ] Compose and rank split, self-transfer, open-jaw and multi-city routes.
   - [ ] Isolate hidden-city research behind a second acknowledgement.
@@ -87,6 +88,15 @@ and global Ruff checks 267 files. The immediately preceding full-unit gate had
 619 passes; the final typed-reason follow-up was limited to the focused gates by
 coordinator direction. Independent final review accepted Task 3 with no
 Critical, Important or Minor findings at `655a069`.
+
+Task 5 final boundary fix on 2026-07-14 restricts stable invalid-input mapping
+to deterministic user input, leaves internal overlay/builder/repository errors
+visible to the process boundary after rollback, and closes every service-owned
+read transaction on success or failure. Final gates: 47 focused lifecycle/API/
+auth tests, 106 parser/repository regressions, all 736 unit tests and 4 separate
+integration tests pass; global format, Ruff and mypy are clean. Independent
+review additionally ran 146 targeted tests and accepted the complete
+`7775f50..2bf8dbe` Task 5 range with no Critical, Important or Minor findings.
 
 Task 4 hardening is complete and accepted by independent review. Forward-only
 migration 0023 and matching Core metadata persist household-scoped immutable

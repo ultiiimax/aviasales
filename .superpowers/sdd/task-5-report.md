@@ -149,3 +149,6 @@ Fresh verification:
 
 The three unit warnings are one existing aiosqlite shutdown race and two lxml
 deprecations. No ledger, worker, provider execution or Task 6 code changed.
+
+Independent final review ran 146 targeted Task 3/4/5 tests and accepted the
+complete Task 5 range with no Critical, Important or Minor findings.
