@@ -29,6 +29,11 @@ from flight_hunter.agent.chat import (
 )
 from flight_hunter.agent.openai_responses import OpenAIResponsesAgentAdapter
 from flight_hunter.agent.presets import AgentPlan, AgentPlanBuilder, AgentPlanStep, AgentPreset
+from flight_hunter.api.agent_routes import (
+    AgentRouteError,
+    agent_route_error_handler,
+    create_agent_router,
+)
 from flight_hunter.api.web import (
     render_index_html,
     render_pwa_icon_svg,
@@ -1204,6 +1209,7 @@ def create_app(
     agent_intent_adapter: AgentIntentAdapter | None = None,
     deal_discovery_service: DealDiscoveryService | None = None,
     provider_instances: dict[str, AviasalesSearchAdapter] | None = None,
+    agent_provider_gateway: object | None = None,
 ) -> FastAPI:
     load_env_file()
     settings = settings or AppSettings.from_env()
@@ -1233,6 +1239,13 @@ def create_app(
         secret_token=settings.telegram_webhook_secret,
     )
     session_factory = watch_session_factory or _watch_session_factory(settings.database_url)
+    app.add_exception_handler(AgentRouteError, agent_route_error_handler)
+    app.include_router(
+        create_agent_router(
+            session_factory=session_factory,
+            provider_gateway=agent_provider_gateway,
+        )
+    )
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:

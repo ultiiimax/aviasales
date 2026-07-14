@@ -31,8 +31,10 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [x] Parse typed intents, freeze provider capabilities and estimate bounded plans
     (accepted by independent review at `655a069`).
   - [x] Persist immutable revisions, approvals and runs.
+  - [x] Expose the bearer-authenticated plan lifecycle API (Task 5 implemented
+    test-first; pending independent review).
   - [ ] Persist the durable operation ledger.
-  - [ ] Expose the plan lifecycle and approval-gated web flow.
+  - [ ] Expose the approval-gated web flow.
   - [ ] Execute resumable Aviasales calendar/exact work in the worker.
   - [ ] Compose and rank split, self-transfer, open-jaw and multi-city routes.
   - [ ] Isolate hidden-city research behind a second acknowledgement.

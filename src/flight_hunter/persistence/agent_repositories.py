@@ -345,6 +345,23 @@ class AgentPlanRepository:
         )
         return _revision_record(row) if row is not None else None
 
+    async def get_revision_for_update(
+        self,
+        household_id: UUID,
+        plan_id: UUID,
+        revision_id: UUID,
+    ) -> AgentPlanRevisionRecord | None:
+        statement = (
+            select(agent_search_plan_revisions_table)
+            .where(agent_search_plan_revisions_table.c.id == str(revision_id))
+            .where(agent_search_plan_revisions_table.c.plan_id == str(plan_id))
+            .where(agent_search_plan_revisions_table.c.household_id == str(household_id))
+        )
+        if self._session.get_bind().dialect.name != "sqlite":
+            statement = statement.with_for_update()
+        row = (await self._session.execute(statement)).mappings().one_or_none()
+        return _revision_record(row) if row is not None else None
+
     async def list_revisions(
         self,
         household_id: UUID,
@@ -454,6 +471,131 @@ class AgentPlanRepository:
             raise RuntimeError("created successor revision is missing")
         return stored
 
+    async def expire_revision(
+        self,
+        *,
+        household_id: UUID,
+        plan_id: UUID,
+        revision_id: UUID,
+        expired_at: datetime,
+    ) -> AgentPlanRevisionRecord:
+        _require_aware(expired_at, "expired_at")
+        normalized_expired_at = _utc_datetime(expired_at)
+        result = await self._session.execute(
+            update(agent_search_plan_revisions_table)
+            .where(agent_search_plan_revisions_table.c.id == str(revision_id))
+            .where(agent_search_plan_revisions_table.c.plan_id == str(plan_id))
+            .where(agent_search_plan_revisions_table.c.household_id == str(household_id))
+            .where(agent_search_plan_revisions_table.c.state == "awaiting_approval")
+            .where(agent_search_plan_revisions_table.c.expires_at <= normalized_expired_at)
+            .where(agent_search_plan_revisions_table.c.superseded_at.is_(None))
+            .where(agent_search_plan_revisions_table.c.consumed_at.is_(None))
+            .values(state="expired")
+        )
+        if cast(CursorResult[Any], result).rowcount != 1:
+            stored = await self.get_revision_for_update(
+                household_id,
+                plan_id,
+                revision_id,
+            )
+            if stored is None:
+                raise AgentPlanNotFound("agent_plan_not_found")
+            return stored
+        stored = await self.get_revision_for_update(household_id, plan_id, revision_id)
+        if stored is None:
+            raise RuntimeError("expired agent plan revision is missing")
+        return stored
+
+    async def create_clone(
+        self,
+        *,
+        household_id: UUID,
+        plan_id: UUID,
+        source_revision_id: UUID,
+        revision: NewAgentPlanRevision,
+    ) -> AgentPlanRevisionRecord:
+        _validate_new_revision(revision)
+        if revision.clone_idempotency_key is None:
+            raise ValueError("clone revision requires an idempotency key")
+        await _acquire_sqlite_write_transaction(self._session)
+        existing = await self._find_clone(household_id, revision.clone_idempotency_key)
+        if existing is not None:
+            return existing
+
+        try:
+            async with self._session.begin_nested():
+                source_statement = (
+                    select(agent_search_plan_revisions_table)
+                    .where(agent_search_plan_revisions_table.c.id == str(source_revision_id))
+                    .where(agent_search_plan_revisions_table.c.plan_id == str(plan_id))
+                    .where(agent_search_plan_revisions_table.c.household_id == str(household_id))
+                )
+                latest_statement = (
+                    select(agent_search_plan_revisions_table)
+                    .where(agent_search_plan_revisions_table.c.plan_id == str(plan_id))
+                    .where(agent_search_plan_revisions_table.c.household_id == str(household_id))
+                    .order_by(agent_search_plan_revisions_table.c.revision_number.desc())
+                    .limit(1)
+                )
+                if self._session.get_bind().dialect.name != "sqlite":
+                    source_statement = source_statement.with_for_update()
+                    latest_statement = latest_statement.with_for_update()
+                source_row = (
+                    (await self._session.execute(source_statement)).mappings().one_or_none()
+                )
+                if source_row is None:
+                    raise AgentPlanNotFound("agent_plan_not_found")
+                if str(source_row["state"]) not in {"consumed", "expired", "superseded"}:
+                    raise AgentPlanConflict("agent_plan_stale")
+
+                latest_row = (await self._session.execute(latest_statement)).mappings().one()
+                await self._session.execute(
+                    update(agent_search_plan_revisions_table)
+                    .where(agent_search_plan_revisions_table.c.plan_id == str(plan_id))
+                    .where(agent_search_plan_revisions_table.c.household_id == str(household_id))
+                    .where(
+                        agent_search_plan_revisions_table.c.state.in_(
+                            ("draft", "awaiting_approval")
+                        )
+                    )
+                    .where(agent_search_plan_revisions_table.c.superseded_at.is_(None))
+                    .values(
+                        state="superseded",
+                        superseded_at=_utc_datetime(revision.created_at),
+                    )
+                )
+                await self._session.execute(
+                    insert(agent_search_plan_revisions_table).values(
+                        **_revision_values(
+                            plan_id=plan_id,
+                            household_id=household_id,
+                            source_revision_id=source_revision_id,
+                            revision_number=int(latest_row["revision_number"]) + 1,
+                            revision=revision,
+                        )
+                    )
+                )
+        except IntegrityError as error:
+            constraint = classify_agent_integrity_constraint(error)
+            if constraint is AgentIntegrityConstraint.CLONE_IDEMPOTENCY:
+                existing = await self._find_clone(
+                    household_id,
+                    revision.clone_idempotency_key,
+                )
+                if existing is not None:
+                    return existing
+            if constraint in {
+                AgentIntegrityConstraint.REVISION_NUMBER,
+                AgentIntegrityConstraint.REVISION_HASH,
+            }:
+                raise AgentPlanConflict("agent_plan_duplicate_revision") from error
+            raise
+
+        stored = await self.get_revision(household_id, revision.id)
+        if stored is None:
+            raise RuntimeError("created cloned revision is missing")
+        return stored
+
     async def _find_clone(
         self,
         household_id: UUID,
@@ -479,6 +621,26 @@ class AgentPlanRepository:
 class AgentRunRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def approve_and_execute(
+        self,
+        *,
+        approval: NewAgentPlanApproval,
+        run: NewAgentPlanRun,
+    ) -> AgentPlanRunRecord:
+        await _acquire_sqlite_write_transaction(self._session)
+        existing = await self._get_by_execute_idempotency(
+            approval.household_id,
+            run.execute_idempotency_key,
+        )
+        if existing is not None:
+            return existing
+        stored_approval = await self.create_approval(approval)
+        return await self.execute(
+            household_id=approval.household_id,
+            approval_id=stored_approval.id,
+            run=run,
+        )
 
     async def create_approval(
         self,
@@ -706,6 +868,16 @@ class AgentRunRepository:
             .one_or_none()
         )
         return _run_record(row) if row is not None else None
+
+    async def get_by_execute_idempotency(
+        self,
+        household_id: UUID,
+        execute_idempotency_key: str,
+    ) -> AgentPlanRunRecord | None:
+        return await self._get_by_execute_idempotency(
+            household_id,
+            execute_idempotency_key,
+        )
 
     async def list_runs(
         self,
