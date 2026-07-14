@@ -89,9 +89,12 @@ async def agent_validation_error_handler(
 ) -> JSONResponse:
     if not isinstance(error, RequestValidationError):
         raise error
-    if request.url.path == "/api/v1/agent/search-plans" or request.url.path.startswith(
-        "/api/v1/agent/search-plans/"
-    ):
+    path = request.url.path
+    if path in {
+        "/api/v1/agent/plan",
+        "/api/v1/agent/chat/turn",
+        "/api/v1/agent/search-plans",
+    } or path.startswith("/api/v1/agent/search-plans/"):
         return JSONResponse(
             status_code=422,
             content={
@@ -343,6 +346,12 @@ def _route_lifecycle_error(error: AgentLifecycleError) -> AgentRouteError:
     if error.code not in ERROR_STATUS:
         raise error
     return AgentRouteError(error.code)
+
+
+def agent_lifecycle_route_error(error: AgentLifecycleError) -> AgentRouteError:
+    """Map only stable public lifecycle errors at compatibility boundaries."""
+
+    return _route_lifecycle_error(error)
 
 
 def _error_message(code: str) -> str:

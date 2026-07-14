@@ -207,7 +207,8 @@ def test_web_agent_plan_javascript_is_approval_gated_reloadable_and_cancellable(
     assert "reloadAgentPlan()" in session_load
     assert "setTimeout" in poll
     assert "Math.min" in poll
-    assert "pollAgentRun(latest, nextDelay), nextDelay" in poll
+    assert "pollAgentRun(latest, nextDelay, sessionGeneration)" in poll
+    assert "nextDelay" in poll
     assert 'status === "queued"' in poll
     assert 'status === "running"' in poll
     assert "/cancel" in cancel
@@ -261,6 +262,66 @@ def test_web_agent_entry_points_auth_render_and_revision_actions_share_plan_card
     assert "requestAgentChat" not in actions
     assert "unhandledrejection" in html
     assert "agent-operation-error" in html
+
+
+def test_web_empty_clarification_action_enters_current_plan_edit_mode() -> None:
+    html = TestClient(create_app()).get("/").text
+    revise = _javascript_function(html, "reviseAgentPlan")
+
+    assert "beginAgentPlanEdit()" in revise
+    assert "return" in revise
+    assert "agentEditMode ? editAgentPlan(prompt) : requestAgentChat(prompt)" in html
+
+
+def test_web_signed_out_state_clears_agent_card_and_invalidates_polling() -> None:
+    html = TestClient(create_app()).get("/").text
+    clear_agent = _javascript_sync_function(html, "clearAgentSessionState")
+    clear_session = _javascript_sync_function(html, "clearSession")
+    signed_out = _javascript_sync_function(html, "renderSignedOutState")
+    refresh = _javascript_function(html, "refreshSessionState")
+    poll = _javascript_function(html, "pollAgentRun")
+
+    assert "agentSessionGeneration += 1" in clear_agent
+    assert "currentAgentPlan = null" in clear_agent
+    assert "currentAgentRun = null" in clear_agent
+    assert "agentEditMode = false" in clear_agent
+    assert 'getElementById("agent-plan-card").hidden = true' in clear_agent
+    for control in ("agent-plan-execute", "agent-plan-full", "agent-plan-edit", "agent-run-cancel"):
+        assert f'getElementById("{control}").disabled = true' in clear_agent
+    for sensitive_region in ("agent-plan-status", "agent-run-progress", "agent-partial-errors"):
+        assert sensitive_region in clear_agent
+    assert "clearAgentSessionState()" in clear_session
+    assert "clearAgentSessionState()" in signed_out
+    assert "renderSignedOutState()" in refresh
+    assert "sessionGeneration !== agentSessionGeneration" in poll
+    assert "!sessionToken()" in poll
+
+
+def test_web_household_agent_actions_ignore_responses_from_old_session_generation() -> None:
+    html = TestClient(create_app()).get("/").text
+    action_names = (
+        "requestAgentChat",
+        "requestAgentPlan",
+        "reviseAgentPlan",
+        "editAgentPlan",
+        "executeAgentPlan",
+        "cloneAgentPlanAsFull",
+        "cancelAgentRun",
+    )
+
+    for name in action_names:
+        action = _javascript_function(html, name)
+        assert "const sessionGeneration = agentSessionGeneration" in action, name
+        assert "agentSessionFetch" in action, name
+        assert "agentSessionIsCurrent(sessionGeneration)" in action, name
+
+
+def test_web_renders_all_seven_agent_presets() -> None:
+    html = TestClient(create_app()).get("/").text
+    load = _javascript_function(html, "loadAgentPresets")
+
+    assert "agentPresets.forEach" in load
+    assert "slice(0, 5)" not in load
 
 
 def test_web_agent_plan_persists_only_versioned_plan_id_for_reload() -> None:

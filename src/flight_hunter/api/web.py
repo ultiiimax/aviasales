@@ -961,6 +961,7 @@ def render_index_html() -> str:
     let currentAgentRun = null;
     let lastAgentPrompt = "";
     let agentEditMode = false;
+    let agentSessionGeneration = 0;
     const sessionTokenKey = "flight_hunter_session_token";
     const agentPlanStorageKey = "flight_hunter_agent_plan_id_v1";
 
@@ -1017,18 +1018,60 @@ def render_index_html() -> str:
     }
 
     function storeSession(session) {
+      clearAgentSessionState();
       window.localStorage.setItem(sessionTokenKey, session.session_token);
       authState.textContent = `Session: ${session.role} · ${session.household_id.slice(0, 8)}`;
       authSignoutButton.disabled = false;
+    }
+
+    function clearAgentSessionState() {
+      agentSessionGeneration += 1;
+      currentAgentPlan = null;
+      currentAgentRun = null;
+      agentEditMode = false;
+      lastAgentPrompt = "";
+      document.getElementById("agent-plan-card").hidden = true;
+      [
+        "agent-plan-status",
+        "agent-plan-revision",
+        "agent-plan-scope",
+        "agent-plan-date-mode",
+        "agent-plan-passengers",
+        "agent-plan-coverage",
+        "agent-plan-strategies",
+        "agent-plan-hidden-city",
+        "agent-plan-estimate",
+        "agent-plan-rpm",
+        "agent-plan-deadline",
+        "agent-plan-source",
+        "agent-plan-expiry",
+        "agent-run-progress",
+        "agent-risky-results-list",
+        "agent-partial-errors"
+      ].forEach((id) => {
+        document.getElementById(id).textContent = "";
+      });
+      document.getElementById("agent-plan-execute").disabled = true;
+      document.getElementById("agent-plan-full").disabled = true;
+      document.getElementById("agent-plan-edit").disabled = true;
+      document.getElementById("agent-run-cancel").disabled = true;
+      document.getElementById("agent-risky-results").hidden = true;
+      document.getElementById("agent-partial-errors").hidden = true;
+      agentActionList.replaceChildren();
+      airportChoiceList.replaceChildren();
+      chatLog.replaceChildren();
+      addMessage("bot", "Войдите, чтобы создавать и просматривать планы.");
     }
 
     function clearSession() {
       window.localStorage.removeItem(sessionTokenKey);
       authState.textContent = "Session: не выполнен вход";
       authSignoutButton.disabled = true;
+      clearAgentSessionState();
     }
 
     function renderSignedOutState() {
+      clearAgentSessionState();
       watchList.innerHTML = '<div class="empty-state">Войдите, чтобы видеть отслеживания.</div>';
       auditList.innerHTML = '<div class="empty-state">Войдите, чтобы видеть аудит.</div>';
       renderSignedOutConfirmationState();
@@ -1055,6 +1098,7 @@ def render_index_html() -> str:
       const token = sessionToken();
       if (!token) {
         clearSession();
+        renderSignedOutState();
         return;
       }
       try {
@@ -1067,6 +1111,7 @@ def render_index_html() -> str:
         authSignoutButton.disabled = false;
       } catch (error) {
         clearSession();
+        renderSignedOutState();
         statusLine.textContent = "session expired";
       }
     }
@@ -2326,7 +2371,7 @@ def render_index_html() -> str:
         agentMode.textContent = "harness";
       }
       presetList.replaceChildren();
-      agentPresets.slice(0, 5).forEach((preset) => {
+      agentPresets.forEach((preset) => {
         const button = document.createElement("button");
         button.className = "chip";
         button.type = "button";
@@ -2623,6 +2668,20 @@ def render_index_html() -> str:
         : agentRunErrorMessage(run.error_code, run.public_message || `Состояние: ${run.status}`);
     }
 
+    function agentSessionIsCurrent(sessionGeneration) {
+      return sessionGeneration === agentSessionGeneration && Boolean(sessionToken());
+    }
+
+    async function agentSessionFetch(url, options, sessionGeneration) {
+      try {
+        const response = await fetch(url, options);
+        return agentSessionIsCurrent(sessionGeneration) ? response : null;
+      } catch (error) {
+        if (!agentSessionIsCurrent(sessionGeneration)) return null;
+        throw error;
+      }
+    }
+
     async function reviseAgentPlan(parameters) {
       if (
         !currentAgentPlan
@@ -2630,22 +2689,35 @@ def render_index_html() -> str:
       ) return;
       const revision = typedAgentAction(parameters);
       if (!revision.coverage && Object.keys(revision.selections).length === 0) {
-        document.querySelector("#assistant-form textarea").focus();
+        beginAgentPlanEdit();
         return;
       }
+      const sessionGeneration = agentSessionGeneration;
+      const plan = currentAgentPlan;
       const body = {
-        source_revision_id: currentAgentPlan.revision_id,
-        expected_revision: currentAgentPlan.revision,
+        source_revision_id: plan.revision_id,
+        expected_revision: plan.revision,
         selections: revision.selections
       };
       if (revision.coverage) body.coverage = revision.coverage;
-      const response = await fetch(agentPlanUrl(currentAgentPlan.plan_id), {
-        method: "PATCH",
-        headers: authHeaders({"Content-Type": "application/json"}),
-        body: JSON.stringify(body)
-      });
-      if (!response.ok) throw new Error(await codedMessage(response));
-      renderAgentPlan(await response.json());
+      const response = await agentSessionFetch(
+        agentPlanUrl(plan.plan_id),
+        {
+          method: "PATCH",
+          headers: authHeaders({"Content-Type": "application/json"}),
+          body: JSON.stringify(body)
+        },
+        sessionGeneration
+      );
+      if (!response) return;
+      if (!response.ok) {
+        const message = await codedMessage(response);
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
+        throw new Error(message);
+      }
+      const revisedPlan = await response.json();
+      if (!agentSessionIsCurrent(sessionGeneration)) return;
+      renderAgentPlan(revisedPlan);
       renderAgentRunPlaceholder("Новая ревизия ждёт явного запуска.");
     }
 
@@ -2654,19 +2726,31 @@ def render_index_html() -> str:
         !currentAgentPlan
         || !["draft", "awaiting_approval"].includes(currentAgentPlan.state)
       ) return;
+      const sessionGeneration = agentSessionGeneration;
+      const currentPlan = currentAgentPlan;
       addMessage("user", prompt);
-      const response = await fetch(agentPlanUrl(currentAgentPlan.plan_id), {
-        method: "PATCH",
-        headers: authHeaders({"Content-Type": "application/json"}),
-        body: JSON.stringify({
-          source_revision_id: currentAgentPlan.revision_id,
-          expected_revision: currentAgentPlan.revision,
-          text: prompt,
-          selections: {}
-        })
-      });
-      if (!response.ok) throw new Error(await codedMessage(response));
+      const response = await agentSessionFetch(
+        agentPlanUrl(currentPlan.plan_id),
+        {
+          method: "PATCH",
+          headers: authHeaders({"Content-Type": "application/json"}),
+          body: JSON.stringify({
+            source_revision_id: currentPlan.revision_id,
+            expected_revision: currentPlan.revision,
+            text: prompt,
+            selections: {}
+          })
+        },
+        sessionGeneration
+      );
+      if (!response) return;
+      if (!response.ok) {
+        const message = await codedMessage(response);
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
+        throw new Error(message);
+      }
       const plan = await response.json();
+      if (!agentSessionIsCurrent(sessionGeneration)) return;
       renderAgentPlan(plan);
       renderAgentRunPlaceholder("Изменённая ревизия ждёт явного запуска.");
       addMessage("bot", `Создана ревизия ${plan.revision}: ${agentPlanStateLabel(plan.state)}.`);
@@ -2679,20 +2763,33 @@ def render_index_html() -> str:
         || !currentAgentPlan.executable
         || currentAgentPlan.summary.hidden_city_enabled === true
       ) return;
-      const response = await fetch(`${agentPlanUrl(currentAgentPlan.plan_id)}/execute`, {
-        method: "POST",
-        headers: authHeaders({
-          "Content-Type": "application/json",
-          "Idempotency-Key": freshIdempotencyKey()
-        }),
-        body: JSON.stringify({
-          revision_id: currentAgentPlan.revision_id,
-          expected_revision: currentAgentPlan.revision,
-          content_hash: currentAgentPlan.content_hash
-        })
-      });
-      if (!response.ok) throw new Error(await codedMessage(response));
-      renderAgentRun(await response.json());
+      const sessionGeneration = agentSessionGeneration;
+      const plan = currentAgentPlan;
+      const response = await agentSessionFetch(
+        `${agentPlanUrl(plan.plan_id)}/execute`,
+        {
+          method: "POST",
+          headers: authHeaders({
+            "Content-Type": "application/json",
+            "Idempotency-Key": freshIdempotencyKey()
+          }),
+          body: JSON.stringify({
+            revision_id: plan.revision_id,
+            expected_revision: plan.revision,
+            content_hash: plan.content_hash
+          })
+        },
+        sessionGeneration
+      );
+      if (!response) return;
+      if (!response.ok) {
+        const message = await codedMessage(response);
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
+        throw new Error(message);
+      }
+      const run = await response.json();
+      if (!agentSessionIsCurrent(sessionGeneration)) return;
+      renderAgentRun(run);
       await reloadAgentPlan();
     }
 
@@ -2702,29 +2799,48 @@ def render_index_html() -> str:
         || !["consumed", "expired", "superseded"].includes(currentAgentPlan.state)
         || currentAgentPlan.coverage !== "quick"
       ) return;
-      const response = await fetch(`${agentPlanUrl(currentAgentPlan.plan_id)}/revisions`, {
-        method: "POST",
-        headers: authHeaders({
-          "Content-Type": "application/json",
-          "Idempotency-Key": freshIdempotencyKey()
-        }),
-        body: JSON.stringify({
-          source_revision_id: currentAgentPlan.revision_id,
-          expected_revision: currentAgentPlan.revision,
-          selections: {},
-          coverage: "full"
-        })
-      });
-      if (!response.ok) throw new Error(await codedMessage(response));
-      renderAgentPlan(await response.json());
+      const sessionGeneration = agentSessionGeneration;
+      const plan = currentAgentPlan;
+      const response = await agentSessionFetch(
+        `${agentPlanUrl(plan.plan_id)}/revisions`,
+        {
+          method: "POST",
+          headers: authHeaders({
+            "Content-Type": "application/json",
+            "Idempotency-Key": freshIdempotencyKey()
+          }),
+          body: JSON.stringify({
+            source_revision_id: plan.revision_id,
+            expected_revision: plan.revision,
+            selections: {},
+            coverage: "full"
+          })
+        },
+        sessionGeneration
+      );
+      if (!response) return;
+      if (!response.ok) {
+        const message = await codedMessage(response);
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
+        throw new Error(message);
+      }
+      const fullPlan = await response.json();
+      if (!agentSessionIsCurrent(sessionGeneration)) return;
+      renderAgentPlan(fullPlan);
       renderAgentRunPlaceholder("Новая full-ревизия ждёт явного запуска.");
     }
 
     async function reloadAgentPlan() {
       if (!sessionToken()) return;
+      const sessionGeneration = agentSessionGeneration;
       const storedPlanId = window.localStorage.getItem(agentPlanStorageKey);
       if (!storedPlanId) return;
-      const response = await fetch(agentPlanUrl(storedPlanId), {headers: authHeaders()});
+      const response = await agentSessionFetch(
+        agentPlanUrl(storedPlanId),
+        {headers: authHeaders()},
+        sessionGeneration
+      );
+      if (!response) return;
       if (response.status === 404) {
         window.localStorage.removeItem(agentPlanStorageKey);
         currentAgentPlan = null;
@@ -2732,31 +2848,61 @@ def render_index_html() -> str:
         document.getElementById("agent-plan-card").hidden = true;
         return;
       }
-      if (!response.ok) throw new Error(await codedMessage(response));
-      renderAgentPlan(await response.json());
-      const runResponse = await fetch(`${agentPlanUrl(storedPlanId)}/runs/latest`, {
-        headers: authHeaders()
-      });
+      if (!response.ok) {
+        const message = await codedMessage(response);
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
+        throw new Error(message);
+      }
+      const plan = await response.json();
+      if (!agentSessionIsCurrent(sessionGeneration)) return;
+      renderAgentPlan(plan);
+      const runResponse = await agentSessionFetch(
+        `${agentPlanUrl(storedPlanId)}/runs/latest`,
+        {headers: authHeaders()},
+        sessionGeneration
+      );
+      if (!runResponse) return;
       if (runResponse.status === 404) {
         renderAgentRunPlaceholder("Запуск ещё не создан.");
         return;
       }
-      if (!runResponse.ok) throw new Error(await codedMessage(runResponse));
+      if (!runResponse.ok) {
+        const message = await codedMessage(runResponse);
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
+        throw new Error(message);
+      }
       const run = await runResponse.json();
+      if (!agentSessionIsCurrent(sessionGeneration)) return;
       renderAgentRun(run);
       if (["queued", "running", "cancel_requested"].includes(run.status)) {
-        window.setTimeout(() => pollAgentRun(run, 1000), 1000);
+        window.setTimeout(() => pollAgentRun(run, 1000, sessionGeneration), 1000);
       }
     }
 
-    async function pollAgentRun(run, delayMs = 1000) {
-      if (!currentAgentPlan || currentAgentRun?.run_id !== run.run_id) return;
-      const response = await fetch(
+    async function pollAgentRun(
+      run,
+      delayMs = 1000,
+      sessionGeneration = agentSessionGeneration
+    ) {
+      if (
+        sessionGeneration !== agentSessionGeneration
+        || !sessionToken()
+        || !currentAgentPlan
+        || currentAgentRun?.run_id !== run.run_id
+      ) return;
+      const response = await agentSessionFetch(
         `${agentPlanUrl(currentAgentPlan.plan_id)}/runs/${encodeURIComponent(run.run_id)}`,
-        {headers: authHeaders()}
+        {headers: authHeaders()},
+        sessionGeneration
       );
-      if (!response.ok) throw new Error(await codedMessage(response));
+      if (!response) return;
+      if (!response.ok) {
+        const message = await codedMessage(response);
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
+        throw new Error(message);
+      }
       const latest = await response.json();
+      if (!agentSessionIsCurrent(sessionGeneration)) return;
       renderAgentRun(latest);
       if (
         latest.status === "queued"
@@ -2764,12 +2910,22 @@ def render_index_html() -> str:
         || latest.status === "cancel_requested"
       ) {
         const nextDelay = Math.min(Math.round(delayMs * 1.5), 10000);
-        window.setTimeout(() => pollAgentRun(latest, nextDelay), nextDelay);
+        window.setTimeout(
+          () => pollAgentRun(latest, nextDelay, sessionGeneration),
+          nextDelay
+        );
       } else {
-        const planResponse = await fetch(agentPlanUrl(currentAgentPlan.plan_id), {
-          headers: authHeaders()
-        });
-        if (planResponse.ok) renderAgentPlan(await planResponse.json());
+        const planResponse = await agentSessionFetch(
+          agentPlanUrl(currentAgentPlan.plan_id),
+          {headers: authHeaders()},
+          sessionGeneration
+        );
+        if (!planResponse) return;
+        if (planResponse.ok) {
+          const plan = await planResponse.json();
+          if (!agentSessionIsCurrent(sessionGeneration)) return;
+          renderAgentPlan(plan);
+        }
       }
     }
 
@@ -2779,13 +2935,23 @@ def render_index_html() -> str:
         || !currentAgentRun
         || !["queued", "running"].includes(currentAgentRun.status)
       ) return;
-      const response = await fetch(
-        `${agentPlanUrl(currentAgentPlan.plan_id)}/runs/`
-          + `${encodeURIComponent(currentAgentRun.run_id)}/cancel`,
-        {method: "POST", headers: authHeaders()}
+      const sessionGeneration = agentSessionGeneration;
+      const planId = currentAgentPlan.plan_id;
+      const runId = currentAgentRun.run_id;
+      const response = await agentSessionFetch(
+        `${agentPlanUrl(planId)}/runs/${encodeURIComponent(runId)}/cancel`,
+        {method: "POST", headers: authHeaders()},
+        sessionGeneration
       );
-      if (!response.ok) throw new Error(await codedMessage(response));
-      renderAgentRun(await response.json());
+      if (!response) return;
+      if (!response.ok) {
+        const message = await codedMessage(response);
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
+        throw new Error(message);
+      }
+      const run = await response.json();
+      if (!agentSessionIsCurrent(sessionGeneration)) return;
+      renderAgentRun(run);
     }
 
     function renderAgentRunPlaceholder(message) {
@@ -2803,25 +2969,36 @@ def render_index_html() -> str:
     }
 
     async function requestAgentChat(prompt) {
+      const sessionGeneration = agentSessionGeneration;
       lastAgentPrompt = prompt;
       addMessage("user", prompt);
       statusLine.textContent = "агент думает...";
       const payload = buildSearchPayload();
       try {
-        const response = await fetch("/api/v1/agent/chat/turn", {
-          method: "POST",
-          headers: authHeaders({"Content-Type": "application/json"}),
-          body: JSON.stringify({
-            message: prompt,
-            passengers: payload.passengers,
-            adults: payload.adults,
-            children: payload.children,
-            infants: payload.infants,
-            currency: payload.currency
-          })
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const response = await agentSessionFetch(
+          "/api/v1/agent/chat/turn",
+          {
+            method: "POST",
+            headers: authHeaders({"Content-Type": "application/json"}),
+            body: JSON.stringify({
+              message: prompt,
+              passengers: payload.passengers,
+              adults: payload.adults,
+              children: payload.children,
+              infants: payload.infants,
+              currency: payload.currency
+            })
+          },
+          sessionGeneration
+        );
+        if (!response) return;
+        if (!response.ok) {
+          const message = await codedMessage(response);
+          if (!agentSessionIsCurrent(sessionGeneration)) return;
+          throw new Error(message);
+        }
         const body = await response.json();
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
         addMessage("bot", body.reply_ru);
         renderAgentPlan(body.proposed_plan);
         renderAgentRunPlaceholder("План создан, запуск ещё не выполнялся.");
@@ -2831,25 +3008,39 @@ def render_index_html() -> str:
         syncExtractedRoute(body);
         statusLine.textContent = "агент готов";
       } catch (error) {
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
         addMessage("bot", `Агент не смог выполнить turn: ${error.message}`);
         statusLine.textContent = "ошибка агента";
       }
     }
 
     async function requestAgentPlan(presetId, visiblePrompt) {
+      const sessionGeneration = agentSessionGeneration;
       addMessage("user", visiblePrompt);
       statusLine.textContent = "ИИ думает...";
       try {
-        const response = await fetch("/api/v1/agent/plan", {
-          method: "POST",
-          headers: authHeaders({"Content-Type": "application/json"}),
-          body: JSON.stringify({preset_id: presetId, slots: currentSlots()})
-        });
-        if (!response.ok) throw new Error(await codedMessage(response));
-        renderAgentPlan(await response.json());
+        const response = await agentSessionFetch(
+          "/api/v1/agent/plan",
+          {
+            method: "POST",
+            headers: authHeaders({"Content-Type": "application/json"}),
+            body: JSON.stringify({preset_id: presetId, slots: currentSlots()})
+          },
+          sessionGeneration
+        );
+        if (!response) return;
+        if (!response.ok) {
+          const message = await codedMessage(response);
+          if (!agentSessionIsCurrent(sessionGeneration)) return;
+          throw new Error(message);
+        }
+        const plan = await response.json();
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
+        renderAgentPlan(plan);
         renderAgentRunPlaceholder("План создан, запуск ещё не выполнялся.");
         statusLine.textContent = "готово";
       } catch (error) {
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
         addMessage("bot", `Не смог собрать план: ${error.message}`);
         statusLine.textContent = "ошибка";
       }
@@ -3101,6 +3292,7 @@ def render_index_html() -> str:
     refreshSessionState().then(loadSessionBoundData);
     window.addEventListener("unhandledrejection", (event) => {
       event.preventDefault();
+      if (!sessionToken()) return;
       const message = event.reason instanceof Error ? event.reason.message : String(event.reason);
       document.getElementById("agent-partial-errors").hidden = false;
       document.getElementById("agent-partial-errors").textContent = `Ошибка действия: ${message}`;

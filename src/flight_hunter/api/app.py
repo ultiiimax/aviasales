@@ -31,6 +31,7 @@ from flight_hunter.agent.chat import (
 from flight_hunter.agent.presets import AgentPreset, apply_preset_edits, list_presets
 from flight_hunter.api.agent_routes import (
     AgentRouteError,
+    agent_lifecycle_route_error,
     agent_route_error_handler,
     agent_validation_error_handler,
     create_agent_router,
@@ -113,6 +114,7 @@ from flight_hunter.deals import DealDiscoveryService
 from flight_hunter.deals.crawl4ai_client import Crawl4AiClientError, Crawl4AiMarkdownClient
 from flight_hunter.deals.searxng_client import SearxngClient, SearxngClientError
 from flight_hunter.deals.url_policy import DealUrlPolicy, DealUrlPolicyError
+from flight_hunter.domain.agent_search import DateMode
 from flight_hunter.domain.auth import AuthSession, HouseholdRole, new_secret_token, token_hash
 from flight_hunter.domain.manual_confirmation import (
     ManualConfirmationStatus,
@@ -541,9 +543,9 @@ class AgentChatTurnRequestBody(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     selected_origin: str | None = Field(default=None, min_length=3, max_length=3)
     selected_destination: str | None = Field(default=None, min_length=3, max_length=3)
-    departure_date: str | None = None
-    return_date: str | None = None
-    date_mode: str | None = None
+    departure_date: date | None = None
+    return_date: date | None = None
+    date_mode: DateMode | None = None
     passengers: int = Field(default=1, ge=1)
     adults: int | None = Field(default=None, ge=1)
     children: int = Field(default=0, ge=0)
@@ -2255,7 +2257,7 @@ def create_app(
                     )
                 )
             except AgentLifecycleError as error:
-                raise AgentRouteError(error.code) from error
+                raise agent_lifecycle_route_error(error) from error
         return DurableAgentPlanResponse.from_view(plan)
 
     @app.post("/api/v1/agent/chat/turn", response_model=AgentChatTurnResponse)
@@ -2286,23 +2288,28 @@ def create_app(
             service = AgentChatService(
                 plan_creator=agent_lifecycle_service(session),
             )
-            response = await service.handle_turn(
-                AgentTurnRequest(
-                    message=body.message,
-                    household_id=household_id,
-                    user_id=user_id,
-                    selected_origin=body.selected_origin,
-                    selected_destination=body.selected_destination,
-                    departure_date=body.departure_date,
-                    return_date=body.return_date,
-                    date_mode=body.date_mode,
-                    passengers=body.passengers,
-                    adults=body.adults,
-                    children=body.children,
-                    infants=body.infants,
-                    currency=body.currency,
+            try:
+                response = await service.handle_turn(
+                    AgentTurnRequest(
+                        message=body.message,
+                        household_id=household_id,
+                        user_id=user_id,
+                        selected_origin=body.selected_origin,
+                        selected_destination=body.selected_destination,
+                        departure_date=(
+                            body.departure_date.isoformat() if body.departure_date else None
+                        ),
+                        return_date=body.return_date.isoformat() if body.return_date else None,
+                        date_mode=body.date_mode.value if body.date_mode else None,
+                        passengers=body.passengers,
+                        adults=body.adults,
+                        children=body.children,
+                        infants=body.infants,
+                        currency=body.currency,
+                    )
                 )
-            )
+            except AgentLifecycleError as error:
+                raise agent_lifecycle_route_error(error) from error
             audit_repository = AgentAuditRepository(session)
             for event in response.audit_events:
                 await audit_repository.add_event(

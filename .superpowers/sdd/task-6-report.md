@@ -1,6 +1,6 @@
 # Task 6 Report: One Approval-Gated Agent Plan Builder
 
-Status: implementation complete; pending independent review.
+Status: review fixes complete; pending independent re-review.
 
 ## Result
 
@@ -40,6 +40,22 @@ canonical payloads and provider secrets are not exposed.
   from queued/running states.
 - Removed the compatibility one-shot search/date-matrix/watch branch.
 
+## Independent review fixes
+
+The first independent review did not accept Task 6 and returned four Important
+findings. All four are now covered test-first:
+
+- Invalid chat `date_mode` and ISO dates return the same sanitized typed
+  `422 agent_plan_invalid_input` lifecycle error as the canonical plan path;
+  internal lifecycle details are not exposed.
+- Empty or unsupported clarification actions enter edit mode, so the next
+  assistant submission patches a successor revision of the current plan instead
+  of creating a new aggregate.
+- Logout, session expiry, and household session replacement invalidate every
+  in-flight chat/plan/revise/edit/execute/clone/cancel/reload/poll response,
+  remove sensitive plan/run state from the DOM, and disable plan controls.
+- The assistant renders all seven compatibility presets without truncation.
+
 ## Task 3 invariant vs. Task 6 Step 1
 
 The Task 6 brief says a rolling-90 QUICK selection should show an estimate and an
@@ -64,12 +80,25 @@ Result on the old production path: `19 failed, 4 passed`. Failures covered the
 one-shot chat flow, missing typed summary/preset edits, anonymous compatibility
 behavior, and missing durable card.
 
+Independent-review RED evidence:
+
+```powershell
+uv run pytest tests/unit/api/test_agent_api.py tests/unit/api/test_web_ui.py -q
+uv run pytest tests/unit/api/test_web_ui.py::test_web_household_agent_actions_ignore_responses_from_old_session_generation -q
+```
+
+The first command failed `5` tests with `28` passing: two chat validation 500s,
+the missing clarification edit transition, the missing signed-out reset, and
+the five-preset truncation. The separate in-flight-session contract then failed
+until every household-scoped async action captured and checked the session
+generation.
+
 Final verification on 2026-07-14:
 
 ```text
-Focused Task 6:       33 passed
-Task 3/5 regressions: 92 passed
-Full unit suite:      747 passed, 11 warnings
+Focused Task 6:       40 passed
+Task 3/4/5 regressions: 166 passed
+Full unit suite:      754 passed, 13 warnings
 Integration suite:    4 passed
 Ruff format/check:    passed (276 files)
 Full mypy:            passed (114 source files)
@@ -84,5 +113,6 @@ test.
 
 ## Review note
 
-This report records implementation evidence only. Task 6 remains unchecked in
-`IMPLEMENTATION_STATUS.md` until independent review accepts the slice.
+This report records implementation and review-fix evidence only. Task 6 remains
+unchecked in `IMPLEMENTATION_STATUS.md` until independent re-review accepts the
+slice.

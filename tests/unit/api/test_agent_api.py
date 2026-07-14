@@ -10,8 +10,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from flight_hunter.agent.chat import IntentDraft
+from flight_hunter.agent.chat import AgentChatService, IntentDraft
 from flight_hunter.api.app import create_app
+from flight_hunter.application.agent_lifecycle import AgentLifecycleError
 from flight_hunter.config import AppSettings
 from flight_hunter.persistence.models import agent_search_plan_revisions_table
 
@@ -196,6 +197,65 @@ async def test_free_text_chat_returns_missing_date_plan_reference_without_provid
     assert draft_scope["frozen"] is False
     assert plan["clarifications"][0]["code"] == "date_required"
     assert plan["clarifications"][0]["actions"][0]["action_id"] == ("use_rolling_90_days")
+    assert agent_api_harness.provider.calls == 0
+
+
+@pytest.mark.anyio
+async def test_chat_rejects_unknown_date_mode_with_stable_typed_error(
+    agent_api_harness: _Harness,
+) -> None:
+    response = agent_api_harness.client.post(
+        "/api/v1/agent/chat/turn",
+        headers=agent_api_harness.auth_headers,
+        json={"message": "LED → CDG", "date_mode": "not_a_mode"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "agent_plan_invalid_input",
+        "message": "agent plan input is invalid",
+    }
+    assert agent_api_harness.provider.calls == 0
+
+
+@pytest.mark.anyio
+async def test_chat_rejects_non_iso_departure_date_with_stable_typed_error(
+    agent_api_harness: _Harness,
+) -> None:
+    response = agent_api_harness.client.post(
+        "/api/v1/agent/chat/turn",
+        headers=agent_api_harness.auth_headers,
+        json={"message": "LED → CDG", "departure_date": "not-a-date"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "agent_plan_invalid_input",
+        "message": "agent plan input is invalid",
+    }
+    assert agent_api_harness.provider.calls == 0
+
+
+@pytest.mark.anyio
+async def test_chat_maps_public_lifecycle_error_without_internal_details(
+    agent_api_harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def reject_turn(*_args: object, **_kwargs: object) -> None:
+        raise AgentLifecycleError("agent_plan_invalid_input")
+
+    monkeypatch.setattr(AgentChatService, "handle_turn", reject_turn)
+    response = agent_api_harness.client.post(
+        "/api/v1/agent/chat/turn",
+        headers=agent_api_harness.auth_headers,
+        json={"message": "LED → CDG"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "agent_plan_invalid_input",
+        "message": "agent plan input is invalid",
+    }
     assert agent_api_harness.provider.calls == 0
 
 

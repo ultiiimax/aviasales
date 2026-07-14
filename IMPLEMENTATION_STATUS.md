@@ -35,7 +35,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
     independent review at `2bf8dbe`, with no Critical/Important/Minor findings).
   - [ ] Make free text, all seven presets and the approval-gated web plan card
     use the same builder without provider calls before explicit execution
-    (implementation complete on 2026-07-14; pending independent review).
+    (review fixes complete on 2026-07-14; pending independent re-review).
   - [ ] Persist the durable operation ledger.
   - [ ] Execute resumable Aviasales calendar/exact work in the worker.
   - [ ] Compose and rank split, self-transfer, open-jaw and multi-city routes.
@@ -103,11 +103,15 @@ Task 6 implementation on 2026-07-14 routes free text and all seven presets
 through the durable lifecycle and renders the same sanitized, approval-gated
 plan/run card. The rolling-90 QUICK case preserves the accepted Task 3 budget
 invariant: actual counts remain visible and execution stays disabled above the
-60-operation limit. Focused Task 6 tests pass 33/33, Task 3/5 regressions pass
-92/92, all 747 unit tests and 4 integration tests pass, mypy checks all 114
-source files,
-and global Ruff format/check pass across 276 files. No provider call occurs
-before explicit execute. The implementation remains pending independent review.
+60-operation limit. The first independent review's four Important findings are
+fixed test-first: chat validation now returns sanitized typed 422 errors,
+clarification fallback enters successor-revision edit mode, every
+household-scoped async response is invalidated across logout/session changes,
+and all seven presets render. Focused Task 6 tests pass 40/40, Task 3/4/5
+regressions pass 166/166, all 754 unit tests and 4 integration tests pass, mypy
+checks all 114 source files, and global Ruff format/check pass across 276 files.
+No provider call occurs before explicit execute. The fixes remain pending
+independent re-review.
 
 Task 4 hardening is complete and accepted by independent review. Forward-only
 migration 0023 and matching Core metadata persist household-scoped immutable
