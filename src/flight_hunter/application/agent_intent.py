@@ -294,6 +294,10 @@ class IntentOverlayTransportError(RuntimeError):
     """Expected optional-model transport failure with deterministic fallback."""
 
 
+class IntentInputError(ValueError):
+    """A deterministic user-supplied intent value failed validation."""
+
+
 def merge_overlay(base: ParsedIntent, overlay: IntentOverlay) -> ParsedIntent:
     retained = list(base.clarifications)
     if overlay.date_mode is not None:
@@ -343,6 +347,22 @@ class IntentParser:
         preset: AgentPresetId | str | None,
         selections: Mapping[str, object] | None,
     ) -> ParsedIntent:
+        try:
+            parsed, normalized_preset, selected = self._parse_deterministic(
+                text,
+                preset,
+                selections,
+            )
+        except (TypeError, ValueError) as error:
+            raise IntentInputError("agent intent input is invalid") from error
+        return self._apply_overlay(text, normalized_preset, selected, parsed)
+
+    def _parse_deterministic(
+        self,
+        text: str,
+        preset: AgentPresetId | str | None,
+        selections: Mapping[str, object] | None,
+    ) -> tuple[ParsedIntent, AgentPresetId | None, Mapping[str, object]]:
         if not isinstance(text, str):
             raise TypeError("text must be a string")
         normalized_preset = AgentPresetId(preset) if preset is not None else None
@@ -404,6 +424,15 @@ class IntentParser:
                 preset_id=normalized_preset,
             )
         )
+        return parsed, normalized_preset, selected
+
+    def _apply_overlay(
+        self,
+        text: str,
+        normalized_preset: AgentPresetId | None,
+        selected: Mapping[str, object],
+        parsed: ParsedIntent,
+    ) -> ParsedIntent:
         if self._overlay_provider is None:
             return parsed
         try:

@@ -14,6 +14,7 @@ from flight_hunter.agent.presets import AgentPresetId
 from flight_hunter.application.agent_intent import (
     ClarificationAction,
     IntentClarification,
+    IntentInputError,
     IntentParser,
     ParsedDateConstraint,
     ParsedIntent,
@@ -205,7 +206,7 @@ class AgentLifecycleService:
                 )
             except PlanBudgetExceededError as error:
                 raise AgentLifecycleError("agent_plan_budget_too_large") from error
-            except (TypeError, ValueError) as error:
+            except IntentInputError as error:
                 raise AgentLifecycleError("agent_plan_invalid_input") from error
             except AgentPlanError as error:
                 raise _lifecycle_error(error) from error
@@ -245,7 +246,7 @@ class AgentLifecycleService:
                 )
             except PlanBudgetExceededError as error:
                 raise AgentLifecycleError("agent_plan_budget_too_large") from error
-            except (TypeError, ValueError) as error:
+            except IntentInputError as error:
                 raise AgentLifecycleError("agent_plan_invalid_input") from error
             except AgentPlanError as error:
                 raise _lifecycle_error(error) from error
@@ -286,7 +287,7 @@ class AgentLifecycleService:
                 )
             except PlanBudgetExceededError as error:
                 raise AgentLifecycleError("agent_plan_budget_too_large") from error
-            except (TypeError, ValueError) as error:
+            except IntentInputError as error:
                 raise AgentLifecycleError("agent_plan_invalid_input") from error
             except AgentPlanError as error:
                 raise _lifecycle_error(error) from error
@@ -386,21 +387,25 @@ class AgentLifecycleService:
         return _plan_view(latest)
 
     async def list_runs(self, household_id: UUID, plan_id: UUID) -> tuple[RunView, ...]:
-        await self._require_plan(household_id, plan_id)
-        return tuple(_run_view(run) for run in await self._runs.list_runs(household_id, plan_id))
+        async with self._owned_transaction():
+            await self._require_plan(household_id, plan_id)
+            runs = await self._runs.list_runs(household_id, plan_id)
+        return tuple(_run_view(run) for run in runs)
 
     async def get_run(self, household_id: UUID, plan_id: UUID, run_id: UUID) -> RunView:
-        await self._require_plan(household_id, plan_id)
-        run = await self._runs.get_run(household_id, run_id)
-        if run is None or run.plan_id != plan_id:
-            raise AgentLifecycleError("agent_plan_not_found")
+        async with self._owned_transaction():
+            await self._require_plan(household_id, plan_id)
+            run = await self._runs.get_run(household_id, run_id)
+            if run is None or run.plan_id != plan_id:
+                raise AgentLifecycleError("agent_plan_not_found")
         return _run_view(run)
 
     async def get_latest_run(self, household_id: UUID, plan_id: UUID) -> RunView:
-        await self._require_plan(household_id, plan_id)
-        run = await self._runs.get_latest_run(household_id, plan_id)
-        if run is None:
-            raise AgentLifecycleError("agent_run_not_found")
+        async with self._owned_transaction():
+            await self._require_plan(household_id, plan_id)
+            run = await self._runs.get_latest_run(household_id, plan_id)
+            if run is None:
+                raise AgentLifecycleError("agent_run_not_found")
         return _run_view(run)
 
     async def cancel_run(self, command: CancelAgentRun) -> RunView:
@@ -429,9 +434,10 @@ class AgentLifecycleService:
         plan_id: UUID,
         run_id: UUID,
     ) -> RunResultsView:
-        run = await self._runs.get_run(household_id, run_id)
-        if run is None or run.plan_id != plan_id:
-            raise AgentLifecycleError("agent_plan_not_found")
+        async with self._owned_transaction():
+            run = await self._runs.get_run(household_id, run_id)
+            if run is None or run.plan_id != plan_id:
+                raise AgentLifecycleError("agent_plan_not_found")
         return RunResultsView(run_id=run.id)
 
     async def _build(

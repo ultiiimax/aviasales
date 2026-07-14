@@ -116,3 +116,36 @@ Fresh verification before the final commit:
 The unit warnings are aiosqlite event-loop shutdown races and two existing lxml
 deprecations; there were no test failures. Task 6 execution, provider calls and
 web UI remain outside this hardening pass.
+
+## Final boundary addendum (2026-07-14)
+
+Two Important findings remained. With production still at `3dca87c`, the
+expanded lifecycle/API/auth command produced `7 failed, 39 passed in 9.64s`.
+The failures proved that broad lifecycle catches misclassified internal builder
+and repository exceptions, while list/get/latest/results left SQLAlchemy
+autobegin transactions open on success and failure.
+
+`IntentInputError` now marks only the deterministic parser input phase. The
+optional overlay path runs outside that classification boundary. Lifecycle
+methods catch only this typed input error; internal parser overlay, builder and
+repository `TypeError`/`ValueError` probes roll back and propagate unchanged.
+Responses therefore keep the stable invalid-input code for real user input
+without turning internal failures into 422 responses or exposing raw messages.
+
+Every public lifecycle read now uses the same service-owned outer transaction as
+mutators. Success ends autobegin, errors roll back, and the same service/session
+can immediately run a valid mutator. Parameterized SQLite coverage includes
+get plan, list runs, get run, latest run and results, plus a failed read.
+
+Fresh verification:
+
+- Focused lifecycle/API/auth: `47 passed in 9.44s`.
+- Task 3 parser + Task 4 repository regressions: `106 passed in 9.02s`.
+- Full unit suite: `736 passed, 3 warnings in 56.65s`.
+- Full integration suite, separate process: `4 passed in 3.05s`.
+- Global format: `276 files already formatted`.
+- Global Ruff: passed.
+- Global mypy: no issues in 114 source files.
+
+The three unit warnings are one existing aiosqlite shutdown race and two lxml
+deprecations. No ledger, worker, provider execution or Task 6 code changed.

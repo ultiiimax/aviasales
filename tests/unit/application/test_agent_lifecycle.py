@@ -572,6 +572,118 @@ async def test_direct_invalid_parser_input_is_stable_and_rolls_back() -> None:
     assert valid.state == "awaiting_approval"
 
 
+@pytest.mark.anyio
+async def test_internal_builder_value_error_rolls_back_and_propagates() -> None:
+    class FailingBuilder:
+        async def build(self, *_args: object, **_kwargs: object) -> object:
+            raise ValueError("internal builder probe")
+
+    async with _lifecycle_harness() as harness:
+        broken_service = AgentLifecycleService(
+            session=harness.session,
+            parser=IntentParser(),
+            builder=FailingBuilder(),  # type: ignore[arg-type]
+            clock=harness.clock,
+            provider_gateway=harness.provider,
+        )
+        with pytest.raises(ValueError, match="internal builder probe"):
+            await _create(broken_service)
+        assert harness.session.in_transaction() is False
+        recovered = await _create(harness.service)
+
+    assert recovered.state == "awaiting_approval"
+
+
+@pytest.mark.anyio
+async def test_internal_overlay_value_error_is_not_classified_as_user_input() -> None:
+    def failing_overlay(*_args: object, **_kwargs: object) -> object:
+        raise ValueError("internal overlay probe")
+
+    async with _lifecycle_harness() as harness:
+        broken_service = AgentLifecycleService(
+            session=harness.session,
+            parser=IntentParser(overlay_provider=failing_overlay),
+            builder=AgentPlanBuilder(
+                clock=harness.clock,
+                scope_resolver=ScopeResolver(repository=StaticAirportCatalog()),
+            ),
+            clock=harness.clock,
+            provider_gateway=harness.provider,
+        )
+        with pytest.raises(ValueError, match="internal overlay probe"):
+            await _create(broken_service)
+        assert harness.session.in_transaction() is False
+        recovered = await _create(harness.service)
+
+    assert recovered.state == "awaiting_approval"
+
+
+@pytest.mark.anyio
+async def test_internal_repository_type_error_rolls_back_and_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = AgentPlanRepository.create_plan
+
+    async def fail_create_plan(
+        _repository: AgentPlanRepository,
+        *_args: object,
+        **_kwargs: object,
+    ) -> object:
+        raise TypeError("internal repository probe")
+
+    async with _lifecycle_harness() as harness:
+        monkeypatch.setattr(AgentPlanRepository, "create_plan", fail_create_plan)
+        with pytest.raises(TypeError, match="internal repository probe"):
+            await _create(harness.service)
+        assert harness.session.in_transaction() is False
+        monkeypatch.setattr(AgentPlanRepository, "create_plan", original)
+        recovered = await _create(harness.service)
+
+    assert recovered.state == "awaiting_approval"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "operation",
+    ("get_plan", "list_runs", "get_run", "get_latest_run", "get_run_results"),
+)
+async def test_read_methods_end_transaction_and_allow_same_session_mutation(
+    operation: str,
+) -> None:
+    async with _lifecycle_harness() as harness:
+        plan = await _create(harness.service)
+        run = await _execute(harness.service, plan, f"read-boundary-{operation}")
+
+        if operation == "get_plan":
+            await harness.service.get_plan(HOUSEHOLD_ID, plan.plan_id)
+        elif operation == "list_runs":
+            await harness.service.list_runs(HOUSEHOLD_ID, plan.plan_id)
+        elif operation == "get_run":
+            await harness.service.get_run(HOUSEHOLD_ID, plan.plan_id, run.run_id)
+        elif operation == "get_latest_run":
+            await harness.service.get_latest_run(HOUSEHOLD_ID, plan.plan_id)
+        else:
+            await harness.service.get_run_results(HOUSEHOLD_ID, plan.plan_id, run.run_id)
+
+        assert harness.session.in_transaction() is False
+        recovered = await _create(harness.service)
+
+    assert recovered.state == "awaiting_approval"
+
+
+@pytest.mark.anyio
+async def test_read_exception_rolls_back_and_reuses_same_session() -> None:
+    async with _lifecycle_harness() as harness:
+        plan = await _create(harness.service)
+        with pytest.raises(AgentLifecycleError) as exc_info:
+            await harness.service.get_latest_run(HOUSEHOLD_ID, plan.plan_id)
+        assert harness.session.in_transaction() is False
+        recovered = await _create(harness.service)
+
+    assert exc_info.value.code == "agent_run_not_found"
+    assert recovered.state == "awaiting_approval"
+
+
 @asynccontextmanager
 async def _lifecycle_harness() -> AsyncIterator[LifecycleHarness]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
