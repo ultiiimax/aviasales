@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import Any, cast
 from uuid import UUID
 
 import pytest
 
+from flight_hunter.application import date_matrix as date_matrix_module
 from flight_hunter.application.date_matrix import (
     DateMatrixCell,
     DateMatrixPlanner,
@@ -19,6 +21,25 @@ from flight_hunter.domain.agent_evidence import (
 )
 from flight_hunter.domain.money import Money
 from flight_hunter.domain.offers import Freshness
+
+
+def _overlay_context(
+    *,
+    origin: str = "SVO",
+    destination: str = "LED",
+    currency: str = "RUB",
+    passengers: int = 1,
+    one_way: bool = True,
+) -> Any:
+    context_type = getattr(date_matrix_module, "DateMatrixDiscoveryContext", None)
+    assert context_type is not None
+    return context_type(
+        origin=origin,
+        destination=destination,
+        currency=currency,
+        passengers=passengers,
+        one_way=one_way,
+    )
 
 
 def test_round_trip_flex_three_days_creates_compatible_seven_by_seven_matrix() -> None:
@@ -102,6 +123,7 @@ def test_calendar_discovery_overlay_stays_indicative_in_typed_matrix_cell() -> N
     overlaid = planner.overlay_discovery(
         matrix,
         signals=(signal,),
+        context=_overlay_context(),
         freshness=Freshness.LIVE,
     )
 
@@ -143,6 +165,7 @@ def test_discovery_signal_cannot_enter_confirmed_ranking_or_non_discovery_overla
         planner.overlay_discovery(
             matrix,
             signals=(cast(Any, object()),),
+            context=_overlay_context(),
             freshness=Freshness.LIVE,
         )
 
@@ -168,3 +191,75 @@ def test_typed_date_matrix_cell_rejects_mismatched_discovery_dates() -> None:
             discovery_signal=signal,
             freshness=Freshness.LIVE,
         )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"origin": "DME"},
+        {"destination": "CDG"},
+        {"observed_amount": Money(432_100, "USD")},
+        {"passengers": 2},
+        {"return_date": date(2026, 9, 22)},
+        {"departure_date": date(2026, 9, 18)},
+    ],
+)
+def test_discovery_overlay_context_rejects_mismatched_signal(
+    overrides: dict[str, Any],
+) -> None:
+    planner = DateMatrixPlanner()
+    matrix = planner.plan(
+        DateMatrixRequest(
+            departure_date=date(2026, 9, 15),
+            return_date=None,
+            flexibility_days=1,
+            min_stay_days=None,
+            max_stay_days=None,
+        )
+    )
+    signal = DiscoverySignal(
+        id=UUID("7acdbeb0-8a80-56d4-9684-386f18529659"),
+        provider_id="aviasales_search",
+        origin="SVO",
+        destination="LED",
+        departure_date=date(2026, 9, 15),
+        return_date=None,
+        observed_amount=Money(432_100, "RUB"),
+        observed_at=datetime(2026, 7, 14, 21, 0, tzinfo=UTC),
+        source_kind=DiscoverySource.CALENDAR,
+        passengers=1,
+    )
+    mismatched = replace(signal, **overrides)
+
+    with pytest.raises(ValueError, match="discovery"):
+        planner.overlay_discovery(
+            matrix,
+            signals=(mismatched,),
+            context=_overlay_context(),
+            freshness=Freshness.LIVE,
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"origin": "S\u0412O"},
+        {"currency": "РУБ"},
+        {"passengers": 0},
+        {"one_way": "yes"},
+    ],
+)
+def test_discovery_overlay_context_rejects_invalid_typed_values(
+    overrides: dict[str, Any],
+) -> None:
+    values: dict[str, Any] = {
+        "origin": "SVO",
+        "destination": "LED",
+        "currency": "RUB",
+        "passengers": 1,
+        "one_way": True,
+    }
+    values.update(overrides)
+
+    with pytest.raises((TypeError, ValueError)):
+        _overlay_context(**values)

@@ -3,16 +3,21 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
+from uuid import UUID
 
 from flight_hunter.domain.agent_evidence import ConfirmationState, ProtectionStatus
 from flight_hunter.domain.money import Money
 from flight_hunter.domain.offers import Freshness, PriceBasis
+from flight_hunter.providers.aviasales_search.client import CalendarPrice
 from flight_hunter.providers.aviasales_search.mapper import map_parsed_ticket, stable_ticket_id
 from flight_hunter.providers.aviasales_search.schemas import (
     ParsedProposal,
     ParsedSegment,
     ParsedTicket,
 )
+
+EVIDENCE_NAMESPACE = UUID("11111111-1111-4111-8111-111111111111")
+OTHER_EVIDENCE_NAMESPACE = UUID("22222222-2222-4222-8222-222222222222")
 
 
 def _ticket(baggage_count: int | None = 1, handbag: str | None = "1x8kg") -> ParsedTicket:
@@ -54,7 +59,7 @@ def test_map_parsed_ticket_produces_live_total_for_passengers_offer() -> None:
         observed_at=observed_at,
         passengers=1,
         search_id="sid-1",
-        results_url="host-1",
+        results_url="results-fixture.aviasales.ru",
     )
 
     assert offer.provider_id == "aviasales_search"
@@ -77,7 +82,7 @@ def test_map_parsed_ticket_produces_live_total_for_passengers_offer() -> None:
     assert ref == {
         "provider_id": "aviasales_search",
         "proposal_id": "120:0",
-        "results_url": "host-1",
+        "results_url": "results-fixture.aviasales.ru",
         "search_id": "sid-1",
     }
 
@@ -107,14 +112,25 @@ def test_map_parsed_ticket_to_confirmed_evidence_is_sanitized_and_deterministic(
         ticket,
         observed_at=observed_at,
         passengers=2,
+        evidence_namespace=EVIDENCE_NAMESPACE,
     )
     repeated = mapper.map_parsed_ticket_to_evidence(
         ticket,
         observed_at=observed_at,
         passengers=2,
+        evidence_namespace=EVIDENCE_NAMESPACE,
+    )
+    other_operation = mapper.map_parsed_ticket_to_evidence(
+        ticket,
+        observed_at=observed_at,
+        passengers=2,
+        evidence_namespace=OTHER_EVIDENCE_NAMESPACE,
     )
 
     assert evidence == repeated
+    assert evidence.id != other_operation.id
+    assert evidence.provider_offer_id == other_operation.provider_offer_id
+    assert evidence.segment_ids == other_operation.segment_ids
     assert evidence.provider_id == "aviasales_search"
     assert re.fullmatch(r"aviasales_search:[0-9a-f]{64}", evidence.provider_offer_id)
     assert "sig_redacted_0" not in evidence.provider_offer_id
@@ -132,3 +148,37 @@ def test_map_parsed_ticket_to_confirmed_evidence_is_sanitized_and_deterministic(
     assert not hasattr(evidence, "booking_action_ref")
     assert not hasattr(evidence, "search_id")
     assert not hasattr(evidence, "results_url")
+
+
+def test_calendar_discovery_uuid_is_idempotent_only_within_operation_namespace() -> None:
+    from flight_hunter.providers.aviasales_search import mapper
+
+    price = CalendarPrice(
+        origin="SVO",
+        destination="LED",
+        departure_date="2026-09-15",
+        return_date=None,
+        price_minor_units=432_100,
+        currency="RUB",
+    )
+    observed_at = datetime(2026, 7, 14, 21, 0, tzinfo=UTC)
+
+    first = mapper.map_calendar_price_to_discovery(
+        price,
+        observed_at=observed_at,
+        evidence_namespace=EVIDENCE_NAMESPACE,
+    )
+    repeated = mapper.map_calendar_price_to_discovery(
+        price,
+        observed_at=observed_at,
+        evidence_namespace=EVIDENCE_NAMESPACE,
+    )
+    other_operation = mapper.map_calendar_price_to_discovery(
+        price,
+        observed_at=observed_at,
+        evidence_namespace=OTHER_EVIDENCE_NAMESPACE,
+    )
+
+    assert first.id == repeated.id
+    assert first.id != other_operation.id
+    assert first.passengers == 1

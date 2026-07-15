@@ -100,3 +100,87 @@ migration is required.
 
 Independent review must inspect the committed diff and rerun the gates before
 Task 8 can be accepted.
+
+## Independent review fix cycle
+
+The independent review of `a00de1a..ca44fdb` found that the first Task 8
+implementation had correct high-level slicing but incomplete trust-boundary and
+evidence invariants. The concrete root causes were:
+
+- a provider-returned result host was interpolated as a URL host without a
+  contract suffix allowlist;
+- transport/decoder errors were translated inside active handlers, retaining
+  provider-controlled exception context, while opaque DTO dataclass reprs
+  exposed private state;
+- poll accepted passenger labeling separately from its continuation, and the
+  continuation did not bind every expected exact-search fact;
+- evidence UUIDs used a process-wide namespace instead of a caller operation
+  namespace;
+- proposal currency had an unsafe fallback, direction groups were not fully
+  structural, and trip class/ASCII provider codes were too open;
+- calendar/date-matrix validation covered cells but not the complete typed
+  route, currency, passenger and trip-shape context;
+- generic upstream HTTP failures did not expose body-free typed terminal versus
+  retryable metadata.
+
+All review regressions were added before production changes. The exact required
+tests-only RED command was:
+
+```text
+uv run pytest tests/unit/providers/aviasales_search tests/unit/application/test_date_matrix.py tests/unit/api/test_date_matrix_api.py tests/unit/api/test_aviasales_mobile_api.py -q
+98 failed, 66 passed in 6.80s
+```
+
+An additional safe endpoint-name logging regression was independently driven
+RED (`1 failed`) and GREEN (`1 passed in 0.13s`) after the main batch. No live
+provider call was used in either cycle.
+
+The fix adds one strict bare-host normalizer at all result-host boundaries,
+repr-redacts client and gateway continuation DTOs, and raises stable transport
+and decoder errors only after leaving their source handlers. Exact continuation
+state now immutably binds route, dates, currency, passengers and a
+caller-supplied operation UUID; poll derives all expectations from it. Exact
+and calendar observation UUIDs are stable for the same operation/content and
+distinct for a new operation, while public provider IDs remain stable hash-only
+identities. Exact proposal money/direction validation and the closed trip-class
+enum reject invented facts.
+
+Calendar publication now uses one shared validator for route, inclusive dates,
+currency, non-negative money and trip shape. Matrix overlay requires a frozen
+typed discovery context, contradictory passenger inputs fail before provider
+I/O, and every published indicative row/cell states provider, source, aware
+observation time, passenger basis and live-confirmation requirement. Generic
+non-special 4xx/5xx errors are body-free and carry status class plus retryability
+without changing 401/403/429 behavior or one-call gateway accounting.
+
+Final review-fix GREEN evidence:
+
+```text
+uv run pytest tests/unit/providers/aviasales_search tests/unit/application/test_date_matrix.py tests/unit/api/test_date_matrix_api.py tests/unit/api/test_aviasales_mobile_api.py -q
+165 passed in 4.53s
+
+uv run pytest tests/unit -q
+1024 passed, 23 warnings in 115.98s
+
+uv run pytest tests/integration -q
+4 passed in 4.10s
+
+uv run mypy
+Success: no issues found in 116 source files
+
+uv run ruff format --check .
+283 files already formatted
+
+uv run ruff check .
+All checks passed!
+
+git diff --check
+passed
+```
+
+The unit warnings are pre-existing teardown/deprecation warnings outside the
+changed Task 8 flow. Review-fix verification is fixture/fake only: it contains
+no live Aviasales request, secret, provider response body, raw result host,
+booking URL or PII. No persistence schema changed, so no migration is required.
+Task 9 remains unstarted, and Task 8 remains pending a fresh independent
+re-review rather than being marked accepted by its implementer.

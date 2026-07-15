@@ -16,8 +16,6 @@ from flight_hunter.domain.offers import FlightOffer, FlightSegmentSummary, Fresh
 from flight_hunter.providers.aviasales_search.client import CalendarPrice
 from flight_hunter.providers.aviasales_search.schemas import ParsedTicket
 
-_EVIDENCE_NAMESPACE = UUID("2350f67f-f74f-4a0d-bc50-e218610f939d")
-
 
 def map_parsed_ticket(
     ticket: ParsedTicket,
@@ -73,14 +71,17 @@ def map_parsed_ticket_to_evidence(
     *,
     observed_at: datetime,
     passengers: int,
+    evidence_namespace: UUID,
 ) -> ConfirmedOfferEvidence:
+    if not isinstance(evidence_namespace, UUID):
+        raise TypeError("evidence_namespace must be UUID")
     provider_offer_id = stable_ticket_id(ticket)
     segments = _segment_summaries(ticket)
     segment_ids = tuple(
         _stable_segment_id(segment, index=index) for index, segment in enumerate(segments)
     )
     return ConfirmedOfferEvidence(
-        id=uuid5(_EVIDENCE_NAMESPACE, f"{provider_offer_id}|{passengers}"),
+        id=uuid5(evidence_namespace, f"exact|{provider_offer_id}|{passengers}"),
         provider_id="aviasales_search",
         provider_offer_id=provider_offer_id,
         origin=ticket.origin,
@@ -105,8 +106,10 @@ def map_calendar_price_to_discovery(
     price: CalendarPrice,
     *,
     observed_at: datetime,
-    passengers: int,
+    evidence_namespace: UUID,
 ) -> DiscoverySignal:
+    if not isinstance(evidence_namespace, UUID):
+        raise TypeError("evidence_namespace must be UUID")
     identity = "|".join(
         (
             "aviasales_search",
@@ -117,11 +120,10 @@ def map_calendar_price_to_discovery(
             price.return_date or "",
             str(price.price_minor_units),
             price.currency,
-            str(passengers),
         )
     )
     return DiscoverySignal(
-        id=uuid5(_EVIDENCE_NAMESPACE, identity),
+        id=uuid5(evidence_namespace, f"discovery|{identity}"),
         provider_id="aviasales_search",
         origin=price.origin,
         destination=price.destination,
@@ -130,7 +132,7 @@ def map_calendar_price_to_discovery(
         observed_amount=Money(price.price_minor_units, price.currency),
         observed_at=observed_at,
         source_kind=DiscoverySource.CALENDAR,
-        passengers=passengers,
+        passengers=1,
     )
 
 

@@ -81,6 +81,18 @@ retains its compatibility city flow outside approved orchestrator runs.
 
 Response: `{"search_id": "...", "results_url": "host.aviasales.ru", "blet_url": "..."}`.
 
+`results_url` is contractually a bare ASCII hostname, not a URL. The client
+normalizes it to lowercase and accepts only `aviasales.ru` or a DNS-valid
+subdomain of `aviasales.ru`. Schemes, paths, queries, fragments, userinfo,
+ports, IP literals, non-ASCII labels and external suffixes fail before any
+poll/click I/O. The start response and every later poll/click boundary apply
+the same validator.
+
+The only contract-verified exact-search trip class is the closed provider enum
+value `Y` (economy). Market and currency inputs are ASCII-only; a proposal must
+carry an explicit ASCII ISO currency and a non-negative integer-minor-unit
+amount. The mapper never supplies a fallback currency.
+
 ## Request schema — `/search/v3.2/results` (polling)
 
 POST `https://{results_url}/search/v3.2/results` with header `X-Request-Id: {uuid}`.
@@ -103,6 +115,12 @@ cursor and whether that response contains tickets. The legacy synchronous
 runs use a client with `max_retries=0`; each retry is therefore a separate
 leased/budget-reserved operation attempt rather than hidden transport work.
 
+The gateway continuation binds the normalized route, departure/return dates,
+currency, passenger total and caller-supplied operation UUID at start. Poll has
+no independent passenger argument: it reconstructs and validates this private
+state before I/O, then rejects any ticket whose route, trip shape, dates,
+currency or money contradicts the bound request.
+
 The sanitized fixture and live response expose no verified terminal
 `complete`/`finished` field. A ticket-bearing poll proves confirmed evidence is
 available but does **not** prove the upstream search is complete; the resumable
@@ -116,10 +134,15 @@ date bounds, currency and `locale=ru_RU`. Live verification on 2026-07-14
 confirmed `ru_RU`; `ru` is no longer accepted by this endpoint.
 
 Calendar rows are mapped to `DiscoverySignal` with source `calendar`, integer
-minor-unit money, passenger basis and aware observation time. They remain
+minor-unit money, an explicit one-adult passenger basis and aware observation
+time. They remain
 `indicative`, require exact live confirmation and can never enter the confirmed
 offer ranker. Wrong-route or out-of-range rows are discarded before date-matrix
-overlay.
+overlay. A central validator also enforces ISO dates, requested ASCII currency,
+non-negative amounts and one-way/round-trip shape. Date-matrix overlay requires
+a typed context for route, currency, passengers and trip shape; contradictory
+signals become a stable pricing denial or an empty validated result, never a
+published fact.
 
 ## Response schema — result chunk
 
@@ -153,16 +176,27 @@ Top-level keys (verified from live capture 2026-07-04):
 Dictionaries keyed by IATA/id. `airlines[id].name.ru.default`, `agents[id].label.ru.default`
 (or `.gate_name`), `places.airports[iata].name.ru.default`.
 
+An exact ticket has one non-empty, internally continuous outbound direction
+and at most one non-empty return direction. A return must be reciprocal to the
+outbound route; extra, discontinuous or non-reciprocal direction groups are
+schema failures. Normalization derives the public origin/destination from the
+outbound and the return date from the inbound departure.
+
 ## Resumable agent gateway boundary
 
 Exact start returns server-private `ExactSearchContinuation` state only. Its
-search ID, result host, cursor and request ID are excluded from `repr` and are
-not members of the public poll result. Ticket-bearing chunks map inside the
-provider boundary to `ConfirmedOfferEvidence`: hash-only deterministic offer
-and segment IDs, provider source, aware observation time, passenger total,
-verified seller/segments, unknown protection and `None` for baggage when the
-response does not provide it. Public evidence contains no raw DTO, proposal or
-click payload, booking URL, signature, marker, cookie or token.
+search ID, result host, blet state, cursor, request ID, operation UUID and bound
+request facts are excluded from `repr` and are not members of the public poll
+result. Client DTOs holding start state or raw poll chunks are repr-redacted as
+well. Ticket-bearing chunks map inside the provider boundary to
+`ConfirmedOfferEvidence`: hash-only deterministic provider offer/segment IDs,
+provider source, aware observation time, bound passenger total, verified
+seller/segments, unknown protection and `None` for baggage when the response
+does not provide it. Evidence UUIDs use UUIDv5 under the caller-supplied
+operation namespace: retrying the same operation and provider content is
+idempotent, while a new operation produces a distinct append-only observation.
+Public evidence contains no raw DTO, proposal or click payload, booking URL,
+signature, marker, cookie or token.
 
 ## Purchase URL — `/clicks/{proposal_id}`
 
@@ -198,8 +232,17 @@ Stable failure codes:
 | Upstream HTTP 401 | 502 | `aviasales_search_auth_failed` | no |
 | Upstream HTTP 403 | 502 | `aviasales_search_blocked` | no |
 | Upstream HTTP 429 | 429 | `aviasales_search_rate_limited` | after `Retry-After` |
+| Other upstream HTTP 4xx | 502 | `aviasales_search_unavailable` | no |
 | Transport/5xx exhausted | 502 | `aviasales_search_unavailable` | bounded |
 | Invalid provider JSON/schema | 502 | `aviasales_search_schema_error` | no |
+
+Generic HTTP failures are body-free typed errors carrying only the numeric
+status, its `client_error`/`server_error` class and retryability. Transport and
+JSON-decoder implementation exceptions are converted after leaving their
+active handlers, so provider-controlled exception text is absent from public
+errors, tracebacks, causes and contexts. Structured logs use only a closed
+endpoint name and stable error code; raw URL/host/payload/response text is not
+logged.
 
 Aggregate search and date-matrix endpoints keep their successful fake/partial
 data and report the same stable code as a provider denial instead of failing the

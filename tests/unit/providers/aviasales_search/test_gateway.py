@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import threading
 import traceback
 from collections.abc import Mapping
 from dataclasses import asdict, replace
 from datetime import UTC, date, datetime
-from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -37,8 +38,10 @@ from flight_hunter.providers.aviasales_search.gateway import (
 )
 from flight_hunter.providers.aviasales_search.schemas import ProviderLocation
 
-FIXTURE = Path("tests/fixtures/provider/aviasales_search/raw_chunk_mow_led.json")
 NOW = datetime(2026, 7, 14, 21, 0, tzinfo=UTC)
+EVIDENCE_NAMESPACE = UUID("11111111-1111-4111-8111-111111111111")
+OTHER_EVIDENCE_NAMESPACE = UUID("22222222-2222-4222-8222-222222222222")
+RESULTS_HOST = "results-fixture.aviasales.ru"
 
 
 class _FakeResponse:
@@ -156,7 +159,7 @@ def _start_params(*, origin: Any | None = None, destination: Any | None = None) 
         destination=destination or _airport("led"),
         departure_date="2026-09-15",
         return_date=None,
-        adults=2,
+        adults=1,
         children=0,
         infants=0,
         trip_class="Y",
@@ -165,13 +168,69 @@ def _start_params(*, origin: Any | None = None, destination: Any | None = None) 
     )
 
 
-def _continuation() -> ExactSearchContinuation:
+def _continuation(
+    *,
+    evidence_namespace: UUID = EVIDENCE_NAMESPACE,
+    origin: str = "SVO",
+    destination: str = "LED",
+    departure_date: date = date(2026, 9, 15),
+    return_date: date | None = None,
+    currency: str = "RUB",
+    passengers: int = 1,
+) -> ExactSearchContinuation:
     return ExactSearchContinuation(
         search_id="opaque-search-state",
-        results_url="opaque-results-host",
+        results_url=RESULTS_HOST,
         last_update_timestamp=0,
         request_id="opaque-request-state",
+        evidence_namespace=evidence_namespace,
+        expected_origin=origin,
+        expected_destination=destination,
+        expected_departure_date=departure_date,
+        expected_return_date=return_date,
+        expected_currency=currency,
+        passengers=passengers,
     )
+
+
+def _one_way_chunk(
+    *,
+    origin: str = "SVO",
+    destination: str = "LED",
+    departure_date: str = "2026-09-15",
+    currency: str | None = "RUB",
+    price: int = 4_321,
+) -> dict[str, object]:
+    price_payload: dict[str, object] = {"value": price}
+    if currency is not None:
+        price_payload["currency_code"] = currency
+    return {
+        "last_update_timestamp": 14,
+        "agents": {"1": {"gate_name": "Fixture Gate"}},
+        "airlines": {"FH": {"name": {"ru": {"default": "Fixture Air"}}}},
+        "flight_legs": [
+            {
+                "origin": origin,
+                "destination": destination,
+                "local_departure_date_time": f"{departure_date} 10:00",
+                "local_arrival_date_time": f"{departure_date} 11:30",
+                "operating_carrier_designator": {"carrier": "FH", "number": "101"},
+            }
+        ],
+        "tickets": [
+            {
+                "signature": "private-ticket-signature",
+                "segments": [{"flights": [0]}],
+                "proposals": [
+                    {
+                        "id": "1:0",
+                        "agent_id": 1,
+                        "price": price_payload,
+                    }
+                ],
+            }
+        ],
+    }
 
 
 def test_provider_location_normalizes_iata_and_rejects_unsupported_kinds() -> None:
@@ -191,7 +250,7 @@ def test_start_exact_uses_one_background_thread_call_and_airport_flags() -> None
             _FakeResponse(
                 payload={
                     "search_id": "opaque-search-state",
-                    "results_url": "opaque-results-host",
+                    "results_url": RESULTS_HOST,
                     "blet_url": "opaque-blet-state",
                 }
             )
@@ -202,12 +261,20 @@ def test_start_exact_uses_one_background_thread_call_and_airport_flags() -> None
     continuation = asyncio.run(
         _gateway(transport).start_exact(
             _start_params(),
+            evidence_namespace=EVIDENCE_NAMESPACE,
             request_fingerprint="sha256:start",
             context=ExecutionContext.WORKER,
         )
     )
 
     assert continuation.last_update_timestamp == 0
+    assert continuation.evidence_namespace == EVIDENCE_NAMESPACE
+    assert continuation.expected_origin == "SVO"
+    assert continuation.expected_destination == "LED"
+    assert continuation.expected_departure_date == date(2026, 9, 15)
+    assert continuation.expected_return_date is None
+    assert continuation.expected_currency == "RUB"
+    assert continuation.passengers == 1
     assert len(transport.post_calls) == 1
     directions = transport.post_calls[0]["json"]["search_params"]["directions"]
     assert directions[0]["is_origin_airport"] is True
@@ -224,6 +291,7 @@ def test_gateway_rejects_unknown_city_semantics_before_policy_or_transport() -> 
         asyncio.run(
             _gateway(transport).start_exact(
                 params,
+                evidence_namespace=EVIDENCE_NAMESPACE,
                 request_fingerprint="sha256:city",
                 context=ExecutionContext.WORKER,
             )
@@ -234,7 +302,7 @@ def test_gateway_rejects_unknown_city_semantics_before_policy_or_transport() -> 
 
 def test_gateway_admits_city_only_when_capability_is_supported() -> None:
     transport = _FakeTransport(
-        posts=[_FakeResponse(payload={"search_id": "opaque", "results_url": "opaque-host"})]
+        posts=[_FakeResponse(payload={"search_id": "opaque", "results_url": RESULTS_HOST})]
     )
     params = _start_params(
         origin=ProviderLocation(kind=LocationScopeKind.CITY, code="MOW"),
@@ -244,6 +312,7 @@ def test_gateway_admits_city_only_when_capability_is_supported() -> None:
     asyncio.run(
         _gateway(transport, city_state=CapabilityState.SUPPORTED).start_exact(
             params,
+            evidence_namespace=EVIDENCE_NAMESPACE,
             request_fingerprint="sha256:city-supported",
             context=ExecutionContext.WORKER,
         )
@@ -261,6 +330,7 @@ def test_gateway_policy_denial_performs_no_transport_call() -> None:
         asyncio.run(
             _gateway(transport, enabled=False).start_exact(
                 _start_params(),
+                evidence_namespace=EVIDENCE_NAMESPACE,
                 request_fingerprint="sha256:denied",
                 context=ExecutionContext.WORKER,
             )
@@ -285,7 +355,6 @@ def test_poll_and_calendar_each_authorize_before_transport() -> None:
         asyncio.run(
             gateway.poll_exact_once(
                 _continuation(),
-                passengers=1,
                 request_fingerprint="sha256:poll-denied",
             )
         )
@@ -293,6 +362,7 @@ def test_poll_and_calendar_each_authorize_before_transport() -> None:
         asyncio.run(
             gateway.calendar(
                 calendar_params,
+                evidence_namespace=EVIDENCE_NAMESPACE,
                 request_fingerprint="sha256:calendar-denied",
             )
         )
@@ -310,11 +380,31 @@ def test_gateway_requires_a_zero_retry_orchestrator_client() -> None:
     assert AviasalesSearchGateway
 
 
+def test_poll_interface_cannot_override_continuation_passenger_count() -> None:
+    assert "passengers" not in inspect.signature(AviasalesSearchGateway.poll_exact_once).parameters
+
+
+def test_start_exact_rejects_non_uuid_evidence_namespace_before_transport() -> None:
+    transport = _FakeTransport()
+
+    with pytest.raises(TypeError) as raised:
+        asyncio.run(
+            _gateway(transport).start_exact(
+                _start_params(),
+                evidence_namespace="private-namespace",  # type: ignore[arg-type]
+                request_fingerprint="sha256:invalid-namespace",
+            )
+        )
+
+    assert "private-namespace" not in str(raised.value)
+    assert transport.post_calls == []
+
+
 def test_start_exact_does_not_hide_a_second_transport_attempt() -> None:
     transport = _FakeTransport(
         posts=[
             _FakeResponse(status_code=500, payload={}),
-            _FakeResponse(payload={"search_id": "unused", "results_url": "unused"}),
+            _FakeResponse(payload={"search_id": "unused", "results_url": RESULTS_HOST}),
         ]
     )
 
@@ -322,6 +412,7 @@ def test_start_exact_does_not_hide_a_second_transport_attempt() -> None:
         asyncio.run(
             _gateway(transport).start_exact(
                 _start_params(),
+                evidence_namespace=EVIDENCE_NAMESPACE,
                 request_fingerprint="sha256:no-hidden-retry",
                 context=ExecutionContext.WORKER,
             )
@@ -331,13 +422,12 @@ def test_start_exact_does_not_hide_a_second_transport_attempt() -> None:
 
 
 def test_poll_exact_once_returns_only_confirmed_sanitized_evidence() -> None:
-    chunk = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    chunk = _one_way_chunk()
     transport = _FakeTransport(posts=[_FakeResponse(payload=[chunk])])
 
     outcome = asyncio.run(
         _gateway(transport).poll_exact_once(
             _continuation(),
-            passengers=2,
             request_fingerprint="sha256:poll",
             context=ExecutionContext.WORKER,
         )
@@ -354,7 +444,7 @@ def test_poll_exact_once_returns_only_confirmed_sanitized_evidence() -> None:
     assert first.provider_offer_id.removeprefix("aviasales_search:").isalnum()
     assert len(first.provider_offer_id.removeprefix("aviasales_search:")) == 64
     assert first.total_amount.currency == "RUB"
-    assert first.passengers == 2
+    assert first.passengers == 1
     assert first.observed_at == NOW
     assert first.seller_name
     assert first.segments
@@ -365,7 +455,7 @@ def test_poll_exact_once_returns_only_confirmed_sanitized_evidence() -> None:
     public_text = repr(asdict(outcome))
     for private_value in (
         "opaque-search-state",
-        "opaque-results-host",
+        RESULTS_HOST,
         "opaque-request-state",
         first.provider_offer_id,
     ):
@@ -376,19 +466,121 @@ def test_poll_exact_once_returns_only_confirmed_sanitized_evidence() -> None:
 
 
 def test_ticket_bearing_poll_does_not_claim_unproven_search_completion() -> None:
-    chunk = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    chunk = _one_way_chunk()
     transport = _FakeTransport(posts=[_FakeResponse(payload=[chunk])])
 
     outcome = asyncio.run(
         _gateway(transport).poll_exact_once(
             _continuation(),
-            passengers=1,
             request_fingerprint="sha256:not-complete",
         )
     )
 
     assert outcome.evidence
     assert outcome.complete is False
+
+
+@pytest.mark.parametrize(
+    "ticket_overrides",
+    [
+        {"origin": "DME"},
+        {"destination": "CDG"},
+        {"departure_date": "2026-09-16"},
+        {"currency": "USD"},
+    ],
+)
+def test_poll_rejects_ticket_that_does_not_match_bound_continuation(
+    ticket_overrides: dict[str, Any],
+) -> None:
+    transport = _FakeTransport(posts=[_FakeResponse(payload=[_one_way_chunk(**ticket_overrides)])])
+
+    with pytest.raises(AviasalesSearchSchemaError):
+        asyncio.run(
+            _gateway(transport).poll_exact_once(
+                _continuation(),
+                request_fingerprint="sha256:bound-ticket",
+            )
+        )
+
+    assert len(transport.post_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "chunk",
+    [
+        _one_way_chunk(currency=None),
+        _one_way_chunk(currency="РУБ"),
+        _one_way_chunk(price=-1),
+    ],
+)
+def test_poll_converts_corrupt_proposal_money_to_stable_schema_error(
+    chunk: dict[str, object],
+) -> None:
+    transport = _FakeTransport(posts=[_FakeResponse(payload=[chunk])])
+
+    with pytest.raises(AviasalesSearchSchemaError) as raised:
+        asyncio.run(
+            _gateway(transport).poll_exact_once(
+                _continuation(),
+                request_fingerprint="sha256:corrupt-money",
+            )
+        )
+
+    assert str(raised.value) == AviasalesSearchSchemaError.code
+    assert raised.value.__cause__ is None
+    assert len(transport.post_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("field_name", "private_value"),
+    [
+        ("results_url", "private-invalid-host.example.test"),
+        ("passengers", "private-passenger-count"),
+    ],
+)
+def test_poll_revalidates_corrupt_private_continuation_before_transport(
+    field_name: str,
+    private_value: str,
+) -> None:
+    transport = _FakeTransport()
+    continuation = _continuation()
+    object.__setattr__(continuation, field_name, private_value)
+
+    with pytest.raises((TypeError, ValueError, AviasalesSearchSchemaError)) as raised:
+        asyncio.run(
+            _gateway(transport).poll_exact_once(
+                continuation,
+                request_fingerprint="sha256:corrupt-continuation",
+            )
+        )
+
+    rendered = "".join(
+        traceback.format_exception(type(raised.value), raised.value, raised.value.__traceback__)
+    )
+    assert private_value not in str(raised.value)
+    assert private_value not in repr(raised.value)
+    assert private_value not in rendered
+    assert transport.post_calls == []
+
+
+def test_exact_evidence_uuid_is_idempotent_within_operation_namespace() -> None:
+    def poll(namespace: UUID) -> Any:
+        transport = _FakeTransport(posts=[_FakeResponse(payload=[_one_way_chunk()])])
+        return asyncio.run(
+            _gateway(transport).poll_exact_once(
+                _continuation(evidence_namespace=namespace),
+                request_fingerprint=f"sha256:{namespace}",
+            )
+        ).evidence[0]
+
+    first = poll(EVIDENCE_NAMESPACE)
+    repeated = poll(EVIDENCE_NAMESPACE)
+    other_operation = poll(OTHER_EVIDENCE_NAMESPACE)
+
+    assert first.id == repeated.id
+    assert first.id != other_operation.id
+    assert first.provider_offer_id == other_operation.provider_offer_id
+    assert first.segment_ids == other_operation.segment_ids
 
 
 def test_private_continuation_repr_redacts_all_upstream_state() -> None:
@@ -398,7 +590,7 @@ def test_private_continuation_repr_redacts_all_upstream_state() -> None:
 
     assert rendered == "ExactSearchContinuation(<private>)"
     assert "opaque-search-state" not in rendered
-    assert "opaque-results-host" not in rendered
+    assert RESULTS_HOST not in rendered
     assert "opaque-request-state" not in rendered
 
 
@@ -435,6 +627,7 @@ def test_calendar_returns_discovery_signals_in_one_transport_call() -> None:
     signals = asyncio.run(
         _gateway(transport).calendar(
             params,
+            evidence_namespace=EVIDENCE_NAMESPACE,
             request_fingerprint="sha256:calendar",
             context=ExecutionContext.WORKER,
         )
@@ -474,9 +667,57 @@ def test_calendar_returns_discovery_signals_in_one_transport_call() -> None:
                         )
                     ]
                 )
-            ).calendar(params, request_fingerprint="sha256:calendar-repeat")
+            ).calendar(
+                params,
+                evidence_namespace=EVIDENCE_NAMESPACE,
+                request_fingerprint="sha256:calendar-repeat",
+            )
         )[0].id
     )
+
+
+def test_calendar_evidence_uuid_is_scoped_to_operation_namespace() -> None:
+    params = CalendarSearchParams(
+        origin=_airport("SVO"),
+        destination=_airport("LED"),
+        depart_from=date(2026, 9, 14),
+        depart_to=date(2026, 9, 16),
+        one_way=True,
+        currency="RUB",
+    )
+
+    def observe(namespace: UUID) -> Any:
+        transport = _FakeTransport(
+            gets=[
+                _FakeResponse(
+                    payload={
+                        "prices": [
+                            {
+                                "origin": "SVO",
+                                "destination": "LED",
+                                "depart_date": "2026-09-15",
+                                "value": 4321,
+                                "currency": "RUB",
+                            }
+                        ]
+                    }
+                )
+            ]
+        )
+        return asyncio.run(
+            _gateway(transport).calendar(
+                params,
+                evidence_namespace=namespace,
+                request_fingerprint=f"sha256:calendar:{namespace}",
+            )
+        )[0]
+
+    first = observe(EVIDENCE_NAMESPACE)
+    repeated = observe(EVIDENCE_NAMESPACE)
+    other_operation = observe(OTHER_EVIDENCE_NAMESPACE)
+
+    assert first.id == repeated.id
+    assert first.id != other_operation.id
 
 
 def test_calendar_rejects_unsupported_passenger_mix_before_transport() -> None:
@@ -497,6 +738,7 @@ def test_calendar_rejects_unsupported_passenger_mix_before_transport() -> None:
         asyncio.run(
             _gateway(transport).calendar(
                 params,
+                evidence_namespace=EVIDENCE_NAMESPACE,
                 request_fingerprint="sha256:calendar-passengers",
             )
         )
@@ -514,6 +756,45 @@ def test_calendar_params_reject_non_string_currency_before_transport() -> None:
             one_way=True,
             currency=123,  # type: ignore[arg-type]
         )
+
+
+def test_calendar_rejects_response_currency_different_from_request() -> None:
+    transport = _FakeTransport(
+        gets=[
+            _FakeResponse(
+                payload={
+                    "prices": [
+                        {
+                            "origin": "SVO",
+                            "destination": "LED",
+                            "depart_date": "2026-09-15",
+                            "value": 4321,
+                            "currency": "USD",
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    params = CalendarSearchParams(
+        origin=_airport("SVO"),
+        destination=_airport("LED"),
+        depart_from=date(2026, 9, 14),
+        depart_to=date(2026, 9, 16),
+        one_way=True,
+        currency="RUB",
+    )
+
+    with pytest.raises(AviasalesSearchSchemaError):
+        asyncio.run(
+            _gateway(transport).calendar(
+                params,
+                evidence_namespace=EVIDENCE_NAMESPACE,
+                request_fingerprint="sha256:calendar-currency",
+            )
+        )
+
+    assert len(transport.get_calls) == 1
 
 
 def test_calendar_discards_wrong_route_and_out_of_range_provider_rows() -> None:
@@ -558,7 +839,11 @@ def test_calendar_discards_wrong_route_and_out_of_range_provider_rows() -> None:
     )
 
     signals = asyncio.run(
-        _gateway(transport).calendar(params, request_fingerprint="sha256:calendar-filter")
+        _gateway(transport).calendar(
+            params,
+            evidence_namespace=EVIDENCE_NAMESPACE,
+            request_fingerprint="sha256:calendar-filter",
+        )
     )
 
     assert len(signals) == 1
@@ -600,6 +885,7 @@ def test_calendar_schema_error_suppresses_provider_value_from_traceback() -> Non
         asyncio.run(
             _gateway(transport).calendar(
                 params,
+                evidence_namespace=EVIDENCE_NAMESPACE,
                 request_fingerprint="sha256:calendar-invalid",
             )
         )

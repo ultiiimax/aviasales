@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any
 
 from flight_hunter.domain.agent_search import LocationScopeKind
 
 _IATA_RE = re.compile(r"^[A-Z]{3}$")
+_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 
 class AviasalesSearchParseError(RuntimeError):
@@ -115,6 +117,8 @@ def _parse_ticket(
     segments_raw = raw.get("segments")
     if not isinstance(segments_raw, list) or not segments_raw:
         return None
+    if len(segments_raw) > 2:
+        raise AviasalesSearchParseError("aviasales_search_invalid_directions")
     proposals_raw = raw.get("proposals")
     if not isinstance(proposals_raw, list) or not proposals_raw:
         return None
@@ -126,6 +130,8 @@ def _parse_ticket(
         flights = seg.get("flights")
         if not isinstance(flights, list):
             return None
+        if not flights:
+            raise AviasalesSearchParseError("aviasales_search_invalid_directions")
         seg_segments: list[ParsedSegment] = []
         for fi in flights:
             if not isinstance(fi, int) or fi < 0 or fi >= len(legs):
@@ -134,16 +140,21 @@ def _parse_ticket(
             if not isinstance(leg, dict):
                 return None
             seg_segments.append(_parse_segment(leg, airlines))
-        segments.append(tuple(seg_segments))
+        direction = tuple(seg_segments)
+        _require_continuous_direction(direction)
+        segments.append(direction)
 
-    flat = [seg for group in segments for seg in group]
-    if not flat:
-        return None
-    origin = flat[0].origin
-    destination = flat[-1].destination
-    first_depart = flat[0].depart_at
+    outbound = segments[0]
+    origin = outbound[0].origin
+    destination = outbound[-1].destination
+    first_depart = outbound[0].depart_at
     departure_date = first_depart[:10]
-    return_date = segments[-1][0].depart_at[:10] if len(segments) > 1 else None
+    return_date: str | None = None
+    if len(segments) == 2:
+        inbound = segments[1]
+        if inbound[0].origin != destination or inbound[-1].destination != origin:
+            raise AviasalesSearchParseError("aviasales_search_invalid_directions")
+        return_date = inbound[0].depart_at[:10]
 
     best = _cheapest_proposal(proposals_raw, agents)
     if best is None:
@@ -157,6 +168,17 @@ def _parse_ticket(
         segments=tuple(segments),
         best_proposal=best,
     )
+
+
+def _require_continuous_direction(direction: tuple[ParsedSegment, ...]) -> None:
+    if not direction:
+        raise AviasalesSearchParseError("aviasales_search_invalid_directions")
+    for segment in direction:
+        if not _IATA_RE.fullmatch(segment.origin) or not _IATA_RE.fullmatch(segment.destination):
+            raise AviasalesSearchParseError("aviasales_search_invalid_directions")
+    for previous, current in pairwise(direction):
+        if previous.destination != current.origin:
+            raise AviasalesSearchParseError("aviasales_search_invalid_directions")
 
 
 def _parse_segment(leg: dict[str, Any], airlines: dict[str, Any]) -> ParsedSegment:
@@ -195,9 +217,17 @@ def _cheapest_proposal(
         if isinstance(value, float) and not value.is_integer():
             continue
         major = int(value)
+        if major < 0:
+            raise AviasalesSearchParseError("aviasales_search_invalid_money")
+        currency = price.get("currency_code")
+        if not isinstance(currency, str):
+            raise AviasalesSearchParseError("aviasales_search_invalid_money")
+        normalized_currency = currency.upper()
+        if not _CURRENCY_RE.fullmatch(normalized_currency):
+            raise AviasalesSearchParseError("aviasales_search_invalid_money")
         if best_value is not None and major >= best_value:
             continue
-        proposal = _parse_proposal(raw, major, str(price.get("currency_code") or ""), agents)
+        proposal = _parse_proposal(raw, major, normalized_currency, agents)
         if proposal is None:
             continue
         best = proposal
@@ -211,6 +241,8 @@ def _parse_proposal(
     currency: str,
     agents: dict[str, Any],
 ) -> ParsedProposal | None:
+    if price_major < 0 or not _CURRENCY_RE.fullmatch(currency):
+        raise AviasalesSearchParseError("aviasales_search_invalid_money")
     proposal_id = str(raw.get("id") or "")
     if not proposal_id:
         return None
@@ -224,7 +256,7 @@ def _parse_proposal(
         proposal_id=proposal_id,
         agent_id=agent_id_raw,
         price_minor_units=price_major * 100,
-        currency=currency.upper() or "RUB",
+        currency=currency,
         gate_name=gate_name,
         baggage_count=baggage_count,
         handbag=handbag,

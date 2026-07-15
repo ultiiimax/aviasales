@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from typing import Literal
@@ -7,8 +8,12 @@ from typing import Literal
 from flight_hunter.domain.agent_evidence import (
     ConfirmationState,
     DiscoverySignal,
+    DiscoverySource,
 )
 from flight_hunter.domain.offers import Freshness
+
+_IATA_RE = re.compile(r"^[A-Z]{3}$")
+_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +23,35 @@ class DateMatrixRequest:
     flexibility_days: int
     min_stay_days: int | None
     max_stay_days: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class DateMatrixDiscoveryContext:
+    origin: str
+    destination: str
+    currency: str
+    passengers: int
+    one_way: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.origin, str) or not isinstance(self.destination, str):
+            raise TypeError("discovery route must contain strings")
+        origin = self.origin.upper()
+        destination = self.destination.upper()
+        if not _IATA_RE.fullmatch(origin) or not _IATA_RE.fullmatch(destination):
+            raise ValueError("discovery route must contain ASCII IATA codes")
+        if not isinstance(self.currency, str):
+            raise TypeError("discovery currency must be a string")
+        currency = self.currency.upper()
+        if not _CURRENCY_RE.fullmatch(currency):
+            raise ValueError("discovery currency must be an ASCII ISO code")
+        if type(self.passengers) is not int or self.passengers < 1:
+            raise ValueError("discovery passengers must be a positive integer")
+        if type(self.one_way) is not bool:
+            raise TypeError("discovery one_way must be a boolean")
+        object.__setattr__(self, "origin", origin)
+        object.__setattr__(self, "destination", destination)
+        object.__setattr__(self, "currency", currency)
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,17 +135,26 @@ class DateMatrixPlanner:
         matrix: DateMatrix,
         *,
         signals: tuple[DiscoverySignal, ...],
+        context: DateMatrixDiscoveryContext,
         freshness: Freshness,
     ) -> DateMatrix:
         if not isinstance(matrix, DateMatrix):
             raise TypeError("matrix must be DateMatrix")
+        if not isinstance(context, DateMatrixDiscoveryContext):
+            raise TypeError("context must be DateMatrixDiscoveryContext")
         normalized_signals = tuple(signals)
         if not all(isinstance(signal, DiscoverySignal) for signal in normalized_signals):
             raise TypeError("signals must contain DiscoverySignal values")
         normalized_freshness = Freshness(freshness)
+        cell_keys = {(cell.departure_date, cell.return_date) for cell in matrix.cells}
         indexed: dict[tuple[date, date | None], DiscoverySignal] = {}
         for signal in normalized_signals:
             key = (signal.departure_date, signal.return_date)
+            _require_discovery_matches_context(
+                signal,
+                context=context,
+                cell_keys=cell_keys,
+            )
             existing = indexed.get(key)
             if existing is None:
                 indexed[key] = signal
@@ -167,3 +210,21 @@ class DateMatrixPlanner:
         if request.min_stay_days is not None and stay_days < request.min_stay_days:
             return False
         return not (request.max_stay_days is not None and stay_days > request.max_stay_days)
+
+
+def _require_discovery_matches_context(
+    signal: DiscoverySignal,
+    *,
+    context: DateMatrixDiscoveryContext,
+    cell_keys: set[tuple[date, date | None]],
+) -> None:
+    if (
+        signal.source_kind is not DiscoverySource.CALENDAR
+        or signal.origin != context.origin
+        or signal.destination != context.destination
+        or signal.observed_amount.currency != context.currency
+        or signal.passengers != context.passengers
+        or (signal.return_date is None) is not context.one_way
+        or (signal.departure_date, signal.return_date) not in cell_keys
+    ):
+        raise ValueError("discovery signal does not match matrix context")

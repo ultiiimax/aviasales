@@ -14,6 +14,7 @@ from flight_hunter.policy.guard import PolicyDecision, ProviderPolicyGuard
 from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchClient,
     AviasalesSearchSchemaError,
+    AviasalesTripClass,
     CalendarPrice,
     GraphqlFeedBlock,
     HotOffer,
@@ -99,7 +100,7 @@ class AviasalesSearchAdapter:
             adults=intent.passenger_mix.adults,
             children=intent.passenger_mix.children,
             infants=intent.passenger_mix.infants,
-            trip_class="Y",
+            trip_class=AviasalesTripClass.ECONOMY,
             currency=intent.currency,
             market="RU",
         )

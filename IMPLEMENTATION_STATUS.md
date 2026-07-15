@@ -66,6 +66,19 @@ rejected before false overlay/provider I/O. The slice is implemented but remains
 pending independent review; the progress checkbox stays open because durable
 worker execution belongs to Task 9.
 
+Task 8 independent-review hardening on 2026-07-15 closes the reviewed provider
+boundary and evidence-invariant gaps without starting Task 9. Result hosts are
+strict bare Aviasales ASCII hostnames; private client/gateway state is
+repr-redacted; transport/decoder failures cannot retain provider-controlled
+exception causes or contexts; and generic HTTP failures expose body-free typed
+status/retry metadata. Exact continuations now bind route, dates, currency,
+passengers and a caller operation namespace, while exact/calendar observation
+UUIDs are idempotent only inside that namespace. Proposal currency, money and
+direction groups are strict. Calendar publication and matrix overlay share
+route/date/currency/shape validation, with a typed overlay context and explicit
+one-adult indicative price basis. Contradictory passenger requests fail before
+provider I/O. The slice remains pending a fresh independent re-review.
+
 Task 8 verification on 2026-07-15: the mandatory focused provider/date-matrix
 suite passes 72 tests, the standalone mobile API regression suite passes 12,
 the complete unit suite passes 943, and the separate integration suite passes
@@ -74,6 +87,13 @@ the complete unit suite passes 943, and the separate integration suite passes
 aiosqlite event-loop teardown and lxml deprecation paths outside this slice.
 All provider tests use sanitized fixtures/fakes; no live call or secret-bearing
 value is part of the test or report.
+
+Task 8 review-fix verification on 2026-07-15: the required tests-only RED was
+98 failed / 66 passed before production edits. Final focused tests pass 165,
+the complete unit suite passes 1024 with 23 pre-existing teardown/deprecation
+warnings outside the changed flow, and integration passes 4. Full mypy reports
+no issues in 116 source files; Ruff reports 283 files formatted and all checks
+passing. No live provider call, migration or Task 9 worker change was made.
 
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic

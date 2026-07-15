@@ -61,7 +61,11 @@ def _transport_with_fixture_results() -> _FakeTransport:
     return _FakeTransport(
         posts=[
             _FakeResponse(
-                payload={"search_id": "sid-1", "results_url": "host-1", "blet_url": None}
+                payload={
+                    "search_id": "sid-1",
+                    "results_url": "results-fixture.aviasales.ru",
+                    "blet_url": None,
+                }
             ),
             _FakeResponse(payload=[chunk]),
         ]
@@ -123,7 +127,12 @@ def test_search_returns_live_offers_from_fixture_when_enabled() -> None:
 def test_search_wraps_chunk_parse_failure_as_schema_error() -> None:
     transport = _FakeTransport(
         posts=[
-            _FakeResponse(payload={"search_id": "sid-1", "results_url": "host-1"}),
+            _FakeResponse(
+                payload={
+                    "search_id": "sid-1",
+                    "results_url": "results-fixture.aviasales.ru",
+                }
+            ),
             _FakeResponse(payload=[{"tickets": "not-a-list"}]),
         ]
     )
@@ -182,7 +191,13 @@ def test_search_allows_scheduler_context_for_background_watch_scans() -> None:
 def test_resolve_purchase_url_returns_link_on_click() -> None:
     transport = _FakeTransport(
         posts=[
-            _FakeResponse(payload={"search_id": "sid-1", "results_url": "host-1", "blet_url": None})
+            _FakeResponse(
+                payload={
+                    "search_id": "sid-1",
+                    "results_url": "results-fixture.aviasales.ru",
+                    "blet_url": None,
+                }
+            )
         ],
         gets=[_FakeResponse(payload={"url": "https://gate.example/booking/x"})],
     )
@@ -191,7 +206,7 @@ def test_resolve_purchase_url_returns_link_on_click() -> None:
     url = adapter.resolve_purchase_url(
         search_id="sid-1",
         proposal_id="120:0",
-        results_url="host-1",
+        results_url="results-fixture.aviasales.ru",
         request_fingerprint="sha256:abc",
     )
 

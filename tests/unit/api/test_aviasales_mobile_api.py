@@ -199,6 +199,24 @@ class FailingMobileProvider(FakeMobileProvider):
         raise self.error
 
 
+class CalendarRowsProvider(FakeMobileProvider):
+    def __init__(self, rows: tuple[CalendarPrice, ...]) -> None:
+        super().__init__()
+        self.rows = rows
+
+    def calendar_prices(
+        self,
+        *,
+        origin: str,
+        destination: str,
+        depart_from: str,
+        depart_to: str,
+        one_way: bool,
+        currency: str = "rub",
+    ) -> tuple[CalendarPrice, ...]:
+        return self.rows
+
+
 def test_search_returns_booking_token_and_resolve_returns_purchase_url() -> None:
     provider = FakeMobileProvider()
     client = TestClient(_app(provider))
@@ -255,8 +273,73 @@ def test_typed_aviasales_mobile_endpoints_use_provider() -> None:
     assert calendar_price["confirmation_state"] == "indicative"
     assert calendar_price["requires_live_confirmation"] is True
     assert calendar_price["passengers"] == 1
+    assert calendar_price["provider_id"] == "aviasales_search"
+    assert calendar_price["source_kind"] == "calendar"
+    assert calendar_price["price_basis"] == "provider_single_adult_ticket"
+    assert datetime.fromisoformat(calendar_price["observed_at"]).utcoffset() is not None
     assert blocks.status_code == 200
     assert blocks.json()["blocks"] == [{"typename": "HotTicketsBlock"}]
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        CalendarPrice(
+            origin="CDG",
+            destination="LED",
+            departure_date="2026-09-15",
+            return_date=None,
+            price_minor_units=100,
+            currency="RUB",
+        ),
+        CalendarPrice(
+            origin="MOW",
+            destination="LED",
+            departure_date="private-invalid-date",
+            return_date=None,
+            price_minor_units=100,
+            currency="RUB",
+        ),
+        CalendarPrice(
+            origin="MOW",
+            destination="LED",
+            departure_date="2026-09-15",
+            return_date=None,
+            price_minor_units=-100,
+            currency="RUB",
+        ),
+        CalendarPrice(
+            origin="MOW",
+            destination="LED",
+            departure_date="2026-09-15",
+            return_date=None,
+            price_minor_units=100,
+            currency="USD",
+        ),
+        CalendarPrice(
+            origin="MOW",
+            destination="LED",
+            departure_date="2026-09-15",
+            return_date="2026-09-22",
+            price_minor_units=100,
+            currency="RUB",
+        ),
+    ],
+)
+def test_standalone_calendar_never_publishes_invalid_provider_row(
+    row: CalendarPrice,
+) -> None:
+    response = TestClient(_app(CalendarRowsProvider((row,)))).get(
+        "/api/v1/aviasales/calendar"
+        "?origin=MOW&destination=LED&depart_from=2026-09-01&depart_to=2026-09-30"
+        "&one_way=true&currency=RUB"
+    )
+
+    if response.status_code == 200:
+        assert response.json()["prices"] == []
+    else:
+        assert response.status_code == 502
+        assert response.json()["code"] == "aviasales_search_schema_error"
 
 
 @pytest.mark.parametrize(

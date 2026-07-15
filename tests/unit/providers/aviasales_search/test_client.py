@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -17,11 +18,14 @@ from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchSchemaError,
     AviasalesSearchTransport,
     CurlCffiTransport,
+    PollSearchResult,
     SearchStartParams,
+    StartSearchResult,
 )
 from flight_hunter.providers.aviasales_search.schemas import ProviderLocation
 
 FIXTURE = Path("tests/fixtures/provider/aviasales_search/raw_chunk_mow_led.json")
+RESULTS_HOST = "results-fixture.aviasales.ru"
 
 
 class _FakeResponse:
@@ -101,11 +105,24 @@ def _start_params() -> SearchStartParams:
     )
 
 
+def _assert_private_sentinel_absent(error: BaseException, sentinel: str) -> None:
+    rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert sentinel not in str(error)
+    assert sentinel not in repr(error)
+    assert sentinel not in rendered
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
 def test_start_search_builds_mobile_body_and_returns_ids() -> None:
     transport = _FakeTransport(
         posts=[
             _FakeResponse(
-                payload={"search_id": "sid-1", "results_url": "host-1", "blet_url": "blet-1"}
+                payload={
+                    "search_id": "sid-1",
+                    "results_url": RESULTS_HOST,
+                    "blet_url": "blet-1",
+                }
             )
         ]
     )
@@ -114,7 +131,7 @@ def test_start_search_builds_mobile_body_and_returns_ids() -> None:
     result = client.start_search(_start_params())
 
     assert result.search_id == "sid-1"
-    assert result.results_url == "host-1"
+    assert result.results_url == RESULTS_HOST
     assert result.blet_url == "blet-1"
     call = transport.post_calls[0]
     assert "/search/v2/start" in call["url"]
@@ -125,9 +142,128 @@ def test_start_search_builds_mobile_body_and_returns_ids() -> None:
     assert call["headers"]["X-Signature"] == "sig"
 
 
+def test_start_search_normalizes_contract_result_host() -> None:
+    transport = _FakeTransport(
+        posts=[
+            _FakeResponse(
+                payload={
+                    "search_id": "sid-1",
+                    "results_url": "RESULTS-FIXTURE.AVIASALES.RU",
+                }
+            )
+        ]
+    )
+
+    result = _client(transport).start_search(_start_params())
+
+    assert result.results_url == RESULTS_HOST
+
+
+@pytest.mark.parametrize(
+    "invalid_host",
+    [
+        "https://results-fixture.aviasales.ru",
+        "results-fixture.aviasales.ru/path",
+        "results-fixture.aviasales.ru?query=1",
+        "results-fixture.aviasales.ru#fragment",
+        "user@results-fixture.aviasales.ru",
+        "results-fixture.aviasales.ru:443",
+        "127.0.0.1",
+        "результат.aviasales.ru",
+        "aviasales.ru.example.test",
+    ],
+)
+def test_start_search_rejects_untrusted_result_host(
+    invalid_host: str,
+) -> None:
+    transport = _FakeTransport(
+        posts=[_FakeResponse(payload={"search_id": "sid-private", "results_url": invalid_host})]
+    )
+
+    with pytest.raises(AviasalesSearchSchemaError) as raised:
+        _client(transport).start_search(_start_params())
+
+    assert invalid_host not in str(raised.value)
+    assert len(transport.post_calls) == 1
+
+
+@pytest.mark.parametrize("operation", ["poll", "click"])
+@pytest.mark.parametrize(
+    "invalid_host",
+    [
+        "https://results-fixture.aviasales.ru",
+        "results-fixture.aviasales.ru/path",
+        "results-fixture.aviasales.ru?query=1",
+        "results-fixture.aviasales.ru#fragment",
+        "user@results-fixture.aviasales.ru",
+        "results-fixture.aviasales.ru:443",
+        "[::1]",
+        "127.0.0.1",
+        "результат.aviasales.ru",
+        "evil.example.test",
+    ],
+)
+def test_poll_and_click_reject_untrusted_result_host_before_transport(
+    operation: str,
+    invalid_host: str,
+) -> None:
+    transport = _FakeTransport()
+    client = _client(transport)
+
+    with pytest.raises(AviasalesSearchSchemaError) as raised:
+        if operation == "poll":
+            client.poll_results_once(
+                invalid_host,
+                "sid-private",
+                last_update_timestamp=0,
+                limit=50,
+                request_id="request-private",
+            )
+        else:
+            client.get_purchase_url("sid-private", "proposal-private", invalid_host)
+
+    assert invalid_host not in str(raised.value)
+    assert transport.post_calls == []
+    assert transport.get_calls == []
+
+
+def test_private_client_dtos_have_redacted_repr() -> None:
+    start = StartSearchResult(
+        search_id="private-search-id",
+        results_url="private-results-host.aviasales.ru",
+        blet_url="private-blet-state",
+    )
+    poll = PollSearchResult(
+        chunks=(
+            {
+                "tickets": [
+                    {
+                        "signature": "private-signature",
+                        "proposals": ["private-proposal"],
+                    }
+                ]
+            },
+        ),
+        last_update_timestamp=99,
+        has_tickets=True,
+    )
+
+    rendered = repr(start) + repr(poll)
+
+    for sentinel in (
+        "private-search-id",
+        "private-results-host",
+        "private-blet-state",
+        "private-signature",
+        "private-proposal",
+        "tickets",
+    ):
+        assert sentinel not in rendered
+
+
 def test_start_search_preserves_typed_location_flags_in_reverse_direction() -> None:
     transport = _FakeTransport(
-        posts=[_FakeResponse(payload={"search_id": "sid-1", "results_url": "host-1"})]
+        posts=[_FakeResponse(payload={"search_id": "sid-1", "results_url": RESULTS_HOST})]
     )
     client = _client(transport)
     params = SearchStartParams(
@@ -187,6 +323,9 @@ def test_search_start_params_reject_untyped_locations() -> None:
         ({"children": -1}, "children"),
         ({"currency": "R"}, "currency"),
         ({"currency": 123}, "currency"),
+        ({"currency": "РУБ"}, "currency"),
+        ({"market": "РФ"}, "market"),
+        ({"trip_class": "P"}, "trip_class"),
     ],
 )
 def test_search_start_params_reject_invalid_typed_values_before_transport(
@@ -225,7 +364,7 @@ def test_start_search_classifies_upstream_auth_failure_without_retry() -> None:
     [
         _FakeResponse(payload=None),
         _FakeResponse(payload=[]),
-        _FakeResponse(payload={"results_url": "host-1"}),
+        _FakeResponse(payload={"results_url": RESULTS_HOST}),
     ],
 )
 def test_start_search_classifies_invalid_payload_as_schema_error(
@@ -260,7 +399,7 @@ def test_poll_results_accumulates_chunks_with_tickets_and_stops_early() -> None:
     transport = _FakeTransport(posts=[_FakeResponse(payload=[chunk])])
     client = _client(transport)
 
-    chunks = client.poll_results("host-1", "sid-1", rounds=4, delay=0.0)
+    chunks = client.poll_results(RESULTS_HOST, "sid-1", rounds=4, delay=0.0)
 
     assert len(chunks) == 1
     assert chunks[0] is chunk
@@ -271,7 +410,7 @@ def test_poll_results_returns_empty_when_no_tickets_after_rounds() -> None:
     transport = _FakeTransport(posts=[_FakeResponse(payload=[]) for _ in range(3)])
     client = _client(transport)
 
-    chunks = client.poll_results("host-1", "sid-1", rounds=3, delay=0.0)
+    chunks = client.poll_results(RESULTS_HOST, "sid-1", rounds=3, delay=0.0)
 
     assert chunks == []
     assert len(transport.post_calls) == 3
@@ -291,7 +430,7 @@ def test_poll_results_once_makes_one_call_and_advances_cursor_monotonically() ->
     client = _client(transport)
 
     result = client.poll_results_once(
-        "host-1",
+        RESULTS_HOST,
         "sid-1",
         last_update_timestamp=10,
         limit=50,
@@ -311,7 +450,7 @@ def test_poll_results_once_rejects_a_non_object_chunk() -> None:
 
     with pytest.raises(AviasalesSearchSchemaError, match="aviasales_search_schema_error"):
         _client(transport).poll_results_once(
-            "host-1",
+            RESULTS_HOST,
             "sid-1",
             last_update_timestamp=0,
             limit=50,
@@ -325,7 +464,7 @@ def test_poll_results_rejects_non_list_payload() -> None:
     transport = _FakeTransport(posts=[_FakeResponse(payload={"tickets": []})])
 
     with pytest.raises(AviasalesSearchSchemaError, match="aviasales_search_schema_error"):
-        _client(transport).poll_results("host-1", "sid-1", rounds=1, delay=0.0)
+        _client(transport).poll_results(RESULTS_HOST, "sid-1", rounds=1, delay=0.0)
 
 
 def test_get_purchase_url_returns_url_from_clicks_response() -> None:
@@ -334,7 +473,7 @@ def test_get_purchase_url_returns_url_from_clicks_response() -> None:
     )
     client = _client(transport)
 
-    url = client.get_purchase_url("sid-1", "120:0", "host-1")
+    url = client.get_purchase_url("sid-1", "120:0", RESULTS_HOST)
 
     assert url == "https://gate.example/booking/abc"
     assert "/clicks/120:0" in transport.get_calls[0]["url"]
@@ -345,7 +484,7 @@ def test_get_purchase_url_returns_none_when_response_lacks_url() -> None:
     transport = _FakeTransport(gets=[_FakeResponse(payload={"status": "ok"})])
     client = _client(transport)
 
-    assert client.get_purchase_url("sid-1", "120:0", "host-1") is None
+    assert client.get_purchase_url("sid-1", "120:0", RESULTS_HOST) is None
 
 
 def test_suggest_places_uses_suggest_host_and_sanitizes_items() -> None:
@@ -495,6 +634,145 @@ def test_transport_error_is_retried_then_raised_as_search_error() -> None:
 
     with pytest.raises(AviasalesSearchError):
         client.start_search(_start_params())
+
+
+def test_transport_failure_drops_private_exception_chain() -> None:
+    sentinel = "private-transport-sentinel"
+
+    class _PrivateTransport:
+        def post(
+            self, url: str, *, json: Any, headers: Mapping[str, str], timeout: float
+        ) -> _FakeResponse:
+            raise OSError(sentinel)
+
+        def get(
+            self, url: str, *, params: Mapping[str, Any], headers: Mapping[str, str], timeout: float
+        ) -> _FakeResponse:
+            raise OSError(sentinel)
+
+    with pytest.raises(AviasalesSearchError) as raised:
+        _client(_PrivateTransport()).start_search(_start_params())
+
+    _assert_private_sentinel_absent(raised.value, sentinel)
+
+
+def test_provider_logs_never_include_transport_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from flight_hunter.providers.aviasales_search import client as client_module
+
+    logged: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        client_module,
+        "log_event",
+        lambda _event, **fields: logged.append(fields),
+    )
+
+    class _FailingCalendarTransport(_FakeTransport):
+        def get(
+            self,
+            url: str,
+            *,
+            params: Mapping[str, Any],
+            headers: Mapping[str, str],
+            timeout: float,
+        ) -> _FakeResponse:
+            raise OSError("private-calendar-transport")
+
+    with pytest.raises(AviasalesSearchError):
+        _client(_FailingCalendarTransport()).calendar_prices(
+            origin="MOW",
+            destination="LED",
+            depart_from="2026-09-01",
+            depart_to="2026-09-30",
+            one_way=True,
+            currency="RUB",
+        )
+
+    assert logged
+    rendered = repr(logged)
+    assert ".aviasales.ru" not in rendered
+    assert "private-calendar-transport" not in rendered
+
+
+def test_json_decoder_failure_drops_private_exception_chain() -> None:
+    sentinel = "private-json-sentinel"
+
+    class _PrivateJsonResponse(_FakeResponse):
+        def __init__(self) -> None:
+            super().__init__(payload={"safe": True})
+
+        def json(self) -> Any:
+            raise ValueError(sentinel)
+
+    transport = _FakeTransport(posts=[_PrivateJsonResponse()])
+
+    with pytest.raises(AviasalesSearchSchemaError) as raised:
+        _client(transport).start_search(_start_params())
+
+    _assert_private_sentinel_absent(raised.value, sentinel)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "status_class", "retryable"),
+    [(400, "client_error", False), (503, "server_error", True)],
+)
+def test_generic_http_failure_is_body_free_and_typed(
+    status_code: int,
+    status_class: str,
+    retryable: bool,
+) -> None:
+    sentinel = "private-http-body-sentinel"
+    transport = _FakeTransport(
+        posts=[_FakeResponse(status_code=status_code, payload={"detail": sentinel})]
+    )
+
+    with pytest.raises(AviasalesSearchError) as raised:
+        _client(transport).start_search(_start_params())
+
+    error = raised.value
+    assert getattr(error, "status_code", None) == status_code
+    assert getattr(error, "status_class", None) == status_class
+    assert getattr(error, "retryable", None) is retryable
+    _assert_private_sentinel_absent(error, sentinel)
+    assert len(transport.post_calls) == 1
+
+
+def test_calendar_rejects_mixed_provider_currency_as_schema_failure() -> None:
+    transport = _FakeTransport(
+        gets=[
+            _FakeResponse(
+                payload={
+                    "prices": [
+                        {
+                            "origin": "MOW",
+                            "destination": "LED",
+                            "depart_date": "2026-09-15",
+                            "value": 100,
+                            "currency": "RUB",
+                        },
+                        {
+                            "origin": "MOW",
+                            "destination": "LED",
+                            "depart_date": "2026-09-16",
+                            "value": 90,
+                            "currency": "USD",
+                        },
+                    ]
+                }
+            )
+        ]
+    )
+
+    with pytest.raises(AviasalesSearchSchemaError):
+        _client(transport).calendar_prices(
+            origin="MOW",
+            destination="LED",
+            depart_from="2026-09-01",
+            depart_to="2026-09-30",
+            one_way=True,
+            currency="RUB",
+        )
 
 
 def test_curl_cffi_transport_is_the_default_when_not_injected() -> None:

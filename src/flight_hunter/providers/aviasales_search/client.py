@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from enum import StrEnum
 from time import perf_counter, sleep
 from typing import Any, Literal, Protocol, cast
 
@@ -19,6 +21,11 @@ SUGGEST_BASE = "https://suggest.aviasales.ru"
 ARIADNE_BASE = "https://ariadne.aviasales.ru"
 DEFAULT_USER_AGENT = "Aviasales/7.24.0 (Android; 14; Pixel_8) okhttp/5.3.2"
 DEFAULT_IMPERSONATE: Literal["chrome120"] = "chrome120"
+_ASCII_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+_ASCII_IATA_RE = re.compile(r"^[A-Z]{3}$")
+_ASCII_MARKET_RE = re.compile(r"^[A-Z]{2}$")
+_RESULT_HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_RESULT_HOST_SUFFIX = "aviasales.ru"
 
 
 class AviasalesSearchError(ProviderOperationError):
@@ -54,18 +61,54 @@ class AviasalesSearchRateLimited(AviasalesSearchError):
         self.retry_after_seconds = retry_after_seconds
 
 
-@dataclass(frozen=True, slots=True)
+class AviasalesSearchTransportError(AviasalesSearchError):
+    code = "aviasales_search_transport_error"
+    retryable = True
+
+
+class AviasalesSearchHttpStatusError(AviasalesSearchError):
+    code = "aviasales_search_http_status_error"
+
+    def __init__(self, *, status_code: int) -> None:
+        if type(status_code) is not int or not 400 <= status_code <= 599:
+            raise ValueError("status_code must be an HTTP 4xx or 5xx status")
+        super().__init__()
+        self.status_code = status_code
+        self.status_class: Literal["client_error", "server_error"] = (
+            "client_error" if status_code < 500 else "server_error"
+        )
+        self.retryable = status_code >= 500
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class StartSearchResult:
     search_id: str
     results_url: str
     blet_url: str | None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.search_id, str) or not self.search_id:
+            raise AviasalesSearchSchemaError()
+        object.__setattr__(self, "results_url", normalize_results_host(self.results_url))
+        if self.blet_url is not None and not isinstance(self.blet_url, str):
+            raise AviasalesSearchSchemaError()
 
-@dataclass(frozen=True, slots=True)
+    def __repr__(self) -> str:
+        return "StartSearchResult(<private>)"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class PollSearchResult:
     chunks: tuple[dict[str, object], ...]
     last_update_timestamp: int
     has_tickets: bool
+
+    def __repr__(self) -> str:
+        return "PollSearchResult(<private>)"
+
+
+class AviasalesTripClass(StrEnum):
+    ECONOMY = "Y"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +120,7 @@ class SearchStartParams:
     adults: int
     children: int
     infants: int
-    trip_class: str
+    trip_class: AviasalesTripClass
     currency: str
     market: str
 
@@ -106,21 +149,28 @@ class SearchStartParams:
             minimum = 1 if field_name == "adults" else 0
             if type(value) is not int or value < minimum:
                 raise ValueError(f"{field_name} has an invalid value")
-        if not isinstance(self.trip_class, str) or not self.trip_class:
-            raise ValueError("trip_class is required")
+        if not isinstance(self.trip_class, str):
+            raise TypeError("trip_class must be a string")
+        trip_class = self.trip_class.upper()
+        if trip_class not in {item.value for item in AviasalesTripClass}:
+            raise ValueError("trip_class must be a supported provider value")
         if not isinstance(self.currency, str):
             raise TypeError("currency must be a string")
         currency = self.currency.upper()
-        if len(currency) != 3 or not currency.isalpha():
+        if not _ASCII_CURRENCY_RE.fullmatch(currency):
             raise ValueError("currency must be an ISO 4217 alpha-3 code")
         if not isinstance(self.market, str):
             raise TypeError("market must be a string")
         market = self.market.upper()
-        if len(market) != 2 or not market.isalpha():
+        if not _ASCII_MARKET_RE.fullmatch(market):
             raise ValueError("market must be an ISO alpha-2 code")
-        object.__setattr__(self, "trip_class", self.trip_class.upper())
+        object.__setattr__(self, "trip_class", AviasalesTripClass(trip_class))
         object.__setattr__(self, "currency", currency)
         object.__setattr__(self, "market", market)
+
+    @property
+    def passengers(self) -> int:
+        return self.adults + self.children + self.infants
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,7 +420,7 @@ class AviasalesSearchClient:
             raise ValueError("limit must be a positive integer")
         if not request_id:
             raise ValueError("request_id is required")
-        host = results_url.split("/")[0]
+        host = normalize_results_host(results_url)
         poll_url = f"https://{host}/search/v3.2/results"
         response = self._request(
             "POST",
@@ -411,7 +461,7 @@ class AviasalesSearchClient:
         *,
         blet_request_id: str | None = None,
     ) -> str | None:
-        host = results_url.split("/")[0]
+        host = normalize_results_host(results_url)
         url = f"{self._base_url}/searches/{search_id}/clicks/{proposal_id}"
         params = {
             "marker": self._marker,
@@ -421,7 +471,7 @@ class AviasalesSearchClient:
         response = self._request("GET", url, params=params, full_url=True)
         if response.status_code != 200 or not response.content:
             return None
-        payload = response.json()
+        payload = _json_value(response)
         if isinstance(payload, dict):
             link = payload.get("url")
             if isinstance(link, str) and link:
@@ -494,36 +544,46 @@ class AviasalesSearchClient:
         destination_type: str = "city",
         locale: str = "ru_RU",
     ) -> tuple[CalendarPrice, ...]:
+        normalized_origin = _normalized_ascii_iata(origin)
+        normalized_destination = _normalized_ascii_iata(destination)
+        normalized_currency = _normalized_ascii_currency(currency)
+        departure_from = _request_date(depart_from)
+        departure_to = _request_date(depart_to)
+        if departure_to < departure_from:
+            raise ValueError("depart_to cannot be before depart_from")
+        if type(one_way) is not bool:
+            raise TypeError("one_way must be a boolean")
         response = self._request(
             "GET",
             f"{self._explore_base_url}/api/v6/calendar.json",
             params={
-                "origin_iata": origin.upper(),
+                "origin_iata": normalized_origin,
                 "origin_type": origin_type,
-                "destination_iata": destination.upper(),
+                "destination_iata": normalized_destination,
                 "destination_type": destination_type,
                 "one_way": str(one_way).lower(),
                 "depart_date_from": depart_from,
                 "depart_date_to": depart_to,
-                "currency": currency.lower(),
+                "currency": normalized_currency.lower(),
                 "locale": locale,
                 "trip_class": "Y",
                 "marker": self._marker,
             },
             full_url=True,
         )
-        return tuple(
+        parsed = tuple(
             price
             for item in _iter_items(_json_value(response))
-            if (
-                price := _parse_calendar_price(
-                    item,
-                    default_origin=origin,
-                    default_destination=destination,
-                    default_currency=currency,
-                )
-            )
-            is not None
+            if (price := _parse_calendar_price(item)) is not None
+        )
+        return validate_calendar_price_rows(
+            parsed,
+            origin=normalized_origin,
+            destination=normalized_destination,
+            depart_from=departure_from,
+            depart_to=departure_to,
+            one_way=one_way,
+            currency=normalized_currency,
         )
 
     def main_page_blocks(
@@ -611,11 +671,13 @@ class AviasalesSearchClient:
         headers: dict[str, str] = dict(self._headers)
         if extra_headers:
             headers.update(extra_headers)
-        last_error: str | None = None
+        transport_exhausted = False
+        http_status_error: int | None = None
         for attempt in range(self._max_retries + 1):
             started = perf_counter()
             status: int | None = None
-            error_class: str | None = None
+            response: AviasalesSearchResponse | None = None
+            transport_failed = False
             try:
                 if method == "POST":
                     response = self._transport.post(
@@ -626,83 +688,118 @@ class AviasalesSearchClient:
                         url, params=params or {}, headers=headers, timeout=self._timeout
                     )
                 status = response.status_code
-                if status == 401:
-                    log_event(
-                        "provider_call",
-                        provider="aviasales_search",
-                        endpoint=_endpoint_name(target),
-                        status_code=status,
-                        error_class="auth_failed",
-                        duration_ms=max(0, int((perf_counter() - started) * 1000)),
-                    )
-                    raise AviasalesSearchAuthFailed()
-                if status == 403:
-                    log_event(
-                        "provider_call",
-                        provider="aviasales_search",
-                        endpoint=_endpoint_name(target),
-                        status_code=status,
-                        error_class="blocked",
-                        duration_ms=max(0, int((perf_counter() - started) * 1000)),
-                    )
-                    raise AviasalesSearchBlocked()
-                if status == 429:
-                    retry_after = _parse_retry_after(response.headers.get("Retry-After"))
-                    log_event(
-                        "provider_call",
-                        provider="aviasales_search",
-                        endpoint=_endpoint_name(target),
-                        status_code=status,
-                        error_class="rate_limited",
-                        duration_ms=max(0, int((perf_counter() - started) * 1000)),
-                    )
-                    raise AviasalesSearchRateLimited(retry_after_seconds=retry_after)
-                if status >= 500 and attempt < self._max_retries:
-                    last_error = f"http_{status}"
-                    self._sleep(_backoff(attempt))
-                    continue
+            except Exception:  # provider transport boundary: classify + log
+                transport_failed = True
+            if transport_failed:
                 log_event(
                     "provider_call",
                     provider="aviasales_search",
                     endpoint=_endpoint_name(target),
-                    status_code=status,
-                    duration_ms=max(0, int((perf_counter() - started) * 1000)),
-                )
-                return response
-            except AviasalesSearchError:
-                raise
-            except Exception as exc:  # provider transport boundary: classify + log
-                error_class = exc.__class__.__name__
-                last_error = error_class
-                log_event(
-                    "provider_call",
-                    provider="aviasales_search",
-                    endpoint=_endpoint_name(target),
-                    status_code=status,
-                    error_class=error_class,
+                    status_code=None,
+                    error_class="transport_error",
                     duration_ms=max(0, int((perf_counter() - started) * 1000)),
                 )
                 if attempt < self._max_retries:
                     self._sleep(_backoff(attempt))
                     continue
-                raise AviasalesSearchError(
-                    f"aviasales_search_transport_error:{error_class}"
-                ) from exc
-        raise AviasalesSearchError(f"aviasales_search_failed:{last_error}")
+                transport_exhausted = True
+                break
+            if response is None or type(status) is not int:
+                raise AviasalesSearchSchemaError()
+            if status == 401:
+                log_event(
+                    "provider_call",
+                    provider="aviasales_search",
+                    endpoint=_endpoint_name(target),
+                    status_code=status,
+                    error_class="auth_failed",
+                    duration_ms=max(0, int((perf_counter() - started) * 1000)),
+                )
+                raise AviasalesSearchAuthFailed()
+            if status == 403:
+                log_event(
+                    "provider_call",
+                    provider="aviasales_search",
+                    endpoint=_endpoint_name(target),
+                    status_code=status,
+                    error_class="blocked",
+                    duration_ms=max(0, int((perf_counter() - started) * 1000)),
+                )
+                raise AviasalesSearchBlocked()
+            if status == 429:
+                retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+                log_event(
+                    "provider_call",
+                    provider="aviasales_search",
+                    endpoint=_endpoint_name(target),
+                    status_code=status,
+                    error_class="rate_limited",
+                    duration_ms=max(0, int((perf_counter() - started) * 1000)),
+                )
+                raise AviasalesSearchRateLimited(retry_after_seconds=retry_after)
+            if status >= 400:
+                log_event(
+                    "provider_call",
+                    provider="aviasales_search",
+                    endpoint=_endpoint_name(target),
+                    status_code=status,
+                    error_class="server_error" if status >= 500 else "client_error",
+                    duration_ms=max(0, int((perf_counter() - started) * 1000)),
+                )
+                if status >= 500 and attempt < self._max_retries:
+                    self._sleep(_backoff(attempt))
+                    continue
+                http_status_error = status
+                break
+            log_event(
+                "provider_call",
+                provider="aviasales_search",
+                endpoint=_endpoint_name(target),
+                status_code=status,
+                duration_ms=max(0, int((perf_counter() - started) * 1000)),
+            )
+            return response
+        if http_status_error is not None:
+            raise AviasalesSearchHttpStatusError(status_code=http_status_error)
+        if transport_exhausted:
+            raise AviasalesSearchTransportError()
+        raise AviasalesSearchTransportError()
 
 
 def _backoff(attempt: int) -> float:
     return min(2.0**attempt, 4.0)
 
 
+def normalize_results_host(value: str) -> str:
+    """Return a contract-proven bare Aviasales result host or fail safely."""
+
+    if not isinstance(value, str) or not value or len(value) > 253 or not value.isascii():
+        raise AviasalesSearchSchemaError()
+    if value != value.strip():
+        raise AviasalesSearchSchemaError()
+    normalized = value.lower()
+    labels = normalized.split(".")
+    if normalized != _RESULT_HOST_SUFFIX and not normalized.endswith(f".{_RESULT_HOST_SUFFIX}"):
+        raise AviasalesSearchSchemaError()
+    if not labels or any(not _RESULT_HOST_LABEL_RE.fullmatch(label) for label in labels):
+        raise AviasalesSearchSchemaError()
+    return normalized
+
+
 def _endpoint_name(target: str) -> str:
-    if "/search/v2/start" in target:
-        return "start_search"
-    if "/search/v3.2/results" in target:
-        return "poll_results"
-    if "/clicks/" in target:
-        return "clicks"
-    return target.strip("/").replace("/", "_").replace("-", "_")
+    known_endpoints = (
+        ("/search/v2/start", "start_search"),
+        ("/search/v3.2/results", "poll_results"),
+        ("/clicks/", "clicks"),
+        ("/v2/places.json", "suggest_places"),
+        ("/v1/hot_offers/list.json", "hot_offers"),
+        ("/api/v6/calendar.json", "calendar"),
+        ("/api/gql", "main_page_blocks"),
+    )
+    for fragment, safe_name in known_endpoints:
+        if fragment in target:
+            return safe_name
+    return "unknown_endpoint"
 
 
 def _json_object(response: AviasalesSearchResponse) -> dict[str, Any]:
@@ -714,13 +811,18 @@ def _json_object(response: AviasalesSearchResponse) -> dict[str, Any]:
 
 def _json_value(response: AviasalesSearchResponse) -> Any:
     if response.status_code >= 400:
-        raise AviasalesSearchError(f"aviasales_search_http_{response.status_code}")
+        raise AviasalesSearchHttpStatusError(status_code=response.status_code)
     if not response.content:
         raise AviasalesSearchSchemaError()
+    decode_failed = False
+    payload: Any = None
     try:
-        return response.json()
-    except Exception as exc:  # JSON decoder boundary; payload text is intentionally discarded.
-        raise AviasalesSearchSchemaError() from exc
+        payload = response.json()
+    except Exception:  # JSON decoder boundary; payload text is intentionally discarded.
+        decode_failed = True
+    if decode_failed:
+        raise AviasalesSearchSchemaError()
+    return payload
 
 
 def _validated_poll_chunks(payload: Any) -> tuple[dict[str, object], ...]:
@@ -793,27 +895,149 @@ def _parse_hot_offer(item: dict[str, Any], *, default_currency: str) -> HotOffer
     )
 
 
-def _parse_calendar_price(
-    item: dict[str, Any],
-    *,
-    default_origin: str,
-    default_destination: str,
-    default_currency: str,
-) -> CalendarPrice | None:
+def _parse_calendar_price(item: dict[str, Any]) -> CalendarPrice | None:
+    origin = _first_str(item, "origin", "origin_iata")
+    destination = _first_str(item, "destination", "destination_iata")
     departure_date = _first_str(item, "depart_date", "departure_date", "date")
+    currency = _first_str(item, "currency", "currency_code")
     price_minor_units = _price_minor_units(item)
-    if not departure_date or price_minor_units is None:
+    if not origin or not destination or not departure_date or not currency:
+        return None
+    if price_minor_units is None:
         return None
     return CalendarPrice(
-        origin=(_first_str(item, "origin", "origin_iata") or default_origin).upper(),
-        destination=(
-            _first_str(item, "destination", "destination_iata") or default_destination
-        ).upper(),
+        origin=origin,
+        destination=destination,
         departure_date=departure_date,
         return_date=_first_str(item, "return_date", "return_at") or None,
         price_minor_units=price_minor_units,
-        currency=(_first_str(item, "currency", "currency_code") or default_currency).upper(),
+        currency=currency,
     )
+
+
+def validate_calendar_price_rows(
+    prices: tuple[CalendarPrice, ...],
+    *,
+    origin: str,
+    destination: str,
+    depart_from: date,
+    depart_to: date,
+    one_way: bool,
+    currency: str,
+) -> tuple[CalendarPrice, ...]:
+    """Validate provider calendar facts against the exact request context."""
+
+    normalized_origin = _normalized_ascii_iata(origin)
+    normalized_destination = _normalized_ascii_iata(destination)
+    normalized_currency = _normalized_ascii_currency(currency)
+    if type(depart_from) is not date or type(depart_to) is not date:
+        raise TypeError("calendar bounds must be dates")
+    if depart_to < depart_from:
+        raise ValueError("depart_to cannot be before depart_from")
+    if type(one_way) is not bool:
+        raise TypeError("one_way must be a boolean")
+
+    valid: list[CalendarPrice] = []
+    currency_mismatch = False
+    schema_corruption = False
+    for price in tuple(prices):
+        if not isinstance(price, CalendarPrice):
+            raise AviasalesSearchSchemaError()
+        row_origin = _ascii_iata_or_none(price.origin)
+        row_destination = _ascii_iata_or_none(price.destination)
+        if row_origin != normalized_origin or row_destination != normalized_destination:
+            continue
+        departure = _provider_date_or_none(price.departure_date)
+        if departure is None:
+            schema_corruption = True
+            continue
+        if not depart_from <= departure <= depart_to:
+            continue
+        returned = (
+            _provider_date_or_none(price.return_date) if price.return_date is not None else None
+        )
+        if price.return_date is not None and returned is None:
+            schema_corruption = True
+            continue
+        if one_way:
+            if price.return_date is not None:
+                continue
+        elif returned is None or returned < departure:
+            continue
+        if type(price.price_minor_units) is not int or price.price_minor_units < 0:
+            schema_corruption = True
+            continue
+        row_currency = _ascii_currency_or_none(price.currency)
+        if row_currency != normalized_currency:
+            currency_mismatch = True
+            continue
+        valid.append(
+            CalendarPrice(
+                origin=row_origin,
+                destination=row_destination,
+                departure_date=departure.isoformat(),
+                return_date=returned.isoformat() if returned is not None else None,
+                price_minor_units=price.price_minor_units,
+                currency=row_currency,
+            )
+        )
+    if currency_mismatch or schema_corruption:
+        raise AviasalesSearchSchemaError()
+    return tuple(valid)
+
+
+def _normalized_ascii_iata(value: str) -> str:
+    normalized = _ascii_iata_or_none(value)
+    if normalized is None:
+        raise AviasalesSearchSchemaError()
+    return normalized
+
+
+def _ascii_iata_or_none(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.upper()
+    return normalized if _ASCII_IATA_RE.fullmatch(normalized) else None
+
+
+def _normalized_ascii_currency(value: str) -> str:
+    normalized = _ascii_currency_or_none(value)
+    if normalized is None:
+        raise AviasalesSearchSchemaError()
+    return normalized
+
+
+def _ascii_currency_or_none(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.upper()
+    return normalized if _ASCII_CURRENCY_RE.fullmatch(normalized) else None
+
+
+def _request_date(value: str) -> date:
+    if not isinstance(value, str):
+        raise TypeError("calendar date must be an ISO date string")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise ValueError("calendar date must be a valid ISO date") from None
+    if parsed.isoformat() != value:
+        raise ValueError("calendar date must be a canonical ISO date")
+    return parsed
+
+
+def _provider_date_or_none(value: object) -> date | None:
+    if not isinstance(value, str):
+        return None
+    invalid = False
+    parsed: date | None = None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        invalid = True
+    if invalid or parsed is None or parsed.isoformat() != value:
+        return None
+    return parsed
 
 
 def _first_str(item: dict[str, Any], *keys: str) -> str:
