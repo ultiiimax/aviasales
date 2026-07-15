@@ -1,8 +1,12 @@
 # Aviasales Search API Contract Notes
 
-Verified: 2026-07-13 (`suggest.aviasales.ru` HTTP 200; exact MOW–LED search:
-OK, 50 live offers with sanitized summary); search/result/click schema from
-2026-07-04 live capture against `tickets-api.aviasales.ru`.
+Verified: 2026-07-14. Sanitized live checks established that Suggest and exact
+start returned schema-valid HTTP 200 responses, one exact poll returned a
+schema-valid list, and Explore calendar returned schema-valid rows with
+`locale=ru_RU`. The older `locale=ru` value returned HTTP 400 with an invalid
+locale classification. No prices, search IDs, result hosts, booking URLs,
+credentials or raw payloads were recorded. Search/result/click field provenance
+also uses the sanitized 2026-07-04 capture against `tickets-api.aviasales.ru`.
 
 Source: reverse-engineered from Aviasales Android APK `Aviasales_7.24.0` (local
 hobby project, not a partner integration). The mobile API endpoints below are
@@ -54,8 +58,8 @@ Body:
 {
   "search_params": {
     "directions": [
-      {"origin": "MOW", "destination": "LED", "date": "2026-09-15",
-       "is_origin_airport": false, "is_destination_airport": false}
+      {"origin": "SVO", "destination": "LED", "date": "2026-09-15",
+       "is_origin_airport": true, "is_destination_airport": true}
     ],
     "passengers": {"adults": 1, "children": 0, "infants": 0},
     "trip_class": "Y"
@@ -68,7 +72,12 @@ Body:
 ```
 
 Round trip: append a second direction with swapped origin/destination and
-`date` = return date.
+`date` = return date. Each direction preserves the typed location kind of its
+own origin/destination, so an airport remains `true` after the swap. The agent
+gateway admits a city code only when its frozen capability snapshot marks city
+semantics `supported`; the current snapshot is `unknown`, so agent plans fan out
+to explicit airport codes instead of guessing these flags. The legacy adapter
+retains its compatibility city flow outside approved orchestrator runs.
 
 Response: `{"search_id": "...", "results_url": "host.aviasales.ru", "blet_url": "..."}`.
 
@@ -87,9 +96,30 @@ Body:
 }
 ```
 
-`last_update_timestamp` is updated to the max seen across chunks. Poll every ~2s
-until a chunk with non-empty `tickets` arrives (the adapter stops early on the
-first ticket-bearing chunk; more rounds gather incremental updates if needed).
+`last_update_timestamp` is updated monotonically to the max seen across chunks.
+`poll_results_once` performs one request and returns validated chunks, the next
+cursor and whether that response contains tickets. The legacy synchronous
+`poll_results` wrapper repeats that primitive for compatibility. Approved agent
+runs use a client with `max_retries=0`; each retry is therefore a separate
+leased/budget-reserved operation attempt rather than hidden transport work.
+
+The sanitized fixture and live response expose no verified terminal
+`complete`/`finished` field. A ticket-bearing poll proves confirmed evidence is
+available but does **not** prove the upstream search is complete; the resumable
+gateway conservatively reports `complete=false`.
+
+## Request schema — Explore calendar
+
+GET `https://explore-api.aviasales.ru/api/v6/calendar.json` with typed
+`origin_iata`/`destination_iata`, matching `origin_type`/`destination_type`,
+date bounds, currency and `locale=ru_RU`. Live verification on 2026-07-14
+confirmed `ru_RU`; `ru` is no longer accepted by this endpoint.
+
+Calendar rows are mapped to `DiscoverySignal` with source `calendar`, integer
+minor-unit money, passenger basis and aware observation time. They remain
+`indicative`, require exact live confirmation and can never enter the confirmed
+offer ranker. Wrong-route or out-of-range rows are discarded before date-matrix
+overlay.
 
 ## Response schema — result chunk
 
@@ -122,6 +152,17 @@ Top-level keys (verified from live capture 2026-07-04):
 ### `airlines` / `agents` / `places`
 Dictionaries keyed by IATA/id. `airlines[id].name.ru.default`, `agents[id].label.ru.default`
 (or `.gate_name`), `places.airports[iata].name.ru.default`.
+
+## Resumable agent gateway boundary
+
+Exact start returns server-private `ExactSearchContinuation` state only. Its
+search ID, result host, cursor and request ID are excluded from `repr` and are
+not members of the public poll result. Ticket-bearing chunks map inside the
+provider boundary to `ConfirmedOfferEvidence`: hash-only deterministic offer
+and segment IDs, provider source, aware observation time, passenger total,
+verified seller/segments, unknown protection and `None` for baggage when the
+response does not provide it. Public evidence contains no raw DTO, proposal or
+click payload, booking URL, signature, marker, cookie or token.
 
 ## Purchase URL — `/clicks/{proposal_id}`
 

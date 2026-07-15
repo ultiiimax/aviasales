@@ -7,7 +7,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
 | Provider | Adapter | Credentials | Enabled | Background allowed | Merge allowed | Last verification |
 |---|---|---:|---:|---:|---:|---|
 | Fake | implemented offline demo | none | yes | yes | yes | n/a |
-| Aviasales Search | implemented mobile API, live | `AVIASALES_SEARCH_SIGNATURE`, `AVIASALES_SEARCH_MARKER` | env flag | yes | yes | 2026-07-13 exact live MOW–LED smoke: 50 offers |
+| Aviasales Search | implemented mobile API, live | `AVIASALES_SEARCH_SIGNATURE`, `AVIASALES_SEARCH_MARKER` | env flag | yes | yes | 2026-07-14 sanitized schema checks: Suggest/start HTTP 200, poll list, Explore calendar `ru_RU` rows |
 | SearXNG | implemented URL discovery | self-hosted optional | env flag | no, user action | candidate only | 2026-06-29 |
 | Crawl4AI | implemented markdown extraction | self-hosted optional | env flag | no, user action | candidate only | 2026-06-29 |
 | Deal discovery | implemented orchestrator | local components | component flags | no, user action | candidate only | 2026-06-29 |
@@ -44,6 +44,36 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [ ] Isolate hidden-city research behind a second acknowledgement.
   - [ ] Add evidence-gated buy timing, anomaly and currency analysis.
   - [ ] Pass browser, recovery, migration, security and release gates.
+
+Task 8 slice plan: freeze explicit airport/city provider locations; split exact
+search into one-call start/poll operations with private continuation state;
+map ticket-bearing polls to confirmed evidence; keep calendar rows as
+indicative discovery signals in the date matrix; then run fixture-only focused,
+unit, integration, type and lint gates. Implementation remains pending
+independent review until a separate reviewer accepts it.
+
+Task 8 implementation on 2026-07-15 adds the single-attempt async Aviasales
+gateway and keeps Task 9 worker execution out of scope. Typed provider
+locations preserve airport flags across reverse directions; the frozen current
+capability rejects city semantics before I/O. Exact continuation data is
+server-private and repr-redacted, while public polls contain only hash-identified
+confirmed evidence, a cursor and conservative `complete=false` because no
+terminal provider field is contract-proven. Calendar rows are distinct
+indicative discovery signals in both calendar APIs/date-matrix responses, use
+the verified `ru_RU` locale, carry the one-passenger basis and require live
+confirmation. Wrong-route/out-of-range rows and malformed typed inputs are
+rejected before false overlay/provider I/O. The slice is implemented but remains
+pending independent review; the progress checkbox stays open because durable
+worker execution belongs to Task 9.
+
+Task 8 verification on 2026-07-15: the mandatory focused provider/date-matrix
+suite passes 72 tests, the standalone mobile API regression suite passes 12,
+the complete unit suite passes 943, and the separate integration suite passes
+4. Full mypy reports no issues in 116 source files; global Ruff format/check and
+`git diff --check` pass. Eight unit-suite warnings come from pre-existing
+aiosqlite event-loop teardown and lxml deprecation paths outside this slice.
+All provider tests use sanitized fixtures/fakes; no live call or secret-bearing
+value is part of the test or report.
 
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic

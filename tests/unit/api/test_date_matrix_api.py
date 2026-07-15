@@ -53,6 +53,8 @@ def test_date_matrix_endpoint_returns_unpriced_planning_cells() -> None:
     assert body["pricing_denials"] == ["route_required_for_pricing"]
     assert body["cells"]
     assert all(6 <= cell["stay_days"] <= 8 for cell in body["cells"])
+    assert all(cell["evidence_kind"] is None for cell in body["cells"])
+    assert all(cell["confirmation_state"] is None for cell in body["cells"])
 
 
 def test_date_matrix_with_route_gracefully_reports_missing_mobile_provider() -> None:
@@ -178,4 +180,42 @@ def test_date_matrix_can_overlay_aviasales_mobile_calendar_prices() -> None:
     assert priced_cells[0]["currency"] == "RUB"
     assert priced_cells[0]["provider_id"] == "aviasales_search"
     assert priced_cells[0]["freshness"] == "live"
-    assert priced_cells[0]["requires_live_confirmation"] is False
+    assert priced_cells[0]["evidence_kind"] == "discovery_signal"
+    assert priced_cells[0]["confirmation_state"] == "indicative"
+    assert priced_cells[0]["requires_live_confirmation"] is True
+
+
+def test_date_matrix_never_attaches_a_wrong_route_calendar_row_by_date_alone() -> None:
+    provider = FakeCalendarProvider(
+        prices=(
+            CalendarPrice(
+                origin="LED",
+                destination="IST",
+                departure_date="2026-09-10",
+                return_date="2026-09-20",
+                price_minor_units=100,
+                currency="RUB",
+            ),
+        )
+    )
+    client = TestClient(create_app(provider_instances={"aviasales_search": provider}))
+
+    response = client.post(
+        "/api/v1/searches/date-matrix",
+        json={
+            "origin": "MOW",
+            "destination": "IST",
+            "departure_date": "2026-09-10",
+            "return_date": "2026-09-20",
+            "flexibility_days": 1,
+            "passengers": 1,
+            "currency": "RUB",
+            "provider_ids": ["aviasales_search"],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["priced"] is False
+    assert body["pricing_denials"] == ["aviasales_search_empty"]
+    assert all(cell["amount_minor"] is None for cell in body["cells"])

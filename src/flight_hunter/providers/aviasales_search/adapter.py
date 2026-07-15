@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from flight_hunter.domain.agent_search import LocationScopeKind
 from flight_hunter.domain.offers import FlightOffer, SearchIntent
 from flight_hunter.domain.policy import (
     ExecutionContext,
@@ -20,7 +21,11 @@ from flight_hunter.providers.aviasales_search.client import (
     SuggestPlace,
 )
 from flight_hunter.providers.aviasales_search.mapper import map_parsed_ticket
-from flight_hunter.providers.aviasales_search.schemas import AviasalesSearchParseError, parse_chunks
+from flight_hunter.providers.aviasales_search.schemas import (
+    AviasalesSearchParseError,
+    ProviderLocation,
+    parse_chunks,
+)
 
 
 class AviasalesSearchAdapter:
@@ -87,8 +92,8 @@ class AviasalesSearchAdapter:
             return ()
 
         params = SearchStartParams(
-            origin=intent.origin,
-            destination=intent.destination,
+            origin=ProviderLocation(kind=LocationScopeKind.CITY, code=intent.origin),
+            destination=ProviderLocation(kind=LocationScopeKind.CITY, code=intent.destination),
             departure_date=intent.departure_date,
             return_date=intent.return_date,
             adults=intent.passenger_mix.adults,

@@ -249,7 +249,12 @@ def test_typed_aviasales_mobile_endpoints_use_provider() -> None:
     assert hot.status_code == 200
     assert hot.json()["offers"][0]["amount_minor"] == 123_400
     assert calendar.status_code == 200
-    assert calendar.json()["prices"][0]["departure_date"] == "2026-09-01"
+    calendar_price = calendar.json()["prices"][0]
+    assert calendar_price["departure_date"] == "2026-09-01"
+    assert calendar_price["evidence_kind"] == "discovery_signal"
+    assert calendar_price["confirmation_state"] == "indicative"
+    assert calendar_price["requires_live_confirmation"] is True
+    assert calendar_price["passengers"] == 1
     assert blocks.status_code == 200
     assert blocks.json()["blocks"] == [{"typename": "HotTicketsBlock"}]
 

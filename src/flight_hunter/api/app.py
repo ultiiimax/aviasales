@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from time import perf_counter
+from typing import Literal
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
@@ -114,6 +115,7 @@ from flight_hunter.deals import DealDiscoveryService
 from flight_hunter.deals.crawl4ai_client import Crawl4AiClientError, Crawl4AiMarkdownClient
 from flight_hunter.deals.searxng_client import SearxngClient, SearxngClientError
 from flight_hunter.deals.url_policy import DealUrlPolicy, DealUrlPolicyError
+from flight_hunter.domain.agent_evidence import ConfirmationState, DiscoverySignal
 from flight_hunter.domain.agent_search import DateMode
 from flight_hunter.domain.auth import AuthSession, HouseholdRole, new_secret_token, token_hash
 from flight_hunter.domain.manual_confirmation import (
@@ -189,7 +191,9 @@ from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchError,
     AviasalesSearchRateLimited,
     AviasalesSearchSchemaError,
+    CalendarPrice,
 )
+from flight_hunter.providers.aviasales_search.mapper import map_calendar_price_to_discovery
 from flight_hunter.providers.personal_observer import (
     PersonalObserverConfig,
     PersonalObserverRunner,
@@ -682,6 +686,10 @@ class AviasalesCalendarPriceResponse(BaseModel):
     return_date: str | None
     amount_minor: int
     currency: str
+    evidence_kind: Literal["discovery_signal"] = "discovery_signal"
+    confirmation_state: ConfirmationState = ConfirmationState.INDICATIVE
+    requires_live_confirmation: Literal[True] = True
+    passengers: Literal[1] = 1
 
 
 class AviasalesCalendarResponse(BaseModel):
@@ -1097,6 +1105,8 @@ class DateMatrixCellResponse(BaseModel):
     provider_id: str | None = None
     freshness: str | None = None
     observed_at: str | None = None
+    evidence_kind: Literal["discovery_signal"] | None = None
+    confirmation_state: ConfirmationState | None = None
     requires_live_confirmation: bool | None = None
 
 
@@ -2993,14 +3003,19 @@ def create_app(
                 max_stay_days=body.max_stay_days,
             )
         )
-        offers, denials, provider_calls = _date_matrix_mobile_calendar_offers(
+        signals, denials, provider_calls = _date_matrix_mobile_calendar_signals(
             body,
             settings=settings,
             provider_instances=provider_instances,
         )
+        if signals:
+            matrix = date_matrix_planner.overlay_discovery(
+                matrix,
+                signals=signals,
+                freshness=Freshness.LIVE,
+            )
         return _date_matrix_response(
             matrix,
-            offers=offers,
             pricing_denials=denials,
             provider_calls_required=provider_calls,
         )
@@ -4762,12 +4777,12 @@ def _nearby_airport_response(nearby: NearbyAirport) -> NearbyAirportResponse:
     )
 
 
-def _date_matrix_mobile_calendar_offers(
+def _date_matrix_mobile_calendar_signals(
     body: DateMatrixRequestBody,
     *,
     settings: AppSettings,
     provider_instances: dict[str, AviasalesSearchAdapter],
-) -> tuple[tuple[FlightOffer, ...], list[str], int]:
+) -> tuple[tuple[DiscoverySignal, ...], list[str], int]:
     if body.origin is None or body.destination is None:
         return (), ["route_required_for_pricing"], 0
     if body.provider_ids is not None and "aviasales_search" not in body.provider_ids:
@@ -4788,96 +4803,74 @@ def _date_matrix_mobile_calendar_offers(
         )
     except AviasalesSearchError as exc:
         return (), [exc.code], 1
-    offers = tuple(
-        FlightOffer(
-            provider_id="aviasales_search",
-            provider_offer_id=(
-                "aviasales_calendar:"
-                f"{price.origin}:{price.destination}:{price.departure_date}:"
-                f"{price.return_date or ''}:{price.price_minor_units}:{price.currency}"
-            ),
-            origin=price.origin,
-            destination=price.destination,
-            departure_date=price.departure_date,
-            return_date=price.return_date,
-            total_price=Money(price.price_minor_units, price.currency),
-            passengers=body.passengers,
-            observed_at=datetime.now(UTC),
-            freshness=Freshness.LIVE,
-            requires_live_confirmation=False,
-            baggage_summary=None,
-            price_basis=PriceBasis.TOTAL_FOR_PASSENGERS,
+    observed_at = datetime.now(UTC)
+    try:
+        signals = tuple(
+            map_calendar_price_to_discovery(
+                price,
+                observed_at=observed_at,
+                passengers=body.passengers,
+            )
+            for price in prices
+            if _calendar_price_matches_date_matrix(price, body)
         )
-        for price in prices
-    )
-    if not offers:
+    except (AviasalesSearchSchemaError, TypeError, ValueError):
+        return (), [AviasalesSearchSchemaError.code], 1
+    if not signals:
         return (), ["aviasales_search_empty"], 1
-    return offers, [], 1
+    return signals, [], 1
 
 
 def _date_matrix_response(
     matrix: DateMatrix,
     *,
-    offers: tuple[FlightOffer, ...] = (),
     pricing_denials: list[str] | None = None,
     provider_calls_required: int | None = None,
 ) -> DateMatrixResponse:
-    priced_offers = _date_matrix_offer_index(offers)
     return DateMatrixResponse(
-        cells=[
-            _date_matrix_cell_response(
-                cell,
-                offer=priced_offers.get(_date_matrix_cell_key(cell)),
-            )
-            for cell in matrix.cells
-        ],
+        cells=[_date_matrix_cell_response(cell) for cell in matrix.cells],
         provider_calls_required=(
             provider_calls_required
             if provider_calls_required is not None
             else matrix.provider_calls_required
         ),
-        priced=bool(priced_offers) or matrix.priced,
+        priced=matrix.priced,
         pricing_denials=pricing_denials or [],
     )
 
 
-def _date_matrix_offer_index(
-    offers: tuple[FlightOffer, ...],
-) -> dict[tuple[str, str | None], FlightOffer]:
-    indexed: dict[tuple[str, str | None], FlightOffer] = {}
-    for offer in offers:
-        key = (offer.departure_date, offer.return_date)
-        existing = indexed.get(key)
-        if existing is None or offer.total_price.minor_units < existing.total_price.minor_units:
-            indexed[key] = offer
-    return indexed
-
-
-def _date_matrix_cell_key(cell: DateMatrixCell) -> tuple[str, str | None]:
-    return (
-        cell.departure_date.isoformat(),
-        cell.return_date.isoformat() if cell.return_date is not None else None,
-    )
-
-
-def _date_matrix_cell_response(
-    cell: DateMatrixCell,
-    *,
-    offer: FlightOffer | None = None,
-) -> DateMatrixCellResponse:
+def _date_matrix_cell_response(cell: DateMatrixCell) -> DateMatrixCellResponse:
+    signal = cell.discovery_signal
     return DateMatrixCellResponse(
         departure_date=cell.departure_date.isoformat(),
         return_date=cell.return_date.isoformat() if cell.return_date is not None else None,
         stay_days=cell.stay_days,
-        amount_minor=offer.total_price.minor_units if offer is not None else None,
-        currency=offer.total_price.currency if offer is not None else None,
-        provider_id=offer.provider_id if offer is not None else None,
-        freshness=offer.freshness.value if offer is not None else None,
-        observed_at=offer.observed_at.isoformat() if offer is not None else None,
-        requires_live_confirmation=(
-            offer.requires_live_confirmation if offer is not None else None
-        ),
+        amount_minor=signal.observed_amount.minor_units if signal is not None else None,
+        currency=signal.observed_amount.currency if signal is not None else None,
+        provider_id=signal.provider_id if signal is not None else None,
+        freshness=cell.freshness.value if cell.freshness is not None else None,
+        observed_at=signal.observed_at.isoformat() if signal is not None else None,
+        evidence_kind=cell.evidence_kind,
+        confirmation_state=cell.confirmation_state,
+        requires_live_confirmation=cell.requires_live_confirmation,
     )
+
+
+def _calendar_price_matches_date_matrix(
+    price: CalendarPrice,
+    body: DateMatrixRequestBody,
+) -> bool:
+    if body.origin is None or body.destination is None:
+        return False
+    if price.origin != body.origin.upper() or price.destination != body.destination.upper():
+        return False
+    try:
+        departure = date.fromisoformat(price.departure_date)
+    except ValueError:
+        raise AviasalesSearchSchemaError() from None
+    lower = body.departure_date - timedelta(days=body.flexibility_days)
+    upper = body.departure_date + timedelta(days=body.flexibility_days)
+    return lower <= departure <= upper
 
 
 def _watch_response(watch: WatchRecord) -> WatchResponse:

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from flight_hunter.domain.agent_search import LocationScopeKind
 from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchAuthFailed,
     AviasalesSearchBlocked,
@@ -18,6 +19,7 @@ from flight_hunter.providers.aviasales_search.client import (
     CurlCffiTransport,
     SearchStartParams,
 )
+from flight_hunter.providers.aviasales_search.schemas import ProviderLocation
 
 FIXTURE = Path("tests/fixtures/provider/aviasales_search/raw_chunk_mow_led.json")
 
@@ -86,8 +88,8 @@ def _client(transport: AviasalesSearchTransport) -> AviasalesSearchClient:
 
 def _start_params() -> SearchStartParams:
     return SearchStartParams(
-        origin="MOW",
-        destination="LED",
+        origin=ProviderLocation(kind=LocationScopeKind.CITY, code="MOW"),
+        destination=ProviderLocation(kind=LocationScopeKind.CITY, code="LED"),
         departure_date="2026-09-15",
         return_date=None,
         adults=1,
@@ -121,6 +123,92 @@ def test_start_search_builds_mobile_body_and_returns_ids() -> None:
     assert body["search_params"]["directions"][0]["origin"] == "MOW"
     assert body["search_params"]["passengers"] == {"adults": 1, "children": 0, "infants": 0}
     assert call["headers"]["X-Signature"] == "sig"
+
+
+def test_start_search_preserves_typed_location_flags_in_reverse_direction() -> None:
+    transport = _FakeTransport(
+        posts=[_FakeResponse(payload={"search_id": "sid-1", "results_url": "host-1"})]
+    )
+    client = _client(transport)
+    params = SearchStartParams(
+        origin=ProviderLocation(kind=LocationScopeKind.AIRPORT, code="svo"),
+        destination=ProviderLocation(kind=LocationScopeKind.CITY, code="led"),
+        departure_date="2026-09-15",
+        return_date="2026-09-22",
+        adults=1,
+        children=0,
+        infants=0,
+        trip_class="Y",
+        currency="RUB",
+        market="RU",
+    )
+
+    client.start_search(params)
+
+    outbound, inbound = transport.post_calls[0]["json"]["search_params"]["directions"]
+    assert outbound == {
+        "origin": "SVO",
+        "destination": "LED",
+        "date": "2026-09-15",
+        "is_origin_airport": True,
+        "is_destination_airport": False,
+    }
+    assert inbound == {
+        "origin": "LED",
+        "destination": "SVO",
+        "date": "2026-09-22",
+        "is_origin_airport": False,
+        "is_destination_airport": True,
+    }
+
+
+def test_search_start_params_reject_untyped_locations() -> None:
+    with pytest.raises(TypeError, match="origin must be ProviderLocation"):
+        SearchStartParams(
+            origin="MOW",  # type: ignore[arg-type]
+            destination=ProviderLocation(kind=LocationScopeKind.AIRPORT, code="LED"),
+            departure_date="2026-09-15",
+            return_date=None,
+            adults=1,
+            children=0,
+            infants=0,
+            trip_class="Y",
+            currency="RUB",
+            market="RU",
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"departure_date": "not-a-date"}, "departure_date"),
+        ({"return_date": "2026-09-14"}, "return_date"),
+        ({"adults": 0}, "adults"),
+        ({"children": -1}, "children"),
+        ({"currency": "R"}, "currency"),
+        ({"currency": 123}, "currency"),
+    ],
+)
+def test_search_start_params_reject_invalid_typed_values_before_transport(
+    overrides: dict[str, Any],
+    message: str,
+) -> None:
+    values: dict[str, Any] = {
+        "origin": ProviderLocation(kind=LocationScopeKind.AIRPORT, code="SVO"),
+        "destination": ProviderLocation(kind=LocationScopeKind.AIRPORT, code="LED"),
+        "departure_date": "2026-09-15",
+        "return_date": None,
+        "adults": 1,
+        "children": 0,
+        "infants": 0,
+        "trip_class": "Y",
+        "currency": "RUB",
+        "market": "RU",
+    }
+    values.update(overrides)
+
+    with pytest.raises((TypeError, ValueError), match=message):
+        SearchStartParams(**values)
 
 
 def test_start_search_classifies_upstream_auth_failure_without_retry() -> None:
@@ -187,6 +275,50 @@ def test_poll_results_returns_empty_when_no_tickets_after_rounds() -> None:
 
     assert chunks == []
     assert len(transport.post_calls) == 3
+
+
+def test_poll_results_once_makes_one_call_and_advances_cursor_monotonically() -> None:
+    transport = _FakeTransport(
+        posts=[
+            _FakeResponse(
+                payload=[
+                    {"last_update_timestamp": 9, "tickets": []},
+                    {"last_update_timestamp": 14, "tickets": [{"id": "fixture"}]},
+                ]
+            )
+        ]
+    )
+    client = _client(transport)
+
+    result = client.poll_results_once(
+        "host-1",
+        "sid-1",
+        last_update_timestamp=10,
+        limit=50,
+        request_id="request-1",
+    )
+
+    assert len(transport.post_calls) == 1
+    assert len(result.chunks) == 2
+    assert result.last_update_timestamp == 14
+    assert result.has_tickets is True
+    assert transport.post_calls[0]["json"]["last_update_timestamp"] == 10
+    assert transport.post_calls[0]["headers"]["X-Request-Id"] == "request-1"
+
+
+def test_poll_results_once_rejects_a_non_object_chunk() -> None:
+    transport = _FakeTransport(posts=[_FakeResponse(payload=[{"tickets": []}, "bad-chunk"])])
+
+    with pytest.raises(AviasalesSearchSchemaError, match="aviasales_search_schema_error"):
+        _client(transport).poll_results_once(
+            "host-1",
+            "sid-1",
+            last_update_timestamp=0,
+            limit=50,
+            request_id="request-1",
+        )
+
+    assert len(transport.post_calls) == 1
 
 
 def test_poll_results_rejects_non_list_payload() -> None:
@@ -309,6 +441,7 @@ def test_calendar_prices_uses_explore_calendar_and_filters_invalid_rows() -> Non
     assert prices[0].departure_date == "2026-09-15"
     assert prices[0].price_minor_units == 432_100
     assert transport.get_calls[0]["url"] == "https://explore-api.aviasales.ru/api/v6/calendar.json"
+    assert transport.get_calls[0]["params"]["locale"] == "ru_RU"
 
 
 def test_main_page_blocks_uses_typed_graphql_operation() -> None:

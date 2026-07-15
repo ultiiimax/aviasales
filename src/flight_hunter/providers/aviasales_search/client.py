@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from time import perf_counter, sleep
 from typing import Any, Literal, Protocol, cast
 
@@ -11,6 +11,7 @@ from curl_cffi import requests as cc
 
 from flight_hunter.domain.provider_errors import ProviderOperationError
 from flight_hunter.ops.structured_logging import log_event
+from flight_hunter.providers.aviasales_search.schemas import ProviderLocation
 
 TICKETS_BASE = "https://tickets-api.aviasales.ru"
 EXPLORE_BASE = "https://explore-api.aviasales.ru"
@@ -61,9 +62,16 @@ class StartSearchResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PollSearchResult:
+    chunks: tuple[dict[str, object], ...]
+    last_update_timestamp: int
+    has_tickets: bool
+
+
+@dataclass(frozen=True, slots=True)
 class SearchStartParams:
-    origin: str
-    destination: str
+    origin: ProviderLocation
+    destination: ProviderLocation
     departure_date: str
     return_date: str | None
     adults: int
@@ -72,6 +80,47 @@ class SearchStartParams:
     trip_class: str
     currency: str
     market: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.origin, ProviderLocation):
+            raise TypeError("origin must be ProviderLocation")
+        if not isinstance(self.destination, ProviderLocation):
+            raise TypeError("destination must be ProviderLocation")
+        if not isinstance(self.departure_date, str):
+            raise TypeError("departure_date must be an ISO date string")
+        try:
+            departure = date.fromisoformat(self.departure_date)
+        except ValueError:
+            raise ValueError("departure_date must be a valid ISO date") from None
+        if self.return_date is not None:
+            if not isinstance(self.return_date, str):
+                raise TypeError("return_date must be an ISO date string")
+            try:
+                return_date = date.fromisoformat(self.return_date)
+            except ValueError:
+                raise ValueError("return_date must be a valid ISO date") from None
+            if return_date < departure:
+                raise ValueError("return_date cannot be before departure_date")
+        for field_name in ("adults", "children", "infants"):
+            value = getattr(self, field_name)
+            minimum = 1 if field_name == "adults" else 0
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"{field_name} has an invalid value")
+        if not isinstance(self.trip_class, str) or not self.trip_class:
+            raise ValueError("trip_class is required")
+        if not isinstance(self.currency, str):
+            raise TypeError("currency must be a string")
+        currency = self.currency.upper()
+        if len(currency) != 3 or not currency.isalpha():
+            raise ValueError("currency must be an ISO 4217 alpha-3 code")
+        if not isinstance(self.market, str):
+            raise TypeError("market must be a string")
+        market = self.market.upper()
+        if len(market) != 2 or not market.isalpha():
+            raise ValueError("market must be an ISO alpha-2 code")
+        object.__setattr__(self, "trip_class", self.trip_class.upper())
+        object.__setattr__(self, "currency", currency)
+        object.__setattr__(self, "market", market)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +251,8 @@ class AviasalesSearchClient:
             raise ValueError("signature is required")
         if not marker:
             raise ValueError("marker is required")
+        if type(max_retries) is not int or max_retries < 0:
+            raise ValueError("max_retries must be a non-negative integer")
         self._signature = signature
         self._marker = marker
         self._transport = transport or CurlCffiTransport()
@@ -221,24 +272,28 @@ class AviasalesSearchClient:
             "X-Signature": signature,
         }
 
+    @property
+    def max_retries(self) -> int:
+        return self._max_retries
+
     def start_search(self, params: SearchStartParams) -> StartSearchResult:
         directions = [
             {
-                "origin": params.origin.upper(),
-                "destination": params.destination.upper(),
+                "origin": params.origin.code,
+                "destination": params.destination.code,
                 "date": params.departure_date,
-                "is_origin_airport": False,
-                "is_destination_airport": False,
+                "is_origin_airport": params.origin.is_airport,
+                "is_destination_airport": params.destination.is_airport,
             }
         ]
         if params.return_date is not None:
             directions.append(
                 {
-                    "origin": params.destination.upper(),
-                    "destination": params.origin.upper(),
+                    "origin": params.destination.code,
+                    "destination": params.origin.code,
                     "date": params.return_date,
-                    "is_origin_airport": False,
-                    "is_destination_airport": False,
+                    "is_origin_airport": params.destination.is_airport,
+                    "is_destination_airport": params.origin.is_airport,
                 }
             )
         body = {
@@ -281,43 +336,72 @@ class AviasalesSearchClient:
         limit: int = 50,
         request_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        host = results_url.split("/")[0]
-        poll_url = f"https://{host}/search/v3.2/results"
         req_id = request_id or str(uuid.uuid4())
         chunks: list[dict[str, Any]] = []
         last_ts = 0
-        for _ in range(rounds):
-            body = {
+        for round_index in range(rounds):
+            result = self.poll_results_once(
+                results_url,
+                search_id,
+                last_update_timestamp=last_ts,
+                limit=limit,
+                request_id=req_id,
+            )
+            chunks.extend(cast(tuple[dict[str, Any], ...], result.chunks))
+            last_ts = result.last_update_timestamp
+            if result.has_tickets:
+                break
+            if round_index + 1 < rounds:
+                self._sleep(delay)
+        return chunks
+
+    def poll_results_once(
+        self,
+        results_url: str,
+        search_id: str,
+        *,
+        last_update_timestamp: int,
+        limit: int,
+        request_id: str,
+    ) -> PollSearchResult:
+        if type(last_update_timestamp) is not int or last_update_timestamp < 0:
+            raise ValueError("last_update_timestamp must be a non-negative integer")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        if not request_id:
+            raise ValueError("request_id is required")
+        host = results_url.split("/")[0]
+        poll_url = f"https://{host}/search/v3.2/results"
+        response = self._request(
+            "POST",
+            poll_url,
+            json_body={
                 "search_id": search_id,
                 "limit": limit,
-                "last_update_timestamp": last_ts,
+                "last_update_timestamp": last_update_timestamp,
                 "required_tickets": [],
                 "highlighted_ticket": None,
                 "search_by_airport": False,
                 "price_per_person": False,
                 "filters_state": {},
-            }
-            response = self._request(
-                "POST",
-                poll_url,
-                json_body=body,
-                extra_headers={"X-Request-Id": req_id},
-                full_url=True,
-            )
-            parsed = _json_value(response)
-            if not isinstance(parsed, list):
-                raise AviasalesSearchSchemaError()
-            for chunk in parsed:
-                if not isinstance(chunk, dict):
-                    raise AviasalesSearchSchemaError()
-                chunks.append(chunk)
-                ts = chunk.get("last_update_timestamp")
-                if isinstance(ts, int):
-                    last_ts = max(last_ts, ts)
-            if any(isinstance(c, dict) and c.get("tickets") for c in chunks):
-                break
-            self._sleep(delay)
-        return chunks
+            },
+            extra_headers={"X-Request-Id": request_id},
+            full_url=True,
+        )
+        chunks = _validated_poll_chunks(_json_value(response))
+        cursor = max(
+            (
+                timestamp
+                for chunk in chunks
+                if type(timestamp := chunk.get("last_update_timestamp")) is int
+            ),
+            default=last_update_timestamp,
+        )
+        return PollSearchResult(
+            chunks=chunks,
+            last_update_timestamp=max(last_update_timestamp, cursor),
+            has_tickets=any(bool(chunk.get("tickets")) for chunk in chunks),
+        )
 
     def get_purchase_url(
         self,
@@ -406,20 +490,23 @@ class AviasalesSearchClient:
         depart_to: str,
         one_way: bool,
         currency: str = "rub",
+        origin_type: str = "city",
+        destination_type: str = "city",
+        locale: str = "ru_RU",
     ) -> tuple[CalendarPrice, ...]:
         response = self._request(
             "GET",
             f"{self._explore_base_url}/api/v6/calendar.json",
             params={
                 "origin_iata": origin.upper(),
-                "origin_type": "city",
+                "origin_type": origin_type,
                 "destination_iata": destination.upper(),
-                "destination_type": "city",
+                "destination_type": destination_type,
                 "one_way": str(one_way).lower(),
                 "depart_date_from": depart_from,
                 "depart_date_to": depart_to,
                 "currency": currency.lower(),
-                "locale": "ru",
+                "locale": locale,
                 "trip_class": "Y",
                 "marker": self._marker,
             },
@@ -634,6 +721,23 @@ def _json_value(response: AviasalesSearchResponse) -> Any:
         return response.json()
     except Exception as exc:  # JSON decoder boundary; payload text is intentionally discarded.
         raise AviasalesSearchSchemaError() from exc
+
+
+def _validated_poll_chunks(payload: Any) -> tuple[dict[str, object], ...]:
+    if not isinstance(payload, list):
+        raise AviasalesSearchSchemaError()
+    chunks: list[dict[str, object]] = []
+    for raw_chunk in payload:
+        if not isinstance(raw_chunk, dict):
+            raise AviasalesSearchSchemaError()
+        timestamp = raw_chunk.get("last_update_timestamp")
+        if timestamp is not None and (type(timestamp) is not int or timestamp < 0):
+            raise AviasalesSearchSchemaError()
+        tickets = raw_chunk.get("tickets")
+        if tickets is not None and not isinstance(tickets, list):
+            raise AviasalesSearchSchemaError()
+        chunks.append(cast(dict[str, object], raw_chunk))
+    return tuple(chunks)
 
 
 def _require_str(value: Any, field_name: str) -> str:

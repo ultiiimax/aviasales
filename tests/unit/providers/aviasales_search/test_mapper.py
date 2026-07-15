@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 
+from flight_hunter.domain.agent_evidence import ConfirmationState, ProtectionStatus
 from flight_hunter.domain.money import Money
 from flight_hunter.domain.offers import Freshness, PriceBasis
 from flight_hunter.providers.aviasales_search.mapper import map_parsed_ticket, stable_ticket_id
@@ -93,3 +95,40 @@ def test_map_parsed_ticket_baggage_summary_none_when_no_baggage() -> None:
     )
 
     assert offer.baggage_summary is None
+
+
+def test_map_parsed_ticket_to_confirmed_evidence_is_sanitized_and_deterministic() -> None:
+    from flight_hunter.providers.aviasales_search import mapper
+
+    observed_at = datetime(2026, 7, 14, 21, 0, tzinfo=UTC)
+    ticket = _ticket(baggage_count=0, handbag=None)
+
+    evidence = mapper.map_parsed_ticket_to_evidence(
+        ticket,
+        observed_at=observed_at,
+        passengers=2,
+    )
+    repeated = mapper.map_parsed_ticket_to_evidence(
+        ticket,
+        observed_at=observed_at,
+        passengers=2,
+    )
+
+    assert evidence == repeated
+    assert evidence.provider_id == "aviasales_search"
+    assert re.fullmatch(r"aviasales_search:[0-9a-f]{64}", evidence.provider_offer_id)
+    assert "sig_redacted_0" not in evidence.provider_offer_id
+    assert "120:0" not in evidence.provider_offer_id
+    assert evidence.total_amount == Money(580300, "RUB")
+    assert evidence.passengers == 2
+    assert evidence.observed_at == observed_at
+    assert evidence.seller_name == "Trip.com"
+    assert evidence.baggage_summary is None
+    assert evidence.protection_status is ProtectionStatus.UNKNOWN
+    assert evidence.confirmation_state is ConfirmationState.CONFIRMED
+    assert len(evidence.segment_ids) == len(evidence.segments) == 1
+    assert evidence.segment_ids[0].startswith("aviasales_segment:")
+    assert evidence.segments[0].flight_number == "DP6821"
+    assert not hasattr(evidence, "booking_action_ref")
+    assert not hasattr(evidence, "search_id")
+    assert not hasattr(evidence, "results_url")

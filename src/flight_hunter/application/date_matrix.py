@@ -1,7 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
+from typing import Literal
+
+from flight_hunter.domain.agent_evidence import (
+    ConfirmationState,
+    DiscoverySignal,
+)
+from flight_hunter.domain.offers import Freshness
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +25,37 @@ class DateMatrixCell:
     departure_date: date
     return_date: date | None
     stay_days: int | None
+    discovery_signal: DiscoverySignal | None = None
+    freshness: Freshness | None = None
+
+    def __post_init__(self) -> None:
+        if self.discovery_signal is not None and not isinstance(
+            self.discovery_signal, DiscoverySignal
+        ):
+            raise TypeError("discovery_signal must be DiscoverySignal")
+        if (self.discovery_signal is None) != (self.freshness is None):
+            raise ValueError("discovery_signal and freshness must be set together")
+        if self.discovery_signal is not None and (
+            self.discovery_signal.departure_date != self.departure_date
+            or self.discovery_signal.return_date != self.return_date
+        ):
+            raise ValueError("matrix cell and discovery signal dates must match")
+        if self.freshness is not None:
+            object.__setattr__(self, "freshness", Freshness(self.freshness))
+
+    @property
+    def evidence_kind(self) -> Literal["discovery_signal"] | None:
+        return "discovery_signal" if self.discovery_signal is not None else None
+
+    @property
+    def confirmation_state(self) -> ConfirmationState | None:
+        return (
+            self.discovery_signal.confirmation_state if self.discovery_signal is not None else None
+        )
+
+    @property
+    def requires_live_confirmation(self) -> bool | None:
+        return True if self.discovery_signal is not None else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +95,47 @@ class DateMatrixPlanner:
                 )
 
         return DateMatrix(cells=tuple(cells), provider_calls_required=0, priced=False)
+
+    def overlay_discovery(
+        self,
+        matrix: DateMatrix,
+        *,
+        signals: tuple[DiscoverySignal, ...],
+        freshness: Freshness,
+    ) -> DateMatrix:
+        if not isinstance(matrix, DateMatrix):
+            raise TypeError("matrix must be DateMatrix")
+        normalized_signals = tuple(signals)
+        if not all(isinstance(signal, DiscoverySignal) for signal in normalized_signals):
+            raise TypeError("signals must contain DiscoverySignal values")
+        normalized_freshness = Freshness(freshness)
+        indexed: dict[tuple[date, date | None], DiscoverySignal] = {}
+        for signal in normalized_signals:
+            key = (signal.departure_date, signal.return_date)
+            existing = indexed.get(key)
+            if existing is None:
+                indexed[key] = signal
+                continue
+            if existing.observed_amount.currency != signal.observed_amount.currency:
+                raise ValueError("calendar signals for one cell must use one currency")
+            if signal.observed_amount.minor_units < existing.observed_amount.minor_units:
+                indexed[key] = signal
+
+        cells = tuple(
+            replace(
+                cell,
+                discovery_signal=cell_signal,
+                freshness=normalized_freshness,
+            )
+            if (cell_signal := indexed.get((cell.departure_date, cell.return_date))) is not None
+            else cell
+            for cell in matrix.cells
+        )
+        return DateMatrix(
+            cells=cells,
+            provider_calls_required=matrix.provider_calls_required,
+            priced=any(cell.discovery_signal is not None for cell in cells),
+        )
 
     def _validate(self, request: DateMatrixRequest) -> None:
         if request.flexibility_days < 0:

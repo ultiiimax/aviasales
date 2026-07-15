@@ -1,11 +1,38 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
+
+from flight_hunter.domain.agent_search import LocationScopeKind
+
+_IATA_RE = re.compile(r"^[A-Z]{3}$")
 
 
 class AviasalesSearchParseError(RuntimeError):
     """Raised when a raw Aviasales Search chunk cannot be parsed safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderLocation:
+    kind: LocationScopeKind
+    code: str
+
+    def __post_init__(self) -> None:
+        kind = LocationScopeKind(self.kind)
+        if kind not in {LocationScopeKind.AIRPORT, LocationScopeKind.CITY}:
+            raise ValueError("provider location kind must be airport or city")
+        if not isinstance(self.code, str):
+            raise TypeError("provider location code must be a string")
+        code = self.code.upper()
+        if not _IATA_RE.fullmatch(code):
+            raise ValueError("provider location code must be a three-letter IATA code")
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "code", code)
+
+    @property
+    def is_airport(self) -> bool:
+        return self.kind is LocationScopeKind.AIRPORT
 
 
 @dataclass(frozen=True, slots=True)
