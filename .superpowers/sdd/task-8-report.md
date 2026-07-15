@@ -1,7 +1,7 @@
 # Task 8 report — resumable Aviasales search gateway
 
-Status: implementation complete on 2026-07-15 and pending independent review.
-Task 9 worker execution was not started.
+Status: accepted on 2026-07-15 at `e9a1f2d` after independent re-review.
+Task 9 worker execution was not part of this reviewed slice.
 
 ## Scope delivered
 
@@ -182,5 +182,21 @@ The unit warnings are pre-existing teardown/deprecation warnings outside the
 changed Task 8 flow. Review-fix verification is fixture/fake only: it contains
 no live Aviasales request, secret, provider response body, raw result host,
 booking URL or PII. No persistence schema changed, so no migration is required.
-Task 9 remains unstarted, and Task 8 remains pending a fresh independent
-re-review rather than being marked accepted by its implementer.
+Task 9 was unstarted in the reviewed range, and the implementer left Task 8
+pending for this fresh independent re-review.
+
+## Independent re-review acceptance
+
+The independent reviewer accepted committed HEAD `e9a1f2d` on local `main`
+with zero Critical, Important or Minor findings. Three independent forced-probe
+blocks rechecked all original findings: result-host SSRF/zero-I/O; traceback,
+log and repr secrecy; immutable exact continuation binding; reciprocal
+round-trip parsing; operation-scoped evidence UUIDs; complete calendar,
+date-matrix and standalone API validation/metadata; closed provider inputs;
+typed HTTP retryability; and one-call gateway accounting.
+
+Fresh reviewer gates passed: 165 focused tests, 1024 full unit tests, 4
+integration tests, mypy across 116 source files, Ruff format/check across 283
+files and `git diff --check ca44fdb..e9a1f2d`. The reviewer made no changes or
+live provider calls and confirmed the worktree was clean and the range did not
+start Task 9.

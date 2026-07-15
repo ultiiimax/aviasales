@@ -49,8 +49,8 @@ Task 8 slice plan: freeze explicit airport/city provider locations; split exact
 search into one-call start/poll operations with private continuation state;
 map ticket-bearing polls to confirmed evidence; keep calendar rows as
 indicative discovery signals in the date matrix; then run fixture-only focused,
-unit, integration, type and lint gates. Implementation remains pending
-independent review until a separate reviewer accepts it.
+unit, integration, type and lint gates. The slice was accepted by independent
+review at `e9a1f2d` with no Critical, Important or Minor findings.
 
 Task 8 implementation on 2026-07-15 adds the single-attempt async Aviasales
 gateway and keeps Task 9 worker execution out of scope. Typed provider
@@ -62,9 +62,8 @@ terminal provider field is contract-proven. Calendar rows are distinct
 indicative discovery signals in both calendar APIs/date-matrix responses, use
 the verified `ru_RU` locale, carry the one-passenger basis and require live
 confirmation. Wrong-route/out-of-range rows and malformed typed inputs are
-rejected before false overlay/provider I/O. The slice is implemented but remains
-pending independent review; the progress checkbox stays open because durable
-worker execution belongs to Task 9.
+rejected before false overlay/provider I/O. The slice is accepted; the progress
+checkbox stays open because durable worker execution belongs to Task 9.
 
 Task 8 independent-review hardening on 2026-07-15 closes the reviewed provider
 boundary and evidence-invariant gaps without starting Task 9. Result hosts are
@@ -77,7 +76,8 @@ UUIDs are idempotent only inside that namespace. Proposal currency, money and
 direction groups are strict. Calendar publication and matrix overlay share
 route/date/currency/shape validation, with a typed overlay context and explicit
 one-adult indicative price basis. Contradictory passenger requests fail before
-provider I/O. The slice remains pending a fresh independent re-review.
+provider I/O. Fresh independent re-review accepted `e9a1f2d` with zero
+Critical, Important or Minor findings.
 
 Task 8 verification on 2026-07-15: the mandatory focused provider/date-matrix
 suite passes 72 tests, the standalone mobile API regression suite passes 12,
@@ -94,6 +94,13 @@ the complete unit suite passes 1024 with 23 pre-existing teardown/deprecation
 warnings outside the changed flow, and integration passes 4. Full mypy reports
 no issues in 116 source files; Ruff reports 283 files formatted and all checks
 passing. No live provider call, migration or Task 9 worker change was made.
+
+Task 8 acceptance on 2026-07-15: the reviewer independently reran 165 focused,
+1024 unit and 4 integration tests plus mypy/Ruff/diff checks, then executed
+three forced-probe blocks covering all original provider-boundary findings.
+Result: `ACCEPT`, zero Critical/Important/Minor findings, clean `main` at
+`e9a1f2d`; no files were changed and no live provider call was made during
+review.
 
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic
