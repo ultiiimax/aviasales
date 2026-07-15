@@ -1,6 +1,7 @@
 # Task 9 — durable calendar/exact worker
 
-Status: implementation complete; independent review remains pending.
+Status: accepted by independent review; zero Critical, Important or Minor
+findings remain.
 
 ## Required tests-only RED
 
@@ -113,4 +114,44 @@ uv run ruff check <Task 9 changed Python files>:
 All checks passed!
 ```
 
-Status: implementation complete; independent review remains pending.
+## Independent acceptance and release-gate hardening
+
+The initial independent review found approval/revision, budget, circuit,
+cancellation, chronology, continuation-integrity, freshness, public-projection
+and worker-boundary gaps. They were fixed test-first. A fresh specification
+review then found four remaining Important issues: calendar evidence identifiers
+were not operation-namespaced, private continuation state was not fully bound to
+the handoff identifier, flexible round trips could accept an out-of-surface
+return, and stale provider replay could be labelled LIVE. All four were fixed;
+the root verification also added and closed the rolling-window chronology case.
+
+Clean-environment verification exposed two release-gate defects outside the
+executor flow. The optional Crawl4AI import depended on a warm mypy cache, and
+one API log test accidentally used the default database when `DATABASE_URL` was
+absent. Both now have deterministic regression coverage without making
+Crawl4AI mandatory or touching the user's database.
+
+Final verification on the frozen reviewed tree:
+
+```text
+Independent review: ACCEPT — 0 Critical / Important / Minor
+Full unit suite with a brand-new temporary DATABASE_URL: 1205 passed
+Task 9 focused suite: 187 passed
+Regression suite: 263 passed
+Integration suite: 4 passed
+Security tests: 2 passed
+Security scanner: ok=true, finding_count=0
+Fresh-cache mypy: Success, 118 source files
+Ruff format: 286 files already formatted
+Ruff check: All checks passed
+Alembic: 0024_agent_execution_ledger (head), one head
+Compose config: valid with process-only validation secret
+```
+
+The reviewer verified combined raw hash
+`50d057a794825ec742fb2ca7ba7642ace8aa6b91b648044226fe3f695b949f71`.
+The accepted executor hardening is committed on local `main` as `c0d7de6`; the
+clean-environment release-gate fixes are `98147bc`. No live provider call was
+made and the local user database was not used or modified.
+
+Status: accepted; Task 10 coverage breadth is the next slice.

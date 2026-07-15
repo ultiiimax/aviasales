@@ -39,7 +39,8 @@ This file is maintained by coding agents. Mark a slice done only after implement
     Critical/Important/Minor findings after dynamic session-race verification).
   - [x] Persist the durable operation ledger (Task 7 accepted by independent
     review at `0babb2a`, with no Critical/Important/Minor findings).
-  - [ ] Execute resumable Aviasales calendar/exact work in the worker.
+  - [x] Execute resumable Aviasales calendar/exact work in the worker (Task 9
+    accepted at `c0d7de6`; clean-environment gates fixed at `98147bc`).
   - [ ] Compose and rank split, self-transfer, open-jaw and multi-city routes.
   - [ ] Isolate hidden-city research behind a second acknowledgement.
   - [ ] Add evidence-gated buy timing, anomaly and currency analysis.
@@ -102,8 +103,8 @@ Result: `ACCEPT`, zero Critical/Important/Minor findings, clean `main` at
 `e9a1f2d`; no files were changed and no live provider call was made during
 review.
 
-Task 9 pending slice plan: add an orchestration-only durable executor over the
-accepted Task 7 ledger and Task 8 single-attempt gateway; materialize exact
+Task 9 accepted slice plan/result: add an orchestration-only durable executor
+over the accepted Task 7 ledger and Task 8 single-attempt gateway; materialize exact
 start/poll handoffs or flexible calendar shortlists within approved logical and
 HTTP budgets; persist only sanitized indicative/confirmed evidence; derive
 minimal confirmed-only ranking and honest completed/partial/failed progress;
@@ -111,11 +112,12 @@ then wire the dedicated `agent` worker lane, public run counters, validated
 local Aviasales settings, Compose and operator docs. Prove restart, dedupe,
 cancellation/deadline zero-I/O, retry/circuit behavior and household/private
 continuation isolation fixture-only before marking the slice complete. The
-existing forward migration `0024_agent_execution_ledger` is sufficient; Task
-10 coverage breadth and Task 11 composition remain unstarted.
+existing forward migration `0024_agent_execution_ledger` is sufficient. The
+slice was accepted on 2026-07-15; Task 10 coverage breadth and Task 11
+composition remain unstarted.
 
-Task 9 implementation on 2026-07-15 is complete and awaits independent review;
-the progress checkbox intentionally remains open. The dedicated agent worker now
+Task 9 implementation on 2026-07-15 is accepted by independent review. The
+dedicated agent worker now
 executes approved airport calendar/exact workflows as durable single-attempt
 operations with committed pre-I/O reservations, private cursor handoffs, fresh
 deadline/lease clocks, approved/current RPM minimums, Retry-After, circuit
@@ -129,6 +131,26 @@ invalid Aviasales credentials fail before permit/reservation/transport. No new
 migration was needed and no live provider call was made. The required four-file
 gate passes 110 tests; executor, worker, real-SQL keyset, API and Compose focused
 gates plus Ruff and mypy are recorded in `.superpowers/sdd/task-9-report.md`.
+
+Task 9 acceptance on 2026-07-15: after two independent review/hardening cycles,
+the frozen combined tree received `ACCEPT` with zero Critical, Important or
+Minor findings. The final clean-database unit gate passes 1205 tests, focused
+Task 9 and regression gates pass 187 and 263, integration passes 4, security
+passes 2 with zero scanner findings, fresh-cache mypy passes 118 source files,
+Ruff reports 286 files formatted and all checks passing, Compose validates and
+Alembic has the single `0024_agent_execution_ledger` head. Accepted executor
+hardening is `c0d7de6`; deterministic clean-environment gates are `98147bc`.
+No live provider call was made and the user's local database was untouched.
+
+Task 10 pending slice plan: complete deterministic QUICK and FULL finite-scope
+coverage plus nearby, country, region and bounded-anywhere execution. Freeze all
+finite airport codes before approval; record taxonomy/catalog versions and
+nearby distances; atomically freeze the first successful anywhere destination
+snapshot; collapse aliases; and expose an honest per-pair coverage report with
+attempted, succeeded, failed and skipped reasons. Prove that later catalog/feed
+changes cannot alter an approved run, unknown ground cost stays unknown, and no
+silently skipped pair can be reported as full. All provider work remains
+fixture-only for this slice.
 
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic
