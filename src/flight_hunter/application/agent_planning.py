@@ -13,6 +13,7 @@ from flight_hunter.application.agent_intent import (
     ClarificationAction,
     IntentClarification,
     ParsedIntent,
+    return_before_outbound_window_end_clarification,
 )
 from flight_hunter.application.agent_scope import (
     AnywhereDiscoveryRule,
@@ -23,6 +24,7 @@ from flight_hunter.application.agent_scope import (
 )
 from flight_hunter.config import AppSettings
 from flight_hunter.domain.agent_search import (
+    CapabilityState,
     DateConstraint,
     DateMode,
     LocationScopeKind,
@@ -30,6 +32,7 @@ from flight_hunter.domain.agent_search import (
     ProviderCapabilitySnapshot,
     ProviderHttpCostModel,
     TravelIntent,
+    TripShape,
 )
 
 
@@ -293,6 +296,18 @@ class AgentPlanBuilder:
                 expires_at=expires_at,
             )
 
+        chronology_clarification = _round_trip_chronology_clarification(travel_intent)
+        if chronology_clarification is not None:
+            return _draft_revision(
+                parsed=parsed,
+                travel_intent=travel_intent,
+                coverage=normalized_coverage,
+                snapshot=snapshot,
+                clarifications=(chronology_clarification,),
+                created_at=created_at,
+                expires_at=expires_at,
+            )
+
         if self._scope_resolver is None:
             return _draft_revision(
                 parsed=parsed,
@@ -323,6 +338,8 @@ class AgentPlanBuilder:
         surface = _surface_for_frozen_legs(
             frozen_legs,
             normalized_coverage,
+            trip_shape=travel_intent.trip_shape,
+            capability_snapshot=snapshot,
         )
         try:
             estimate = self._estimator.estimate(surface, snapshot.cost_model)
@@ -461,7 +478,29 @@ class AgentPlanBuilder:
 def _surface_for_frozen_legs(
     frozen_legs: tuple[FrozenPlanLeg, ...],
     coverage: CoverageMode,
+    *,
+    trip_shape: TripShape,
+    capability_snapshot: ProviderCapabilitySnapshot,
 ) -> SearchSurface:
+    native_round_trip = _native_round_trip_outbound(frozen_legs, trip_shape, capability_snapshot)
+    if native_round_trip is not None:
+        assert native_round_trip.destination_scope is not None
+        route_pairs = len(native_round_trip.origin_scope.airport_codes) * len(
+            native_round_trip.destination_scope.airport_codes
+        )
+        if native_round_trip.date_constraint.mode is DateMode.EXACT:
+            return SearchSurface(
+                coverage=coverage,
+                calendar_searches=0,
+                exact_searches=route_pairs,
+            )
+        operations = route_pairs * _date_count(native_round_trip.date_constraint)
+        return SearchSurface(
+            coverage=coverage,
+            calendar_searches=operations,
+            exact_searches=operations,
+        )
+
     calendar_searches = 0
     exact_searches = 0
     for frozen_leg in frozen_legs:
@@ -492,6 +531,29 @@ def _surface_for_frozen_legs(
     )
 
 
+def _native_round_trip_outbound(
+    frozen_legs: tuple[FrozenPlanLeg, ...],
+    trip_shape: TripShape,
+    capability_snapshot: ProviderCapabilitySnapshot,
+) -> FrozenPlanLeg | None:
+    if (
+        trip_shape is not TripShape.ROUND_TRIP
+        or capability_snapshot.round_trip is not CapabilityState.SUPPORTED
+        or len(frozen_legs) != 2
+    ):
+        return None
+    outbound, inbound = frozen_legs
+    if (
+        outbound.destination_scope is None
+        or inbound.destination_scope is None
+        or inbound.date_constraint.mode is not DateMode.EXACT
+        or set(outbound.origin_scope.airport_codes) != set(inbound.destination_scope.airport_codes)
+        or set(outbound.destination_scope.airport_codes) != set(inbound.origin_scope.airport_codes)
+    ):
+        return None
+    return outbound
+
+
 def _date_count(constraint: DateConstraint) -> int:
     start_date, end_date = _date_bounds(constraint)
     return (end_date - start_date).days + 1
@@ -505,6 +567,18 @@ def _date_bounds(constraint: DateConstraint) -> tuple[date, date]:
         return constraint.start_date - delta, constraint.start_date + delta
     assert constraint.end_date is not None
     return constraint.start_date, constraint.end_date
+
+
+def _round_trip_chronology_clarification(
+    intent: TravelIntent,
+) -> IntentClarification | None:
+    if intent.trip_shape is not TripShape.ROUND_TRIP or len(intent.legs) != 2:
+        return None
+    outbound_end = _date_bounds(intent.legs[0].date_constraint)[1]
+    return_constraint = intent.legs[1].date_constraint
+    if return_constraint.mode is DateMode.EXACT and return_constraint.start_date < outbound_end:
+        return return_before_outbound_window_end_clarification()
+    return None
 
 
 def _draft_revision(

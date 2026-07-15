@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
+from flight_hunter.execution_limits import MAX_AGENT_EXECUTION_INTERVAL_SECONDS
+
 DEFAULT_CARRIER_LINKS = (
     "aeroflot",
     "pobeda",
@@ -158,6 +160,18 @@ class AppSettings:
             or self.agent_poll_interval_seconds < 0
         ):
             raise ValueError("agent_poll_interval_seconds must be non-negative")
+        execution_temporal_settings = {
+            "agent_operation_lease_seconds": self.agent_operation_lease_seconds,
+            "agent_provider_circuit_cooldown_seconds": (
+                self.agent_provider_circuit_cooldown_seconds
+            ),
+            "agent_poll_interval_seconds": self.agent_poll_interval_seconds,
+        }
+        for field_name, value in execution_temporal_settings.items():
+            if value > MAX_AGENT_EXECUTION_INTERVAL_SECONDS:
+                raise ValueError(
+                    f"{field_name} cannot exceed {MAX_AGENT_EXECUTION_INTERVAL_SECONDS} seconds"
+                )
         bounded_defaults = {
             "agent_quick_logical_limit": self.agent_quick_logical_limit,
             "agent_quick_calendar_limit": self.agent_quick_calendar_limit,

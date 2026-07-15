@@ -2836,13 +2836,20 @@ class AgentOperationRepository:
         outcome = (
             CircuitOutcome.TRANSIENT_FAILURE if transient else CircuitOutcome.NON_TRANSIENT_FAILURE
         )
-        state, replayed = await self._prepare_circuit_outcome(
+        state, replayed, mutate_circuit = await self._prepare_circuit_outcome(
             circuit_permit,
             reservation_id,
             outcome,
             normalized_now,
         )
         if replayed:
+            return _circuit_record(state)
+        if not mutate_circuit:
+            await self._persist_circuit_outcome(
+                reservation_id,
+                outcome,
+                normalized_now,
+            )
             return _circuit_record(state)
         async with self._session.begin_nested():
             if transient:
@@ -2936,6 +2943,7 @@ class AgentOperationRepository:
             circuit_permit.provider_id,
             worker_id,
             normalized_now,
+            require_active_run=False,
         )
         _require_permit_call_binding(
             circuit_permit,
@@ -3009,6 +3017,130 @@ class AgentOperationRepository:
                 )
                 if cast(CursorResult[Any], state_result).rowcount != 1:
                     raise AgentOperationConflict("agent_circuit_permit_stale")
+
+    async def abandon_reserved_http_attempt(
+        self,
+        *,
+        household_id: UUID,
+        run_id: UUID,
+        worker_id: str,
+        circuit_permit: ServerPrivateCircuitPermit,
+        reservation_id: UUID,
+        now: datetime,
+    ) -> None:
+        """Release a consumed permit when admission changes before transport dispatch."""
+
+        _require_aware(now, "now")
+        if not isinstance(reservation_id, UUID):
+            raise TypeError("reservation_id must be UUID")
+        if not worker_id.strip():
+            raise ValueError("worker_id must not be blank")
+        normalized_now = _utc_datetime(now)
+        permit_digest = _permit_digest(circuit_permit.token)
+        await self._acquire_write_transaction()
+        operation = await self._require_reservable_operation(
+            household_id,
+            run_id,
+            circuit_permit.operation_id,
+            circuit_permit.provider_id,
+            worker_id,
+            normalized_now,
+            require_active_run=False,
+        )
+        _require_permit_call_binding(
+            circuit_permit,
+            permit_digest=permit_digest,
+            operation=operation,
+            provider_id=circuit_permit.provider_id,
+        )
+        reservation = (
+            (
+                await self._session.execute(
+                    select(agent_provider_http_attempts_table)
+                    .where(agent_provider_http_attempts_table.c.id == str(reservation_id))
+                    .where(
+                        agent_provider_http_attempts_table.c.operation_id
+                        == str(circuit_permit.operation_id)
+                    )
+                    .where(
+                        agent_provider_http_attempts_table.c.operation_attempt_number
+                        == circuit_permit.operation_attempt_number
+                    )
+                    .where(
+                        agent_provider_http_attempts_table.c.circuit_permit_generation
+                        == circuit_permit.generation
+                    )
+                    .where(
+                        agent_provider_http_attempts_table.c.circuit_permit_token_digest
+                        == permit_digest
+                    )
+                    .where(agent_provider_http_attempts_table.c.circuit_outcome.is_(None))
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if reservation is None or operation["circuit_permit_consumed_at"] is None:
+            raise AgentOperationConflict("agent_circuit_permit_stale")
+
+        async with self._session.begin_nested():
+            operation_result = await self._session.execute(
+                update(agent_run_operations_table)
+                .where(agent_run_operations_table.c.id == str(circuit_permit.operation_id))
+                .where(agent_run_operations_table.c.household_id == str(household_id))
+                .where(agent_run_operations_table.c.run_id == str(run_id))
+                .where(agent_run_operations_table.c.status == AgentOperationStatus.LEASED.value)
+                .where(agent_run_operations_table.c.lease_owner == worker_id)
+                .where(agent_run_operations_table.c.lease_expires_at > normalized_now)
+                .where(agent_run_operations_table.c.circuit_permit_token_digest == permit_digest)
+                .where(
+                    agent_run_operations_table.c.circuit_permit_generation
+                    == circuit_permit.generation
+                )
+                .where(agent_run_operations_table.c.circuit_permit_consumed_at.is_not(None))
+                .values(
+                    circuit_permit_token_digest=None,
+                    circuit_permit_generation=None,
+                    circuit_permit_mode=None,
+                    circuit_permit_attempt_number=None,
+                    circuit_permit_expires_at=None,
+                    circuit_permit_consumed_at=None,
+                    updated_at=normalized_now,
+                )
+            )
+            if cast(CursorResult[Any], operation_result).rowcount != 1:
+                raise AgentOperationConflict("agent_circuit_permit_stale")
+
+            if circuit_permit.mode is CircuitPermitMode.HALF_OPEN:
+                await self._session.execute(
+                    update(agent_provider_circuit_state_table)
+                    .where(
+                        agent_provider_circuit_state_table.c.provider_id
+                        == circuit_permit.provider_id
+                    )
+                    .where(
+                        agent_provider_circuit_state_table.c.state
+                        == AgentCircuitState.HALF_OPEN.value
+                    )
+                    .where(
+                        agent_provider_circuit_state_table.c.generation == circuit_permit.generation
+                    )
+                    .where(
+                        agent_provider_circuit_state_table.c.half_open_probe_token_digest
+                        == permit_digest
+                    )
+                    .values(
+                        state=AgentCircuitState.OPEN.value,
+                        cooldown_until=normalized_now,
+                        half_open_probe_operation_id=None,
+                        half_open_probe_attempt_number=None,
+                        half_open_probe_token_digest=None,
+                        half_open_probe_expires_at=None,
+                        generation=agent_provider_circuit_state_table.c.generation + 1,
+                        version=agent_provider_circuit_state_table.c.version + 1,
+                        updated_at=normalized_now,
+                    )
+                )
 
     async def _acquire_write_transaction(self) -> None:
         try:
@@ -3146,13 +3278,20 @@ class AgentOperationRepository:
             raise TypeError("reservation_id must be UUID")
         normalized_now = _utc_datetime(now)
         await self._acquire_write_transaction()
-        state, replayed = await self._prepare_circuit_outcome(
+        state, replayed, mutate_circuit = await self._prepare_circuit_outcome(
             circuit_permit,
             reservation_id,
             CircuitOutcome.SUCCESS,
             normalized_now,
         )
         if replayed:
+            return _circuit_record(state)
+        if not mutate_circuit:
+            await self._persist_circuit_outcome(
+                reservation_id,
+                CircuitOutcome.SUCCESS,
+                normalized_now,
+            )
             return _circuit_record(state)
         generation = int(state["generation"])
         if CircuitPermitMode(circuit_permit.mode) is CircuitPermitMode.HALF_OPEN:
@@ -3228,6 +3367,8 @@ class AgentOperationRepository:
         provider_id: str,
         worker_id: str,
         now: datetime,
+        *,
+        require_active_run: bool = True,
     ) -> RowMapping:
         statement = (
             select(agent_run_operations_table)
@@ -3247,9 +3388,11 @@ class AgentOperationRepository:
             .where(agent_run_operations_table.c.lease_expires_at > now)
             .where(agent_plan_stages_table.c.household_id == str(household_id))
             .where(agent_plan_runs_table.c.household_id == str(household_id))
-            .where(agent_plan_runs_table.c.status.in_(("queued", "running")))
-            .where(agent_plan_runs_table.c.deadline_at > now)
         )
+        if require_active_run:
+            statement = statement.where(
+                agent_plan_runs_table.c.status.in_(("queued", "running"))
+            ).where(agent_plan_runs_table.c.deadline_at > now)
         if self._session.get_bind().dialect.name != "sqlite":
             statement = statement.with_for_update()
         row = (await self._session.execute(statement)).mappings().one_or_none()
@@ -3310,7 +3453,7 @@ class AgentOperationRepository:
         reservation_id: UUID,
         desired_outcome: CircuitOutcome,
         now: datetime,
-    ) -> tuple[RowMapping, bool]:
+    ) -> tuple[RowMapping, bool, bool]:
         permit_digest = _permit_digest(permit.token)
         reservation_statement = (
             select(agent_provider_http_attempts_table)
@@ -3337,10 +3480,20 @@ class AgentOperationRepository:
         if stored_outcome is not None:
             if CircuitOutcome(str(stored_outcome)) is not desired_outcome:
                 raise AgentOperationConflict("agent_circuit_outcome_conflict")
-            return await self._locked_circuit_row(permit.provider_id), True
+            return await self._locked_circuit_row(permit.provider_id), True, False
         reserved_at = _aware_datetime(cast(datetime, reservation["reserved_at"]))
         if reserved_at > permit.expires_at or now < reserved_at:
             raise AgentOperationConflict("agent_circuit_permit_stale")
+        state = await self._locked_circuit_row(permit.provider_id)
+        try:
+            _require_current_circuit_binding(state, permit, permit_digest, now=None)
+        except AgentOperationConflict as error:
+            if (
+                error.code == "agent_circuit_permit_stale"
+                and int(state["generation"]) > permit.generation
+            ):
+                return state, False, False
+            raise
         operation = (
             (
                 await self._session.execute(
@@ -3364,9 +3517,7 @@ class AgentOperationRepository:
         )
         if operation is None:
             raise AgentOperationConflict("agent_circuit_permit_stale")
-        state = await self._locked_circuit_row(permit.provider_id)
-        _require_current_circuit_binding(state, permit, permit_digest, now=None)
-        return state, False
+        return state, False, True
 
     async def _persist_circuit_outcome(
         self,
@@ -4280,20 +4431,67 @@ def _revision_values(
 
 
 def _content_hash(revision: NewAgentPlanRevision) -> str:
+    return _revision_content_hash(
+        plan=revision.plan,
+        scope_snapshot=revision.scope_snapshot,
+        capability_snapshot=revision.capability_snapshot,
+        cost_model_snapshot=revision.cost_model_snapshot,
+        parser_version=revision.parser_version,
+        planner_version=revision.planner_version,
+        calendar_searches=revision.estimated_calendar_searches,
+        exact_searches=revision.estimated_exact_searches,
+        logical_operations=revision.estimated_logical_operations,
+        http_attempts=revision.estimated_http_attempts,
+        deadline_seconds=revision.estimated_deadline_seconds,
+    )
+
+
+def recompute_agent_plan_revision_content_hash(revision: AgentPlanRevisionRecord) -> str:
+    """Recompute an immutable revision hash from its persisted canonical payload."""
+
+    return _revision_content_hash(
+        plan=_json_object(revision.plan_json),
+        scope_snapshot=_json_object(revision.scope_snapshot_json),
+        capability_snapshot=_json_object(revision.capability_snapshot_json),
+        cost_model_snapshot=_json_object(revision.cost_model_snapshot_json),
+        parser_version=revision.parser_version,
+        planner_version=revision.planner_version,
+        calendar_searches=revision.estimated_calendar_searches,
+        exact_searches=revision.estimated_exact_searches,
+        logical_operations=revision.estimated_logical_operations,
+        http_attempts=revision.estimated_http_attempts,
+        deadline_seconds=revision.estimated_deadline_seconds,
+    )
+
+
+def _revision_content_hash(
+    *,
+    plan: Mapping[str, object],
+    scope_snapshot: Mapping[str, object],
+    capability_snapshot: Mapping[str, object],
+    cost_model_snapshot: Mapping[str, object],
+    parser_version: str,
+    planner_version: str,
+    calendar_searches: int | None,
+    exact_searches: int | None,
+    logical_operations: int | None,
+    http_attempts: int | None,
+    deadline_seconds: int | None,
+) -> str:
     canonical = _canonical_json(
         {
-            "plan": revision.plan,
-            "scope_snapshot": revision.scope_snapshot,
-            "capability_snapshot": revision.capability_snapshot,
-            "cost_model_snapshot": revision.cost_model_snapshot,
-            "parser_version": revision.parser_version,
-            "planner_version": revision.planner_version,
+            "plan": plan,
+            "scope_snapshot": scope_snapshot,
+            "capability_snapshot": capability_snapshot,
+            "cost_model_snapshot": cost_model_snapshot,
+            "parser_version": parser_version,
+            "planner_version": planner_version,
             "estimates": {
-                "calendar_searches": revision.estimated_calendar_searches,
-                "exact_searches": revision.estimated_exact_searches,
-                "logical_operations": revision.estimated_logical_operations,
-                "http_attempts": revision.estimated_http_attempts,
-                "deadline_seconds": revision.estimated_deadline_seconds,
+                "calendar_searches": calendar_searches,
+                "exact_searches": exact_searches,
+                "logical_operations": logical_operations,
+                "http_attempts": http_attempts,
+                "deadline_seconds": deadline_seconds,
             },
         }
     )

@@ -2311,13 +2311,14 @@ async def test_review_half_open_permit_is_one_shot_and_late_owner_cannot_close_t
             circuit_permit=permit_b,
         )
         assert reservation_b.reservation_id is not None
-        with pytest.raises(AgentOperationConflict) as late_a:
-            await repository.record_circuit_success(
-                circuit_permit=permit_a,
-                reservation_id=reservation_a.reservation_id,
-                now=NOW + timedelta(seconds=24),
-            )
-        assert late_a.value.code == "agent_circuit_permit_stale"
+        late_a = await repository.record_circuit_success(
+            circuit_permit=permit_a,
+            reservation_id=reservation_a.reservation_id,
+            now=NOW + timedelta(seconds=24),
+        )
+        assert late_a.state.value == "half_open"
+        assert late_a.generation == permit_b.generation
+        assert late_a.half_open_probe_operation_id == probe_id
         closed = await repository.record_circuit_success(
             circuit_permit=permit_b,
             reservation_id=reservation_b.reservation_id,
@@ -2846,6 +2847,77 @@ async def test_rereview_second_non_transient_failure_is_persisted_without_openin
         assert attempt["circuit_outcome"] == "non_transient_failure"
         assert attempt["circuit_outcome_recorded_at"] is not None
 
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("outcome", "stored_outcome"),
+    (
+        ("success", "success"),
+        ("transient", "transient_failure"),
+        ("non_transient", "non_transient_failure"),
+    ),
+)
+async def test_late_closed_permit_outcome_is_recorded_without_mutating_newer_generation(
+    tmp_path: Path,
+    outcome: str,
+    stored_outcome: str,
+) -> None:
+    engine, sessions, permit, reservation_id = await _reserved_network_attempt(
+        tmp_path,
+        f"late-closed-{outcome}.db",
+    )
+
+    async with sessions() as session:
+        await session.execute(
+            update(agent_provider_circuit_state_table)
+            .where(agent_provider_circuit_state_table.c.provider_id == "aviasales_search")
+            .values(
+                state="open",
+                consecutive_transient_failures=7,
+                opened_at=NOW + timedelta(seconds=3),
+                cooldown_until=NOW + timedelta(seconds=30),
+                generation=permit.generation + 3,
+                version=9,
+                updated_at=NOW + timedelta(seconds=3),
+            )
+        )
+        repository = AgentOperationRepository(session)
+        if outcome == "success":
+            returned = await repository.record_circuit_success(
+                circuit_permit=permit,
+                reservation_id=reservation_id,
+                now=NOW + timedelta(seconds=4),
+            )
+        else:
+            returned = await repository.record_circuit_failure(
+                circuit_permit=permit,
+                reservation_id=reservation_id,
+                transient=outcome == "transient",
+                failure_threshold=1,
+                cooldown_seconds=60,
+                now=NOW + timedelta(seconds=4),
+            )
+        await session.commit()
+        attempt = (
+            (
+                await session.execute(
+                    select(agent_provider_http_attempts_table).where(
+                        agent_provider_http_attempts_table.c.id == str(reservation_id)
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+
+    assert returned.state.value == "open"
+    assert returned.generation == permit.generation + 3
+    assert returned.consecutive_transient_failures == 7
+    assert returned.version == 9
+    assert attempt["circuit_outcome"] == stored_outcome
+    assert attempt["circuit_outcome_recorded_at"].replace(tzinfo=UTC) == NOW + timedelta(seconds=4)
     await engine.dispose()
 
 

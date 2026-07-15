@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID, uuid4
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from flight_hunter.application.agent_capabilities import ProviderCapabilityRegistry
 from flight_hunter.application.agent_execution import (
@@ -85,6 +86,14 @@ from flight_hunter.providers.personal_observer import (
 PRIMARY_WORKER_ROLES = ("browser", "watch", "deal", "telegram", "maintenance")
 DEFAULT_WORKER_ROLES = (*PRIMARY_WORKER_ROLES, "agent")
 _WORKER_ROLE_VALUES = frozenset(DEFAULT_WORKER_ROLES)
+_LOGGER = logging.getLogger(__name__)
+
+
+class AgentWorkerBoundaryError(RuntimeError):
+    code = "agent_worker_unexpected"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
 
 
 class _AgentExecutor(Protocol):
@@ -635,8 +644,16 @@ async def run_once(
             )
             await session.commit()
             executor_factory = agent_executor_factory or _agent_executor
-            agent_step = await executor_factory(session, settings, worker_id).run_next()
-            await session.commit()
+            agent_failed = False
+            try:
+                agent_step = await executor_factory(session, settings, worker_id).run_next()
+                await session.commit()
+            except Exception:
+                agent_failed = True
+                _LOGGER.error("worker_failure class=agent_execution code=agent_worker_unexpected")
+                await _cleanup_failed_agent_iteration(session, engine)
+            if agent_failed:
+                raise AgentWorkerBoundaryError()
         telegram_summary = TelegramDeliverySummary()
         if "telegram" in roles and not worker_drained:
             await _record_worker_heartbeat(
@@ -971,6 +988,18 @@ def _uses_legacy_primary_identity(roles: tuple[str, ...]) -> bool:
         frozenset(PRIMARY_WORKER_ROLES),
         frozenset(DEFAULT_WORKER_ROLES),
     }
+
+
+async def _cleanup_failed_agent_iteration(
+    session: AsyncSession,
+    engine: AsyncEngine,
+) -> None:
+    for cleanup in (session.rollback, session.close, engine.dispose):
+        try:
+            await cleanup()
+        except Exception:
+            # Process-boundary cleanup must not replace the stable public failure.
+            continue
 
 
 def _empty_worker_summary() -> WorkerRunSummary:

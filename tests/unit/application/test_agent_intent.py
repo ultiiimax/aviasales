@@ -182,6 +182,45 @@ def test_one_way_round_trip_open_jaw_and_ordered_multi_city() -> None:
     )
 
 
+@pytest.mark.parametrize("return_date", ("2026-09-09", "2026-09-11"))
+def test_flexible_round_trip_requires_return_after_full_outbound_window(
+    return_date: str,
+) -> None:
+    parsed = IntentParser().parse(
+        "LED → CDG",
+        preset=None,
+        selections={
+            "departure_date": "2026-09-10",
+            "date_mode": "flexible",
+            "flex_days": 2,
+            "return_date": return_date,
+        },
+    )
+
+    assert parsed.travel_intent is None
+    assert tuple(item.field for item in parsed.clarifications) == ("return_date_constraint",)
+    assert tuple(item.code for item in parsed.clarifications) == (
+        "return_before_outbound_window_end",
+    )
+
+
+def test_flexible_round_trip_accepts_return_at_outbound_window_end() -> None:
+    parsed = IntentParser().parse(
+        "LED → CDG",
+        preset=None,
+        selections={
+            "departure_date": "2026-09-10",
+            "date_mode": "flexible",
+            "flex_days": 2,
+            "return_date": "2026-09-12",
+        },
+    )
+
+    assert parsed.clarifications == ()
+    assert parsed.travel_intent is not None
+    assert parsed.travel_intent.legs[1].date_constraint.start_date == date(2026, 9, 12)
+
+
 @pytest.mark.parametrize("preset", tuple(AgentPresetId))
 def test_every_existing_preset_produces_the_same_travel_intent_type(
     preset: AgentPresetId,

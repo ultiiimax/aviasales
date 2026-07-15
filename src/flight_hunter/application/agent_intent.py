@@ -271,8 +271,11 @@ class ParsedIntent:
         if self.clarifications or not _leg_count_is_valid(self.trip_shape, len(self.legs)):
             return None
         materialized: list[TravelLeg] = []
-        for leg in self.legs:
-            constraint = leg.date_constraint.materialize(today=today, mode=self.date_mode)
+        for index, leg in enumerate(self.legs):
+            constraint = leg.date_constraint.materialize(
+                today=today,
+                mode=self.date_mode if index == 0 else None,
+            )
             if leg.origin is None or leg.destination is None or constraint is None:
                 return None
             materialized.append(TravelLeg(leg.origin, leg.destination, constraint))
@@ -697,6 +700,13 @@ def _with_semantic_clarifications(parsed: ParsedIntent) -> ParsedIntent:
     if parsed.trip_shape is TripShape.ROUND_TRIP:
         if len(parsed.legs) < 2 or parsed.legs[1].date_constraint.start_date is None:
             clarifications.append(_return_date_clarification())
+        else:
+            outbound_end = _parsed_date_upper_bound(
+                replace(parsed.legs[0].date_constraint, mode=parsed.date_mode)
+            )
+            return_date = parsed.legs[1].date_constraint.start_date
+            if outbound_end is not None and return_date < outbound_end:
+                clarifications.append(return_before_outbound_window_end_clarification())
     elif parsed.trip_shape in {TripShape.OPEN_JAW, TripShape.MULTI_CITY} and len(parsed.legs) < 2:
         clarifications.append(
             IntentClarification(
@@ -749,6 +759,30 @@ def _return_date_clarification() -> IntentClarification:
         code="return_date_required",
         message_ru="Укажите дату возвращения.",
     )
+
+
+def return_before_outbound_window_end_clarification() -> IntentClarification:
+    return IntentClarification(
+        field="return_date_constraint",
+        code="return_before_outbound_window_end",
+        message_ru=("Дата возвращения не может быть раньше последней допустимой даты вылета."),
+    )
+
+
+def _parsed_date_upper_bound(constraint: ParsedDateConstraint) -> date | None:
+    if constraint.start_date is None:
+        return None
+    if constraint.mode is DateMode.EXACT:
+        return constraint.start_date
+    if constraint.mode is DateMode.FLEXIBLE:
+        if constraint.flex_days <= 0:
+            return None
+        return constraint.start_date + timedelta(days=constraint.flex_days)
+    if constraint.mode is DateMode.RANGE:
+        if constraint.end_date is None or constraint.end_date < constraint.start_date:
+            return None
+        return constraint.end_date
+    return None
 
 
 def _location_clarification(field: str) -> IntentClarification:

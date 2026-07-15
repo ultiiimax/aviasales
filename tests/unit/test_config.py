@@ -205,6 +205,54 @@ def test_agent_poll_interval_allows_zero_and_rejects_negative(monkeypatch) -> No
         AppSettings.from_env()
 
 
+@pytest.mark.parametrize(
+    "name",
+    (
+        "AGENT_OPERATION_LEASE_SECONDS",
+        "AGENT_PROVIDER_CIRCUIT_COOLDOWN_SECONDS",
+        "AGENT_POLL_INTERVAL_SECONDS",
+    ),
+)
+def test_agent_execution_temporal_settings_accept_operational_maximum(
+    monkeypatch,
+    name: str,
+) -> None:
+    monkeypatch.setenv(name, "3600")
+
+    settings = AppSettings.from_env()
+
+    assert {
+        "AGENT_OPERATION_LEASE_SECONDS": settings.agent_operation_lease_seconds,
+        "AGENT_PROVIDER_CIRCUIT_COOLDOWN_SECONDS": (
+            settings.agent_provider_circuit_cooldown_seconds
+        ),
+        "AGENT_POLL_INTERVAL_SECONDS": settings.agent_poll_interval_seconds,
+    }[name] == 3600
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    tuple(
+        (name, value)
+        for name in (
+            "AGENT_OPERATION_LEASE_SECONDS",
+            "AGENT_PROVIDER_CIRCUIT_COOLDOWN_SECONDS",
+            "AGENT_POLL_INTERVAL_SECONDS",
+        )
+        for value in (3601, 10**30)
+    ),
+)
+def test_agent_execution_temporal_settings_reject_unbounded_values_before_worker_start(
+    monkeypatch,
+    name: str,
+    value: int,
+) -> None:
+    monkeypatch.setenv(name, str(value))
+
+    with pytest.raises(ValueError, match="cannot exceed 3600 seconds"):
+        AppSettings.from_env()
+
+
 @pytest.mark.parametrize("name", ("AGENT_QUICK_LOGICAL_LIMIT", "AGENT_FULL_LOGICAL_LIMIT"))
 def test_agent_default_budget_cannot_exceed_absolute_ceiling(monkeypatch, name: str) -> None:
     monkeypatch.setenv(name, "1001")

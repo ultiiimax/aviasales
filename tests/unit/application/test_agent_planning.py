@@ -146,6 +146,127 @@ async def test_finite_scope_is_frozen_before_approval_and_estimate_uses_cartesia
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
+    ("date_mode", "expected_calendar", "expected_exact"),
+    (
+        ("exact", 0, 4),
+        ("flexible", 20, 20),
+    ),
+)
+async def test_supported_native_round_trip_counts_outbound_workflow_once(
+    date_mode: str,
+    expected_calendar: int,
+    expected_exact: int,
+) -> None:
+    selections: dict[str, object] = {
+        "departure_date": "2026-09-10",
+        "return_date": "2026-09-20",
+    }
+    if date_mode == "flexible":
+        selections.update(date_mode="flexible", flex_days=2)
+    parsed = IntentParser().parse(
+        "LED → France",
+        preset=None,
+        selections=selections,
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.FULL)
+
+    assert revision.status is PlanRevisionStatus.AWAITING_APPROVAL
+    assert len(revision.frozen_legs) == 2
+    assert revision.frozen_legs[1].date_constraint.mode is DateMode.EXACT
+    assert revision.estimate is not None
+    assert revision.estimate.calendar_searches == expected_calendar
+    assert revision.estimate.exact_searches == expected_exact
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("return_date", ("2026-09-09", "2026-09-11"))
+async def test_flexible_round_trip_with_return_inside_outbound_surface_stays_draft(
+    return_date: str,
+) -> None:
+    parsed = IntentParser().parse(
+        "LED → CDG",
+        preset=None,
+        selections={
+            "departure_date": "2026-09-10",
+            "date_mode": "flexible",
+            "flex_days": 2,
+            "return_date": return_date,
+        },
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.QUICK)
+
+    assert revision.status is PlanRevisionStatus.DRAFT
+    assert revision.estimate is None
+    assert tuple(item.code for item in revision.clarifications) == (
+        "return_before_outbound_window_end",
+    )
+
+
+@pytest.mark.anyio
+async def test_flexible_round_trip_return_at_surface_end_keeps_canonical_estimate() -> None:
+    parsed = IntentParser().parse(
+        "LED → CDG",
+        preset=None,
+        selections={
+            "departure_date": "2026-09-10",
+            "date_mode": "flexible",
+            "flex_days": 2,
+            "return_date": "2026-09-12",
+        },
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.QUICK)
+
+    assert revision.status is PlanRevisionStatus.AWAITING_APPROVAL
+    assert revision.estimate is not None
+    assert revision.estimate.calendar_searches == 5
+    assert revision.estimate.exact_searches == 5
+
+
+@pytest.mark.anyio
+async def test_rolling_round_trip_return_inside_materialized_outbound_surface_stays_draft() -> None:
+    parsed = IntentParser().parse(
+        "LED → CDG",
+        preset=None,
+        selections={
+            "date_mode": "rolling_90_days",
+            "return_date": "2026-09-11",
+        },
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.FULL)
+
+    assert parsed.clarifications == ()
+    assert revision.status is PlanRevisionStatus.DRAFT
+    assert revision.estimate is None
+    assert tuple(item.code for item in revision.clarifications) == (
+        "return_before_outbound_window_end",
+    )
+
+
+@pytest.mark.anyio
+async def test_rolling_round_trip_return_at_materialized_surface_end_can_reach_approval() -> None:
+    parsed = IntentParser().parse(
+        "LED → CDG",
+        preset=None,
+        selections={
+            "date_mode": "rolling_90_days",
+            "return_date": "2026-10-11",
+        },
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.FULL)
+
+    assert revision.status is PlanRevisionStatus.AWAITING_APPROVAL
+    assert revision.estimate is not None
+    assert revision.estimate.calendar_searches == 90
+    assert revision.estimate.exact_searches == 90
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
     "route",
     (
         "ZZZ → France",

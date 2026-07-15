@@ -5,8 +5,9 @@ import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from itertools import pairwise
 from typing import Literal, Protocol, cast
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,13 +17,25 @@ from flight_hunter.application.agent_operations import (
     ProviderFailureClass,
     retry_decision,
 )
-from flight_hunter.domain.agent_evidence import ConfirmedOfferEvidence, DiscoverySignal
-from flight_hunter.domain.agent_search import DateConstraint, DateMode, LocationScopeKind, TripShape
-from flight_hunter.domain.offers import Freshness, PriceBasis
+from flight_hunter.domain.agent_evidence import (
+    ConfirmedOfferEvidence,
+    DiscoverySignal,
+    DiscoverySource,
+)
+from flight_hunter.domain.agent_search import (
+    DateConstraint,
+    DateMode,
+    LocationScopeKind,
+    RouteStrategy,
+    TripShape,
+)
+from flight_hunter.domain.offers import FlightSegmentSummary, Freshness, PriceBasis
+from flight_hunter.execution_limits import MAX_AGENT_EXECUTION_INTERVAL_SECONDS
 from flight_hunter.persistence.agent_repositories import (
     AgentConfirmedOfferEvidenceRecord,
     AgentDiscoverySignalRecord,
     AgentEvidenceRepository,
+    AgentOperationConflict,
     AgentOperationKind,
     AgentOperationRepository,
     AgentOperationResultType,
@@ -44,6 +57,7 @@ from flight_hunter.persistence.agent_repositories import (
     NewAgentPlanStage,
     NewAgentRankingSnapshot,
     ServerPrivateOperationLease,
+    recompute_agent_plan_revision_content_hash,
 )
 from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchAuthFailed,
@@ -65,6 +79,8 @@ from flight_hunter.providers.aviasales_search.gateway import (
 from flight_hunter.providers.aviasales_search.schemas import ProviderLocation
 
 _PROVIDER_ID = "aviasales_search"
+_EXACT_POLL_EVIDENCE_LIMIT = 50
+_PROVIDER_CLOCK_SKEW = timedelta(minutes=5)
 _TERMINAL_RUN_STATUSES = frozenset({"completed", "partial", "failed", "cancelled"})
 _ACTIVE_OPERATION_STATUSES = frozenset(
     {
@@ -130,6 +146,16 @@ class AgentExecutionPolicy:
                 raise ValueError(f"{field_name} must be a positive integer")
         if type(self.poll_interval_seconds) is not int or self.poll_interval_seconds < 0:
             raise ValueError("poll_interval_seconds must be a non-negative integer")
+        for field_name in (
+            "operation_lease_seconds",
+            "circuit_cooldown_seconds",
+            "circuit_probe_lease_seconds",
+            "poll_interval_seconds",
+        ):
+            if getattr(self, field_name) > MAX_AGENT_EXECUTION_INTERVAL_SECONDS:
+                raise ValueError(
+                    f"{field_name} cannot exceed {MAX_AGENT_EXECUTION_INTERVAL_SECONDS} seconds"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +178,7 @@ class _Workflow:
     infants: int
     currency: str
     one_way: bool
+    strategies: tuple[RouteStrategy, ...]
     exact_limit: int
     calendar_limit: int
     start_attempts: int
@@ -401,33 +428,39 @@ class AgentExecutionService:
             prefix=0x01,
             now=now,
         )
-        immutable_input = {
-            "origin": workflow.origin,
-            "destination": workflow.destination,
-            "departure_date": workflow.departure_date.isoformat(),
-            "return_date": workflow.return_date.isoformat() if workflow.return_date else None,
-            "passengers": workflow.passengers,
-            "currency": workflow.currency,
-            "phase": "calendar",
-        }
-        await self._scheduler.materialize(
-            OperationSpec(
-                id=_stable_uuid(run.id, 0x10, "calendar"),
-                household_id=run.household_id,
-                run_id=run.id,
-                stage_id=stage.id,
-                provider_id=_PROVIDER_ID,
-                kind=AgentOperationKind.CALENDAR_SEARCH,
-                immutable_input=immutable_input,
-                logical_workflow_input={
-                    key: value for key, value in immutable_input.items() if key != "phase"
-                },
-                consumes_logical_unit=True,
-                private_continuation=None,
-                max_attempts=workflow.start_attempts,
-                created_at=now,
+        for ordinal in range(workflow.calendar_limit):
+            departure_date = workflow.departure_date + timedelta(days=ordinal)
+            immutable_input = {
+                "origin": workflow.origin,
+                "destination": workflow.destination,
+                "departure_date": departure_date.isoformat(),
+                "return_date": (workflow.return_date.isoformat() if workflow.return_date else None),
+                "passengers": workflow.passengers,
+                "currency": workflow.currency,
+                "phase": "calendar",
+            }
+            await self._scheduler.materialize(
+                OperationSpec(
+                    id=_stable_uuid(
+                        run.id,
+                        0x10 + min(ordinal, 0x0F),
+                        f"calendar:{departure_date}:{workflow.return_date}",
+                    ),
+                    household_id=run.household_id,
+                    run_id=run.id,
+                    stage_id=stage.id,
+                    provider_id=_PROVIDER_ID,
+                    kind=AgentOperationKind.CALENDAR_SEARCH,
+                    immutable_input=immutable_input,
+                    logical_workflow_input={
+                        key: value for key, value in immutable_input.items() if key != "phase"
+                    },
+                    consumes_logical_unit=True,
+                    private_continuation=None,
+                    max_attempts=workflow.start_attempts,
+                    created_at=now,
+                )
             )
-        )
 
     async def _run_network_operation(
         self,
@@ -435,19 +468,9 @@ class AgentExecutionService:
         lease: ServerPrivateOperationLease,
         now: datetime,
     ) -> AgentOperationStatus:
-        current = await self._runs.get_run(run.household_id, run.id)
-        if current is None:
-            raise AgentExecutionError("agent_run_not_found")
-        inactive_code = _inactive_code(current, now)
-        if inactive_code is not None:
-            skipped = await self._operations.mark_claimed_operation_skipped(
-                household_id=run.household_id,
-                operation_id=lease.operation.id,
-                worker_id=self._worker_id,
-                error_code=inactive_code,
-                now=now,
-            )
-            return skipped.status
+        inactive = await self._skip_claimed_if_inactive(run, lease, now)
+        if inactive is not None:
+            return inactive
 
         try:
             workflow = await self._validate_dispatch_input(lease)
@@ -461,25 +484,66 @@ class AgentExecutionService:
             )
             return failed.status
 
+        before_preflight_now = self._now()
+        inactive = await self._skip_claimed_if_inactive(
+            run,
+            lease,
+            before_preflight_now,
+        )
+        if inactive is not None:
+            return inactive
         if self._provider_preflight is not None:
             try:
                 self._provider_preflight()
             except (AviasalesSearchCapabilityError, AviasalesSearchPolicyDenied) as error:
+                preflight_failure_now = self._now()
+                inactive = await self._skip_claimed_if_inactive(
+                    run,
+                    lease,
+                    preflight_failure_now,
+                )
+                if inactive is not None:
+                    return inactive
                 return await self._persist_failure(
                     lease.operation,
-                    _classify_failure(error, now),
-                    now,
+                    _classify_failure(error, preflight_failure_now),
+                    preflight_failure_now,
                 )
 
+        preflight_now = self._now()
+        inactive = await self._skip_claimed_if_inactive(run, lease, preflight_now)
+        if inactive is not None:
+            return inactive
         permit_result = await self._operations.acquire_circuit_permit(
             household_id=run.household_id,
             run_id=run.id,
             operation_id=lease.operation.id,
             provider_id=_PROVIDER_ID,
             worker_id=self._worker_id,
-            now=now,
+            now=preflight_now,
             probe_lease_seconds=self._policy.circuit_probe_lease_seconds,
         )
+        permit_now = self._now()
+        inactive_code = await self._fresh_inactive_code(run, permit_now)
+        if inactive_code is not None:
+            if permit_result.permit is not None:
+                try:
+                    await self._operations.abandon_circuit_permit(
+                        household_id=run.household_id,
+                        run_id=run.id,
+                        worker_id=self._worker_id,
+                        circuit_permit=permit_result.permit,
+                        now=permit_now,
+                    )
+                except AgentOperationConflict as error:
+                    if error.code in {
+                        "agent_circuit_permit_stale",
+                        "agent_operation_not_reservable",
+                    }:
+                        return AgentOperationStatus.LEASED
+                    raise
+            inactive = await self._skip_claimed_if_inactive(run, lease, permit_now)
+            return inactive or AgentOperationStatus.LEASED
         if permit_result.status is CircuitPermitStatus.OPEN:
             if lease.operation.attempt_count >= lease.operation.max_attempts:
                 failed = await self._operations.mark_operation_failed(
@@ -487,7 +551,7 @@ class AgentExecutionService:
                     operation_id=lease.operation.id,
                     worker_id=self._worker_id,
                     error_code="agent_circuit_open",
-                    now=now,
+                    now=permit_now,
                 )
                 return failed.status
             retry_at = cast(datetime, permit_result.retry_at)
@@ -497,7 +561,7 @@ class AgentExecutionService:
                 worker_id=self._worker_id,
                 next_retry_at=retry_at,
                 error_code="agent_circuit_open",
-                now=now,
+                now=permit_now,
             )
             return waiting.status
 
@@ -515,7 +579,7 @@ class AgentExecutionService:
                 self._policy.provider_rpm,
                 workflow.approved_provider_rpm,
             ),
-            now=now,
+            now=permit_now,
             circuit_permit=permit,
         )
         if reservation.status is AttemptReservationStatus.RATE_LIMITED:
@@ -524,7 +588,7 @@ class AgentExecutionService:
                 run_id=run.id,
                 worker_id=self._worker_id,
                 circuit_permit=permit,
-                now=now,
+                now=permit_now,
             )
             retry_at = cast(datetime, reservation.retry_at)
             if lease.operation.attempt_count >= lease.operation.max_attempts:
@@ -533,7 +597,7 @@ class AgentExecutionService:
                     operation_id=lease.operation.id,
                     worker_id=self._worker_id,
                     error_code="agent_provider_rate_wait",
-                    now=now,
+                    now=permit_now,
                 )
                 return failed.status
             waiting = await self._operations.schedule_retry(
@@ -542,7 +606,7 @@ class AgentExecutionService:
                 worker_id=self._worker_id,
                 next_retry_at=retry_at,
                 error_code="agent_provider_rate_wait",
-                now=now,
+                now=permit_now,
             )
             return waiting.status
         if reservation.status is AttemptReservationStatus.BUDGET_EXHAUSTED:
@@ -551,23 +615,53 @@ class AgentExecutionService:
                 run_id=run.id,
                 worker_id=self._worker_id,
                 circuit_permit=permit,
-                now=now,
+                now=permit_now,
             )
             failed = await self._operations.mark_operation_failed(
                 household_id=run.household_id,
                 operation_id=lease.operation.id,
                 worker_id=self._worker_id,
                 error_code="agent_http_budget_exhausted",
-                now=now,
+                now=permit_now,
             )
             return failed.status
         reservation_id = reservation.reservation_id
         if reservation_id is None:
             raise RuntimeError("reserved provider attempt omitted its identity")
         await self._durability_checkpoint()
+        dispatch_now = self._now()
+        inactive_code = await self._fresh_inactive_code(run, dispatch_now)
+        if inactive_code is not None:
+            try:
+                await self._operations.abandon_reserved_http_attempt(
+                    household_id=run.household_id,
+                    run_id=run.id,
+                    worker_id=self._worker_id,
+                    circuit_permit=permit,
+                    reservation_id=reservation_id,
+                    now=dispatch_now,
+                )
+            except AgentOperationConflict as error:
+                if error.code in {
+                    "agent_circuit_permit_stale",
+                    "agent_operation_not_reservable",
+                }:
+                    return AgentOperationStatus.LEASED
+                raise
+            inactive = await self._skip_claimed_if_inactive(run, lease, dispatch_now)
+            return inactive or AgentOperationStatus.LEASED
 
         try:
-            outcome = await self._dispatch_provider(lease)
+            raw_outcome = await self._dispatch_provider(lease)
+            response_now = self._now()
+            outcome = _validated_provider_outcome(
+                run=run,
+                operation=lease.operation,
+                private_continuation=lease.private_continuation,
+                workflow=workflow,
+                outcome=raw_outcome,
+                observed_by=response_now,
+            )
         except (
             AviasalesSearchAuthFailed,
             AviasalesSearchBlocked,
@@ -590,9 +684,20 @@ class AgentExecutionService:
             )
             if not _lease_active_at(lease.operation, response_now):
                 return AgentOperationStatus.LEASED
-            return await self._persist_failure(lease.operation, failure, response_now)
+            failure_checkpoint_now = self._now()
+            inactive = await self._skip_claimed_if_inactive(
+                run,
+                lease,
+                failure_checkpoint_now,
+            )
+            if inactive is not None:
+                return inactive
+            return await self._persist_failure(
+                lease.operation,
+                failure,
+                failure_checkpoint_now,
+            )
 
-        response_now = self._now()
         await self._operations.record_circuit_success(
             circuit_permit=permit,
             reservation_id=reservation_id,
@@ -600,7 +705,60 @@ class AgentExecutionService:
         )
         if not _lease_active_at(lease.operation, response_now):
             return AgentOperationStatus.LEASED
-        return await self._persist_provider_outcome(run, lease, outcome, response_now)
+        outcome_checkpoint_now = self._now()
+        preserves_confirmed_evidence = isinstance(outcome, ExactPollOutcome) and any(
+            _evidence_allowed_by_strategy(workflow, evidence) for evidence in outcome.evidence
+        )
+        if not preserves_confirmed_evidence:
+            inactive = await self._skip_claimed_if_inactive(
+                run,
+                lease,
+                outcome_checkpoint_now,
+            )
+            if inactive is not None:
+                return inactive
+        return await self._persist_provider_outcome(
+            run,
+            lease,
+            outcome,
+            outcome_checkpoint_now,
+        )
+
+    async def _fresh_inactive_code(
+        self,
+        run: AgentPlanRunRecord,
+        now: datetime,
+    ) -> str | None:
+        current = await self._runs.get_run(run.household_id, run.id)
+        if current is None:
+            raise AgentExecutionError("agent_run_not_found")
+        return _inactive_code(current, now)
+
+    async def _skip_claimed_if_inactive(
+        self,
+        run: AgentPlanRunRecord,
+        lease: ServerPrivateOperationLease,
+        now: datetime,
+    ) -> AgentOperationStatus | None:
+        inactive_code = await self._fresh_inactive_code(run, now)
+        if inactive_code is None:
+            return None
+        try:
+            skipped = await self._operations.mark_claimed_operation_skipped(
+                household_id=run.household_id,
+                operation_id=lease.operation.id,
+                worker_id=self._worker_id,
+                error_code=inactive_code,
+                now=now,
+            )
+        except AgentOperationConflict as error:
+            if error.code in {
+                "agent_operation_transition_conflict",
+                "agent_operation_skip_reason_invalid",
+            }:
+                return AgentOperationStatus.LEASED
+            raise
+        return skipped.status
 
     async def _validate_dispatch_input(self, lease: ServerPrivateOperationLease) -> _Workflow:
         operation = lease.operation
@@ -619,20 +777,7 @@ class AgentExecutionService:
                 await self._validate_poll_binding(lease, workflow)
                 return workflow
             if operation.kind is AgentOperationKind.CALENDAR_SEARCH:
-                CalendarSearchParams(
-                    origin=ProviderLocation(LocationScopeKind.AIRPORT, workflow.origin),
-                    destination=ProviderLocation(
-                        LocationScopeKind.AIRPORT,
-                        workflow.destination,
-                    ),
-                    depart_from=workflow.departure_date,
-                    depart_to=workflow.departure_end_date,
-                    one_way=workflow.one_way,
-                    currency=workflow.currency,
-                    adults=1,
-                    children=0,
-                    infants=0,
-                )
+                _calendar_params(operation.immutable_input, workflow)
                 return workflow
         except (KeyError, TypeError, ValueError):
             validation_error = AgentExecutionError("agent_operation_input_invalid")
@@ -649,6 +794,7 @@ class AgentExecutionService:
             raise AgentExecutionError("agent_operation_input_invalid")
         continuation = _continuation_from_private(lease.private_continuation)
         poll_round = _private_positive_int(lease.private_continuation, "poll_round")
+        continuation_digest = _private_continuation_digest(lease.private_continuation)
         immutable_round = _positive_int(operation.immutable_input.get("poll_round"), "poll_round")
         root_id = operation.logical_root_operation_id
         if root_id is None:
@@ -660,6 +806,10 @@ class AgentExecutionService:
             or root.stage_id != operation.stage_id
             or root.kind is not AgentOperationKind.EXACT_START
             or root.immutable_input.get("phase") != "start"
+            or root.provider_id != _PROVIDER_ID
+            or root.logical_root_operation_id is not None
+            or root.status is not AgentOperationStatus.SUCCEEDED
+            or root.result_type is not AgentOperationResultType.OPERATION
         ):
             raise AgentExecutionError("agent_operation_input_invalid")
         root_binding = _exact_binding_from_immutable(root.immutable_input, workflow)
@@ -673,8 +823,57 @@ class AgentExecutionService:
             or continuation.expected_currency != binding.currency
             or continuation.passengers != binding.passengers
             or poll_round != immutable_round
+            or poll_round > workflow.poll_rounds
+            or operation.provider_id != _PROVIDER_ID
+            or operation.logical_operation_fingerprint != root.logical_operation_fingerprint
+            or operation.id
+            != _stable_uuid(
+                operation.run_id,
+                0x80 + min(poll_round - 1, 0x1F),
+                f"poll:{root.id}:{poll_round}:{continuation_digest}",
+            )
         ):
             raise AgentExecutionError("agent_operation_input_invalid")
+        current = operation
+        for expected_round in range(poll_round, 0, -1):
+            if (
+                current.kind is not AgentOperationKind.EXACT_POLL
+                or current.run_id != operation.run_id
+                or current.stage_id != root.stage_id
+                or current.provider_id != _PROVIDER_ID
+                or current.logical_root_operation_id != root.id
+                or current.logical_operation_fingerprint != root.logical_operation_fingerprint
+                or current.immutable_input.get("phase") != "poll"
+                or _positive_int(
+                    current.immutable_input.get("poll_round"),
+                    "poll_round",
+                )
+                != expected_round
+                or current.handoff_predecessor_operation_id is None
+            ):
+                raise AgentExecutionError("agent_operation_input_invalid")
+            predecessor = await self._operations.get_operation(
+                operation.household_id,
+                current.handoff_predecessor_operation_id,
+            )
+            expected_predecessor = root if expected_round == 1 else None
+            if (
+                predecessor is None
+                or (expected_predecessor is not None and predecessor.id != expected_predecessor.id)
+                or predecessor.run_id != operation.run_id
+                or predecessor.stage_id != root.stage_id
+                or predecessor.status is not AgentOperationStatus.SUCCEEDED
+                or predecessor.result_type is not AgentOperationResultType.OPERATION
+                or predecessor.result_id != current.id
+            ):
+                raise AgentExecutionError("agent_operation_input_invalid")
+            if expected_round > 1 and (
+                predecessor.kind is not AgentOperationKind.EXACT_POLL
+                or predecessor.logical_root_operation_id != root.id
+                or predecessor.provider_id != _PROVIDER_ID
+            ):
+                raise AgentExecutionError("agent_operation_input_invalid")
+            current = predecessor
 
     async def _dispatch_provider(
         self,
@@ -696,20 +895,7 @@ class AgentExecutionService:
             )
         if operation.kind is AgentOperationKind.CALENDAR_SEARCH:
             return await self._gateway.calendar(
-                CalendarSearchParams(
-                    origin=ProviderLocation(LocationScopeKind.AIRPORT, workflow.origin),
-                    destination=ProviderLocation(
-                        LocationScopeKind.AIRPORT,
-                        workflow.destination,
-                    ),
-                    depart_from=workflow.departure_date,
-                    depart_to=workflow.departure_end_date,
-                    one_way=workflow.one_way,
-                    currency=workflow.currency,
-                    adults=1,
-                    children=0,
-                    infants=0,
-                ),
+                _calendar_params(operation.immutable_input, workflow),
                 evidence_namespace=operation.id,
                 request_fingerprint=operation.operation_fingerprint,
             )
@@ -770,11 +956,17 @@ class AgentExecutionService:
             return succeeded.status
 
         poll_outcome = cast(ExactPollOutcome, outcome)
-        if poll_outcome.evidence:
+        workflow = await self._workflow(run)
+        eligible_evidence = tuple(
+            evidence
+            for evidence in poll_outcome.evidence
+            if _evidence_allowed_by_strategy(workflow, evidence)
+        )
+        if eligible_evidence:
             stored_evidence = tuple(
                 [
                     await self._append_confirmed(run, operation, evidence, now)
-                    for evidence in poll_outcome.evidence
+                    for evidence in eligible_evidence
                 ]
             )
             succeeded = await self._operations.mark_operation_succeeded(
@@ -787,7 +979,6 @@ class AgentExecutionService:
             )
             return succeeded.status
 
-        workflow = await self._workflow(run)
         continuation = _continuation_from_private(lease.private_continuation)
         poll_round = _private_positive_int(lease.private_continuation, "poll_round")
         if not poll_outcome.complete and poll_round < workflow.poll_rounds:
@@ -856,11 +1047,24 @@ class AgentExecutionService:
             retry_after=failure.retry_after,
         )
         if decision.status is AgentOperationStatus.RETRY_WAIT:
+            current = await self._runs.get_run(operation.household_id, operation.run_id)
+            if current is None:
+                raise AgentExecutionError("agent_run_not_found")
+            next_retry_at = cast(datetime, decision.next_retry_at)
+            if next_retry_at >= current.deadline_at:
+                failed = await self._operations.mark_operation_failed(
+                    household_id=operation.household_id,
+                    operation_id=operation.id,
+                    worker_id=self._worker_id,
+                    error_code=decision.error_code,
+                    now=now,
+                )
+                return failed.status
             waiting = await self._operations.schedule_retry(
                 household_id=operation.household_id,
                 operation_id=operation.id,
                 worker_id=self._worker_id,
-                next_retry_at=cast(datetime, decision.next_retry_at),
+                next_retry_at=next_retry_at,
                 error_code=decision.error_code,
                 now=now,
             )
@@ -968,7 +1172,12 @@ class AgentExecutionService:
             operation for operation in operations if operation.status is AgentOperationStatus.FAILED
         )
         if confirmed:
-            if failed:
+            material_failures = tuple(
+                operation
+                for operation in failed
+                if operation.error_code != "agent_no_discovery_results"
+            )
+            if material_failures:
                 return await self._runs.set_status(
                     household_id=run.household_id,
                     run_id=run.id,
@@ -1046,24 +1255,7 @@ class AgentExecutionService:
                 passenger_basis=PriceBasis.TOTAL_FOR_PASSENGERS,
                 amount_minor=evidence.total_amount.minor_units,
                 currency=evidence.total_amount.currency,
-                itinerary_evidence={
-                    "origin": evidence.origin,
-                    "destination": evidence.destination,
-                    "segments": [
-                        {
-                            "origin": segment.origin,
-                            "destination": segment.destination,
-                            "depart_at": segment.depart_at,
-                            "arrive_at": segment.arrive_at,
-                            "carrier": segment.airline_code,
-                            "flight_number": segment.flight_number,
-                        }
-                        for segment in evidence.segments
-                    ],
-                    "seller": evidence.seller_name,
-                    "ticket_structure": "provider_ticket",
-                    "stops": max(0, len(evidence.segments) - 1),
-                },
+                itinerary_evidence=_confirmed_itinerary_evidence(evidence),
                 protection_status=evidence.protection_status,
                 baggage_status=None,
                 transfer_status=None,
@@ -1172,12 +1364,14 @@ class AgentExecutionService:
             departure_date=continuation.expected_departure_date,
             return_date=continuation.expected_return_date,
         )
+        private_continuation = _private_continuation(continuation, poll_round)
+        continuation_digest = _private_continuation_digest(private_continuation)
         return await self._scheduler.materialize(
             OperationSpec(
                 id=_stable_uuid(
                     run.id,
                     0x80 + min(poll_round - 1, 0x1F),
-                    f"poll:{root.id}:{poll_round}:{continuation.last_update_timestamp}",
+                    f"poll:{root.id}:{poll_round}:{continuation_digest}",
                 ),
                 household_id=run.household_id,
                 run_id=run.id,
@@ -1191,7 +1385,7 @@ class AgentExecutionService:
                 },
                 logical_workflow_input=logical_input,
                 consumes_logical_unit=False,
-                private_continuation=_private_continuation(continuation, poll_round),
+                private_continuation=private_continuation,
                 max_attempts=workflow.attempts_per_poll,
                 created_at=now,
                 logical_root_operation_id=root.id,
@@ -1401,20 +1595,144 @@ class AgentExecutionService:
             raise AgentExecutionError("agent_revision_not_found")
         workflow: _Workflow | None = None
         try:
+            approval = await self._runs.get_approval(household_id, run.approval_id)
+            if approval is None:
+                raise ValueError("run approval is missing")
             plan = _mapping(json.loads(revision.plan_json), "plan")
             scope = _mapping(json.loads(revision.scope_snapshot_json), "scope_snapshot")
+            capability = _mapping(
+                json.loads(revision.capability_snapshot_json),
+                "capability_snapshot",
+            )
             cost = _mapping(json.loads(revision.cost_model_snapshot_json), "cost_model")
             intent = _mapping(plan["intent"], "intent")
             scope_legs = _sequence(scope["legs"], "scope legs")
-            first_scope_leg = _mapping(scope_legs[0], "scope leg")
-            origin_scope = _mapping(first_scope_leg["origin"], "origin scope")
-            destination_scope = _mapping(first_scope_leg["destination"], "destination scope")
-            origin_codes = _sequence(origin_scope["airport_codes"], "origin airport codes")
-            destination_codes = _sequence(
-                destination_scope["airport_codes"],
-                "destination airport codes",
-            )
             plan_legs = _sequence(intent.get("legs", ()), "intent legs")
+            requested_strategy_values = intent.get("requested_strategies", ())
+            if isinstance(
+                requested_strategy_values,
+                (str, bytes, bytearray),
+            ) or not isinstance(requested_strategy_values, Sequence):
+                raise TypeError("requested strategies must be an ordered collection")
+            requested_strategies = tuple(
+                RouteStrategy(_text(value, "requested strategy"))
+                for value in requested_strategy_values
+            )
+            approved_strategies = tuple(
+                RouteStrategy(_text(value, "approved strategy"))
+                for value in approval.snapshot.approved_strategies
+            )
+            calendar_estimate = _non_negative_int(
+                revision.estimated_calendar_searches,
+                "estimated calendar searches",
+            )
+            exact_estimate = _non_negative_int(
+                revision.estimated_exact_searches,
+                "estimated exact searches",
+            )
+            logical_estimate = _positive_int(
+                revision.estimated_logical_operations,
+                "estimated logical operations",
+            )
+            http_estimate = _positive_int(
+                revision.estimated_http_attempts,
+                "estimated http attempts",
+            )
+            deadline_seconds = _positive_int(
+                revision.estimated_deadline_seconds,
+                "estimated deadline seconds",
+            )
+            expected_budget = {
+                "calendar_searches": calendar_estimate,
+                "exact_searches": exact_estimate,
+                "logical_operations": logical_estimate,
+                "http_attempts": http_estimate,
+                "deadline_seconds": deadline_seconds,
+            }
+            if (
+                approval.id != run.approval_id
+                or approval.household_id != household_id
+                or approval.plan_id != run.plan_id
+                or approval.revision_id != revision.id
+                or run.revision_id != revision.id
+                or revision.plan_id != run.plan_id
+                or approval.run_id != run.id
+                or approval.consumed_at is None
+                or revision.consumed_at is None
+                or approval.approved_at != run.created_at
+                or approval.consumed_at != run.created_at
+                or revision.consumed_at != run.created_at
+                or not (approval.approved_at <= run.created_at < approval.expires_at)
+                or approval.snapshot.revision_content_hash != revision.content_hash
+                or recompute_agent_plan_revision_content_hash(revision) != revision.content_hash
+                or dict(approval.snapshot.approved_budget) != expected_budget
+                or run.logical_operation_budget != logical_estimate
+                or run.http_attempt_budget != http_estimate
+                or run.deadline_at - run.created_at != timedelta(seconds=deadline_seconds)
+            ):
+                raise ValueError("approval is not bound to the immutable revision")
+            if logical_estimate != calendar_estimate + exact_estimate:
+                raise ValueError("logical estimate is inconsistent")
+            if requested_strategies != approved_strategies:
+                raise AgentExecutionError("agent_strategy_unsupported")
+            expected_warning_versions = (
+                {RouteStrategy.HIDDEN_CITY.value: "hidden-city-v1"}
+                if RouteStrategy.HIDDEN_CITY in requested_strategies
+                else {}
+            )
+            if dict(approval.snapshot.risk_warning_versions) != expected_warning_versions:
+                raise AgentExecutionError("agent_strategy_unsupported")
+            supported_strategies = {
+                RouteStrategy.DIRECT,
+                RouteStrategy.THROUGH_TICKET,
+            }
+            if not set(requested_strategies) <= supported_strategies:
+                raise AgentExecutionError("agent_strategy_unsupported")
+            analysis_modes = intent.get("analysis_modes", ())
+            if isinstance(analysis_modes, (str, bytes, bytearray)) or not isinstance(
+                analysis_modes,
+                Sequence,
+            ):
+                raise TypeError("analysis modes must be an ordered collection")
+            if analysis_modes:
+                tuple(_text(value, "analysis mode") for value in analysis_modes)
+                raise AgentExecutionError("agent_analysis_unsupported")
+
+            trip_shape = TripShape(_text(intent.get("trip_shape", "one_way"), "trip_shape"))
+            if trip_shape in {TripShape.OPEN_JAW, TripShape.MULTI_CITY}:
+                raise AgentExecutionError("agent_trip_shape_unsupported")
+            expected_leg_count = 1 if trip_shape is TripShape.ONE_WAY else 2
+            if len(plan_legs) != expected_leg_count or len(scope_legs) != expected_leg_count:
+                raise ValueError("approved workflow leg count is invalid")
+            if _text(plan["coverage"], "plan coverage") != _text(
+                scope["coverage"],
+                "scope coverage",
+            ):
+                raise ValueError("plan and scope coverage differ")
+            if _text(capability["provider_id"], "provider_id") != _PROVIDER_ID:
+                raise ValueError("capability provider differs")
+            _text(capability["version"], "capability version")
+            if (
+                _text(
+                    capability["airport_location_semantics"],
+                    "airport location semantics",
+                )
+                != "supported"
+            ):
+                raise ValueError("airport location semantics are unsupported")
+            trip_capability_key = "one_way" if trip_shape is TripShape.ONE_WAY else "round_trip"
+            if _text(capability[trip_capability_key], trip_capability_key) != "supported":
+                raise ValueError("trip shape capability is unsupported")
+            intent_routes = tuple(
+                _supported_intent_route(_mapping(value, "intent leg")) for value in plan_legs
+            )
+            frozen_routes = tuple(
+                _supported_frozen_route(_mapping(value, "scope leg")) for value in scope_legs
+            )
+            if intent_routes != frozen_routes:
+                raise ValueError("intent and frozen routes differ")
+
+            first_scope_leg = _mapping(scope_legs[0], "scope leg")
             first_plan_leg = _mapping(plan_legs[0], "intent leg")
             scope_constraint = _constraint_from_snapshot(
                 _mapping(first_scope_leg["date_constraint"], "date constraint")
@@ -1424,22 +1742,20 @@ class AgentExecutionService:
             )
             if scope_constraint != intent_constraint:
                 raise ValueError("intent and frozen date constraints differ")
+            if (
+                DateMode(_text(intent["date_mode"], "intent date mode"))
+                is not scope_constraint.mode
+            ):
+                raise ValueError("top-level and leg date modes differ")
             departure, departure_end = _constraint_bounds(scope_constraint)
-            trip_shape = TripShape(_text(intent.get("trip_shape", "one_way"), "trip_shape"))
-            if trip_shape in {TripShape.OPEN_JAW, TripShape.MULTI_CITY}:
-                raise AgentExecutionError("agent_trip_shape_unsupported")
+            origin, destination = frozen_routes[0]
             return_date: date | None = None
-            if trip_shape is TripShape.ONE_WAY:
-                if len(plan_legs) != 1 or len(scope_legs) != 1:
-                    raise ValueError("one-way workflow must contain exactly one leg")
-            else:
-                if len(plan_legs) != 2 or len(scope_legs) != 2:
-                    raise ValueError("round-trip workflow must contain exactly two legs")
+            if trip_shape is TripShape.ROUND_TRIP:
                 second_plan_leg = _mapping(plan_legs[1], "return intent leg")
                 second_scope_leg = _mapping(scope_legs[1], "return scope leg")
-                if not _reciprocal_intent_legs(first_plan_leg, second_plan_leg):
+                if intent_routes[1] != (destination, origin):
                     raise ValueError("round-trip intent legs must be reciprocal")
-                if not _reciprocal_frozen_legs(first_scope_leg, second_scope_leg):
+                if frozen_routes[1] != (destination, origin):
                     raise ValueError("round-trip frozen legs must be reciprocal")
                 return_scope_constraint = _constraint_from_snapshot(
                     _mapping(second_scope_leg["date_constraint"], "return date constraint")
@@ -1450,15 +1766,40 @@ class AgentExecutionService:
                 if (
                     return_scope_constraint != return_intent_constraint
                     or return_scope_constraint.mode is not DateMode.EXACT
-                    or return_scope_constraint.start_date < departure
+                    or return_scope_constraint.start_date < departure_end
                 ):
                     raise ValueError("round-trip return date is not approved")
                 return_date = return_scope_constraint.start_date
-            exact_limit = revision.estimated_exact_searches or 0
-            calendar_limit = revision.estimated_calendar_searches or 0
+            start_attempts = _positive_int(cost.get("start_attempts", 1), "start_attempts")
+            poll_rounds = _positive_int(cost.get("poll_rounds", 1), "poll_rounds")
+            attempts_per_poll = _positive_int(
+                cost.get("attempts_per_poll", 1),
+                "attempts_per_poll",
+            )
+            _text(cost["version"], "cost model version")
+            worst_case_exact_http_attempts = _positive_int(
+                cost.get("worst_case_exact_http_attempts"),
+                "worst_case_exact_http_attempts",
+            )
+            if worst_case_exact_http_attempts != (start_attempts + poll_rounds * attempts_per_poll):
+                raise ValueError("cost model exact attempt estimate is inconsistent")
+            if http_estimate != (
+                exact_estimate * worst_case_exact_http_attempts + calendar_estimate * start_attempts
+            ):
+                raise ValueError("http estimate is inconsistent")
+            approved_date_surface = (departure_end - departure).days + 1
+            if scope_constraint.mode is DateMode.EXACT:
+                if calendar_estimate != 0 or exact_estimate != 1:
+                    raise ValueError("exact workflow estimates are inconsistent")
+            elif (
+                calendar_estimate != approved_date_surface
+                or exact_estimate != approved_date_surface
+            ):
+                raise ValueError("calendar workflow estimates are inconsistent")
+            effective_strategies = requested_strategies or (RouteStrategy.THROUGH_TICKET,)
             workflow = _Workflow(
-                origin=_iata(origin_codes[0], "origin"),
-                destination=_iata(destination_codes[0], "destination"),
+                origin=origin,
+                destination=destination,
                 date_mode=scope_constraint.mode.value,
                 departure_date=departure,
                 departure_end_date=departure_end,
@@ -1468,14 +1809,12 @@ class AgentExecutionService:
                 infants=_non_negative_int(intent.get("infants", 0), "infants"),
                 currency=_currency(intent.get("currency", "RUB")),
                 one_way=trip_shape is TripShape.ONE_WAY,
-                exact_limit=max(1, exact_limit),
-                calendar_limit=max(0, calendar_limit),
-                start_attempts=_positive_int(cost.get("start_attempts", 1), "start_attempts"),
-                poll_rounds=_positive_int(cost.get("poll_rounds", 1), "poll_rounds"),
-                attempts_per_poll=_positive_int(
-                    cost.get("attempts_per_poll", 1),
-                    "attempts_per_poll",
-                ),
+                strategies=effective_strategies,
+                exact_limit=exact_estimate,
+                calendar_limit=calendar_estimate,
+                start_attempts=start_attempts,
+                poll_rounds=poll_rounds,
+                attempts_per_poll=attempts_per_poll,
                 approved_provider_rpm=_positive_int(
                     cost.get("requests_per_minute"),
                     "requests_per_minute",
@@ -1511,6 +1850,267 @@ def _constraint_bounds(constraint: DateConstraint) -> tuple[date, date]:
     return constraint.start_date, constraint.end_date or constraint.start_date
 
 
+def _validated_provider_outcome(
+    *,
+    run: AgentPlanRunRecord,
+    operation: AgentRunOperationRecord,
+    private_continuation: Mapping[str, object] | None,
+    workflow: _Workflow,
+    outcome: object,
+    observed_by: datetime,
+) -> ExactSearchContinuation | ExactPollOutcome | tuple[DiscoverySignal, ...]:
+    try:
+        if operation.kind is AgentOperationKind.EXACT_START:
+            if not isinstance(outcome, ExactSearchContinuation):
+                raise TypeError("exact start returned an invalid outcome")
+            binding = _exact_binding_from_immutable(operation.immutable_input, workflow)
+            if (
+                outcome.last_update_timestamp != 0
+                or outcome.evidence_namespace != operation.id
+                or outcome.expected_origin != binding.origin
+                or outcome.expected_destination != binding.destination
+                or outcome.expected_departure_date != binding.departure_date
+                or outcome.expected_return_date != binding.return_date
+                or outcome.expected_currency != binding.currency
+                or outcome.passengers != binding.passengers
+            ):
+                raise ValueError("exact start continuation is not request-bound")
+            return outcome
+
+        if operation.kind is AgentOperationKind.CALENDAR_SEARCH:
+            if type(outcome) is not tuple or not all(
+                isinstance(signal, DiscoverySignal) for signal in outcome
+            ):
+                raise TypeError("calendar returned an invalid outcome")
+            return _validated_calendar_signals(
+                cast(tuple[DiscoverySignal, ...], outcome),
+                run=run,
+                operation=operation,
+                workflow=workflow,
+                observed_by=observed_by,
+            )
+
+        if operation.kind is AgentOperationKind.EXACT_POLL:
+            if not isinstance(outcome, ExactPollOutcome):
+                raise TypeError("exact poll returned an invalid outcome")
+            continuation = _continuation_from_private(private_continuation)
+            if outcome.next_cursor < continuation.last_update_timestamp or (
+                not outcome.complete and outcome.next_cursor <= continuation.last_update_timestamp
+            ):
+                raise ValueError("exact poll cursor did not advance")
+            if len(outcome.evidence) > _EXACT_POLL_EVIDENCE_LIMIT:
+                raise ValueError("exact poll exceeded its provider result limit")
+            return ExactPollOutcome(
+                evidence=_validated_exact_evidence(
+                    outcome.evidence,
+                    run=run,
+                    continuation=continuation,
+                    observed_by=observed_by,
+                ),
+                next_cursor=outcome.next_cursor,
+                complete=outcome.complete,
+            )
+        raise TypeError("network operation returned an unsupported outcome")
+    except (AgentExecutionError, OverflowError, TypeError, ValueError):
+        raise AviasalesSearchSchemaError() from None
+
+
+def _validated_calendar_signals(
+    signals: tuple[DiscoverySignal, ...],
+    *,
+    run: AgentPlanRunRecord,
+    operation: AgentRunOperationRecord,
+    workflow: _Workflow,
+    observed_by: datetime,
+) -> tuple[DiscoverySignal, ...]:
+    requested_date = _calendar_params(operation.immutable_input, workflow).depart_from
+    best_by_date: dict[tuple[date, date | None], DiscoverySignal] = {}
+    id_bindings: dict[UUID, tuple[date, date | None]] = {}
+    for signal in signals:
+        date_pair = (signal.departure_date, signal.return_date)
+        if (
+            signal.id != _calendar_discovery_signal_id(operation.id, signal)
+            or signal.provider_id != _PROVIDER_ID
+            or signal.observed_amount.currency != workflow.currency
+            or signal.passengers != 1
+            or signal.source_kind is not DiscoverySource.CALENDAR
+            or not _live_observation(signal.observed_at, run, observed_by)
+        ):
+            raise ValueError("calendar signal is not request-bound")
+        if (
+            signal.origin != workflow.origin
+            or signal.destination != workflow.destination
+            or signal.departure_date != requested_date
+            or signal.return_date != workflow.return_date
+        ):
+            continue
+        previous_binding = id_bindings.setdefault(signal.id, date_pair)
+        if previous_binding != date_pair:
+            raise ValueError("calendar signal identity is ambiguous")
+        existing = best_by_date.get(date_pair)
+        if existing is None or _calendar_signal_order(signal) < _calendar_signal_order(existing):
+            best_by_date[date_pair] = signal
+
+    if len(best_by_date) > 1:
+        raise ValueError("calendar response exceeded the approved date surface")
+    return tuple(
+        sorted(
+            best_by_date.values(),
+            key=lambda signal: (
+                signal.departure_date,
+                signal.return_date or date.min,
+                *_calendar_signal_order(signal),
+            ),
+        )
+    )
+
+
+def _calendar_signal_order(signal: DiscoverySignal) -> tuple[int, float, str]:
+    return (
+        signal.observed_amount.minor_units,
+        -signal.observed_at.timestamp(),
+        str(signal.id),
+    )
+
+
+def _calendar_discovery_signal_id(
+    evidence_namespace: UUID,
+    signal: DiscoverySignal,
+) -> UUID:
+    identity = "|".join(
+        (
+            _PROVIDER_ID,
+            "calendar",
+            signal.origin,
+            signal.destination,
+            signal.departure_date.isoformat(),
+            signal.return_date.isoformat() if signal.return_date is not None else "",
+            str(signal.observed_amount.minor_units),
+            signal.observed_amount.currency,
+        )
+    )
+    return uuid5(evidence_namespace, f"discovery|{identity}")
+
+
+def _validated_exact_evidence(
+    evidence_items: tuple[ConfirmedOfferEvidence, ...],
+    *,
+    run: AgentPlanRunRecord,
+    continuation: ExactSearchContinuation,
+    observed_by: datetime,
+) -> tuple[ConfirmedOfferEvidence, ...]:
+    best_by_offer: dict[str, ConfirmedOfferEvidence] = {}
+    id_bindings: dict[UUID, str] = {}
+    for evidence in evidence_items:
+        expected_id = uuid5(
+            continuation.evidence_namespace,
+            f"exact|{evidence.provider_offer_id}|{continuation.passengers}",
+        )
+        if (
+            evidence.id != expected_id
+            or evidence.provider_id != _PROVIDER_ID
+            or evidence.origin != continuation.expected_origin
+            or evidence.destination != continuation.expected_destination
+            or evidence.departure_date != continuation.expected_departure_date
+            or evidence.return_date != continuation.expected_return_date
+            or evidence.total_amount.currency != continuation.expected_currency
+            or evidence.passengers != continuation.passengers
+            or not _live_observation(evidence.observed_at, run, observed_by)
+            or not _confirmed_segments_are_bound(evidence)
+        ):
+            raise ValueError("confirmed evidence is not request-bound")
+        previous_binding = id_bindings.setdefault(evidence.id, evidence.provider_offer_id)
+        if previous_binding != evidence.provider_offer_id:
+            raise ValueError("confirmed evidence identity is ambiguous")
+        existing = best_by_offer.get(evidence.provider_offer_id)
+        if existing is None or _confirmed_evidence_order(evidence) < _confirmed_evidence_order(
+            existing
+        ):
+            best_by_offer[evidence.provider_offer_id] = evidence
+    return tuple(sorted(best_by_offer.values(), key=_confirmed_evidence_order))
+
+
+def _confirmed_evidence_order(
+    evidence: ConfirmedOfferEvidence,
+) -> tuple[int, float, str]:
+    return (
+        evidence.total_amount.minor_units,
+        -evidence.observed_at.timestamp(),
+        str(evidence.id),
+    )
+
+
+def _live_observation(
+    observed_at: datetime,
+    run: AgentPlanRunRecord,
+    observed_by: datetime,
+) -> bool:
+    normalized = observed_at.astimezone(UTC)
+    response_time = observed_by.astimezone(UTC)
+    lower_bound = max(
+        run.created_at.astimezone(UTC),
+        response_time - _PROVIDER_CLOCK_SKEW,
+    )
+    return lower_bound <= normalized <= response_time + _PROVIDER_CLOCK_SKEW
+
+
+def _confirmed_segments_are_bound(evidence: ConfirmedOfferEvidence) -> bool:
+    directions = _confirmed_directions(evidence)
+    if directions is None:
+        return False
+    expected_dates = (
+        (evidence.departure_date,)
+        if evidence.return_date is None
+        else (evidence.departure_date, evidence.return_date)
+    )
+    if len(directions) != len(expected_dates):
+        return False
+    try:
+        parsed_directions = tuple(
+            tuple(
+                (
+                    datetime.fromisoformat(segment.depart_at.replace("Z", "+00:00")),
+                    datetime.fromisoformat(segment.arrive_at.replace("Z", "+00:00")),
+                )
+                for segment in direction
+            )
+            for direction in directions
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+    awareness = {
+        moment.tzinfo is not None and moment.utcoffset() is not None
+        for direction in parsed_directions
+        for pair in direction
+        for moment in pair
+    }
+    if len(awareness) != 1:
+        return False
+    aware = awareness.pop()
+    for direction, parsed, expected_date in zip(
+        directions,
+        parsed_directions,
+        expected_dates,
+        strict=True,
+    ):
+        if not parsed or parsed[0][0].date() != expected_date:
+            return False
+        previous_arrival: datetime | None = None
+        for segment, (departure, arrival) in zip(direction, parsed, strict=True):
+            normalized_departure = (
+                departure.astimezone(UTC).replace(tzinfo=None) if aware else departure
+            )
+            normalized_arrival = arrival.astimezone(UTC).replace(tzinfo=None) if aware else arrival
+            if normalized_arrival < normalized_departure or (
+                previous_arrival is not None and normalized_departure < previous_arrival
+            ):
+                return False
+            if not segment.origin or not segment.destination:
+                return False
+            previous_arrival = normalized_arrival
+    return True
+
+
 def _discovery_matches_workflow(
     signal: AgentDiscoverySignalRecord,
     workflow: _Workflow,
@@ -1527,36 +2127,116 @@ def _discovery_matches_workflow(
     )
 
 
-def _reciprocal_intent_legs(
-    outbound: Mapping[str, object],
-    inbound: Mapping[str, object],
+def _evidence_allowed_by_strategy(
+    workflow: _Workflow,
+    evidence: ConfirmedOfferEvidence,
 ) -> bool:
-    return _intent_location(inbound, "origin") == _intent_location(
-        outbound, "destination"
-    ) and _intent_location(inbound, "destination") == _intent_location(outbound, "origin")
+    direct_only = (
+        RouteStrategy.DIRECT in workflow.strategies
+        and RouteStrategy.THROUGH_TICKET not in workflow.strategies
+    )
+    return not direct_only or _confirmed_stop_count(evidence) == 0
 
 
-def _intent_location(leg: Mapping[str, object], key: str) -> tuple[str, str]:
-    location = _mapping(leg[key], f"intent {key}")
+def _confirmed_itinerary_evidence(evidence: ConfirmedOfferEvidence) -> dict[str, object]:
+    itinerary: dict[str, object] = {
+        "origin": evidence.origin,
+        "destination": evidence.destination,
+        "segments": [
+            {
+                "origin": segment.origin,
+                "destination": segment.destination,
+                "depart_at": segment.depart_at,
+                "arrive_at": segment.arrive_at,
+                "carrier": segment.airline_code,
+                "flight_number": segment.flight_number,
+            }
+            for segment in evidence.segments
+        ],
+        "seller": evidence.seller_name,
+        "ticket_structure": "provider_ticket",
+    }
+    stops = _confirmed_stop_count(evidence)
+    if stops is not None:
+        itinerary["stops"] = stops
+    return itinerary
+
+
+def _confirmed_stop_count(evidence: ConfirmedOfferEvidence) -> int | None:
+    directions = _confirmed_directions(evidence)
+    if directions is None:
+        return None
+    return sum(max(0, len(direction) - 1) for direction in directions)
+
+
+def _confirmed_directions(
+    evidence: ConfirmedOfferEvidence,
+) -> tuple[tuple[FlightSegmentSummary, ...], ...] | None:
+    segments = evidence.segments
+    if not segments or segments[0].origin != evidence.origin:
+        return None
+    if evidence.return_date is None:
+        if segments[-1].destination != evidence.destination or not _continuous_segments(segments):
+            return None
+        return (segments,)
+
+    for boundary in range(1, len(segments)):
+        outbound = segments[:boundary]
+        inbound = segments[boundary:]
+        if (
+            outbound[-1].destination == evidence.destination
+            and inbound[0].origin == evidence.destination
+            and inbound[-1].destination == evidence.origin
+            and _continuous_segments(outbound)
+            and _continuous_segments(inbound)
+        ):
+            return (outbound, inbound)
+    return None
+
+
+def _continuous_segments(segments: Sequence[FlightSegmentSummary]) -> bool:
+    return all(previous.destination == current.origin for previous, current in pairwise(segments))
+
+
+def _supported_intent_route(leg: Mapping[str, object]) -> tuple[str, str]:
     return (
-        _text(location["kind"], f"intent {key} kind"),
-        _text(location["value"], f"intent {key} value").upper(),
+        _supported_intent_airport(leg, "origin"),
+        _supported_intent_airport(leg, "destination"),
     )
 
 
-def _reciprocal_frozen_legs(
-    outbound: Mapping[str, object],
-    inbound: Mapping[str, object],
-) -> bool:
-    return _frozen_airport(inbound, "origin") == _frozen_airport(
-        outbound, "destination"
-    ) and _frozen_airport(inbound, "destination") == _frozen_airport(outbound, "origin")
+def _supported_intent_airport(leg: Mapping[str, object], key: str) -> str:
+    location = _mapping(leg[key], f"intent {key}")
+    kind = LocationScopeKind(_text(location["kind"], f"intent {key} kind"))
+    if kind is not LocationScopeKind.AIRPORT:
+        raise AgentExecutionError("agent_scope_unsupported")
+    return _iata(location["value"], f"intent {key}")
 
 
-def _frozen_airport(leg: Mapping[str, object], key: str) -> str:
+def _supported_frozen_route(leg: Mapping[str, object]) -> tuple[str, str]:
+    if leg.get("anywhere") is not None:
+        raise AgentExecutionError("agent_scope_unsupported")
+    return (
+        _supported_frozen_airport(leg, "origin"),
+        _supported_frozen_airport(leg, "destination"),
+    )
+
+
+def _supported_frozen_airport(leg: Mapping[str, object], key: str) -> str:
     location = _mapping(leg[key], f"frozen {key}")
+    requested = _mapping(location["requested_scope"], f"frozen {key} requested scope")
+    kind = LocationScopeKind(_text(requested["kind"], f"frozen {key} requested kind"))
     codes = _sequence(location["airport_codes"], f"frozen {key} airport codes")
-    return _iata(codes[0], f"frozen {key}")
+    nearby_radius_km = _non_negative_int(
+        location.get("nearby_radius_km", 0),
+        f"frozen {key} nearby radius",
+    )
+    if kind is not LocationScopeKind.AIRPORT or len(codes) != 1 or nearby_radius_km != 0:
+        raise AgentExecutionError("agent_scope_unsupported")
+    code = _iata(codes[0], f"frozen {key}")
+    if _iata(requested["value"], f"frozen {key} requested value") != code:
+        raise ValueError(f"frozen {key} requested scope differs from airport codes")
+    return code
 
 
 def _start_params(
@@ -1576,6 +2256,38 @@ def _start_params(
         trip_class=AviasalesTripClass.ECONOMY,
         currency=workflow.currency,
         market="RU",
+    )
+
+
+def _calendar_params(
+    immutable_input: Mapping[str, object],
+    workflow: _Workflow,
+) -> CalendarSearchParams:
+    departure_date = date.fromisoformat(_text(immutable_input["departure_date"], "departure_date"))
+    return_raw = immutable_input.get("return_date")
+    return_date = (
+        date.fromisoformat(_text(return_raw, "return_date")) if return_raw is not None else None
+    )
+    if (
+        immutable_input.get("phase") != "calendar"
+        or _iata(immutable_input["origin"], "origin") != workflow.origin
+        or _iata(immutable_input["destination"], "destination") != workflow.destination
+        or not workflow.departure_date <= departure_date <= workflow.departure_end_date
+        or return_date != workflow.return_date
+        or _positive_int(immutable_input["passengers"], "passengers") != workflow.passengers
+        or _currency(immutable_input["currency"]) != workflow.currency
+    ):
+        raise AgentExecutionError("agent_operation_input_invalid")
+    return CalendarSearchParams(
+        origin=ProviderLocation(LocationScopeKind.AIRPORT, workflow.origin),
+        destination=ProviderLocation(LocationScopeKind.AIRPORT, workflow.destination),
+        depart_from=departure_date,
+        depart_to=departure_date,
+        one_way=workflow.one_way,
+        currency=workflow.currency,
+        adults=1,
+        children=0,
+        infants=0,
     )
 
 
@@ -1670,6 +2382,27 @@ def _private_continuation(
     }
 
 
+def _private_continuation_digest(private: Mapping[str, object] | None) -> str:
+    continuation = _continuation_from_private(private)
+    poll_round = _private_positive_int(private, "poll_round")
+    canonical = _private_continuation(continuation, poll_round)
+    if private is None or set(private) != set(canonical):
+        raise AgentExecutionError("agent_private_continuation_invalid")
+    if any(
+        type(private[key]) is not type(value) or private[key] != value
+        for key, value in canonical.items()
+    ):
+        raise AgentExecutionError("agent_private_continuation_invalid")
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _continuation_from_private(
     private: Mapping[str, object] | None,
 ) -> ExactSearchContinuation:
@@ -1697,7 +2430,7 @@ def _continuation_from_private(
             expected_currency=_currency(private["currency"]),
             passengers=_positive_int(private["passengers"], "passengers"),
         )
-    except (KeyError, TypeError, ValueError):
+    except (AviasalesSearchSchemaError, KeyError, RuntimeError, TypeError, ValueError):
         continuation = None
     if continuation is None:
         raise AgentExecutionError("agent_private_continuation_invalid")
@@ -1732,11 +2465,13 @@ def _classify_failure(error: BaseException, now: datetime) -> _Failure:
     if isinstance(error, AviasalesSearchSchemaError):
         return _Failure(ProviderFailureClass.SCHEMA, "provider_schema", None, False)
     if isinstance(error, AviasalesSearchRateLimited):
-        delay = error.retry_after_seconds if error.retry_after_seconds is not None else 60
+        raw_delay = error.retry_after_seconds
+        delay = raw_delay if type(raw_delay) is int else 60
+        delay = min(MAX_AGENT_EXECUTION_INTERVAL_SECONDS, max(1, delay))
         return _Failure(
             ProviderFailureClass.RATE_LIMITED,
             "provider_rate_limited",
-            now + timedelta(seconds=max(1, delay)),
+            now + timedelta(seconds=delay),
             False,
         )
     if isinstance(error, AviasalesSearchTransportError):

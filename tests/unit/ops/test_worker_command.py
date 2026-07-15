@@ -26,6 +26,7 @@ from flight_hunter.domain.policy import UserActionGrant
 from flight_hunter.domain.search_results import BrowserObservedOffer, Confidence, DealCandidate
 from flight_hunter.ops.worker import (
     DEFAULT_WORKER_ROLES,
+    AgentWorkerBoundaryError,
     _agent_executor,
     _default_worker_id,
     _empty_worker_summary,
@@ -136,6 +137,21 @@ class _LedgerAgentExecutor:
         return _AgentStep(True, failed.status.value, "failed")
 
 
+class _ExplodingAgentExecutor:
+    def __init__(self, session: AsyncSession, sentinel: str) -> None:
+        self._session = session
+        self._sentinel = sentinel
+
+    async def run_next(self) -> _AgentStep:
+        await AgentRunRepository(self._session).set_status(
+            household_id=HOUSEHOLD_ID,
+            run_id=AGENT_RUN_ID,
+            status="running",
+            changed_at=datetime.now(UTC),
+        )
+        raise RuntimeError(self._sentinel)
+
+
 def test_agent_worker_role_has_stable_parsing_heartbeat_and_idle_counters() -> None:
     assert "agent" in DEFAULT_WORKER_ROLES
     assert _parse_worker_roles("agent,agent") == ("agent",)
@@ -208,6 +224,48 @@ def test_agent_worker_role_processes_one_durable_operation_and_commits_progress(
     assert summary.telegram_notifications_seen == 0
     assert heartbeats[0].role == "agent"
     assert '"agent_operations_claimed": 1' in heartbeats[0].last_summary_json
+
+
+def test_agent_worker_unexpected_failure_is_sanitized_rolled_back_and_disposed(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel = "PRIVATE-WORKER-SECRET-CANARY"
+    database_path = tmp_path / "agent-worker-boundary.db"
+    database_url = f"sqlite+aiosqlite:///{database_path.as_posix()}"
+    asyncio.run(_create_seeded_agent_operation(database_url))
+
+    def factory(
+        session: AsyncSession,
+        _settings: AppSettings,
+        _worker_id: str,
+    ) -> _ExplodingAgentExecutor:
+        return _ExplodingAgentExecutor(session, sentinel)
+
+    with (
+        caplog.at_level("ERROR", logger="flight_hunter.ops.worker"),
+        pytest.raises(AgentWorkerBoundaryError) as failure,
+    ):
+        asyncio.run(
+            run_once(
+                database_url=database_url,
+                settings=_settings(),
+                worker_id="flight-hunter-agent-worker",
+                worker_roles=("agent",),
+                agent_executor_factory=factory,
+            )
+        )
+
+    operation, run, _heartbeats = asyncio.run(_stored_agent_progress(database_url))
+    assert failure.value.code == "agent_worker_unexpected"
+    assert failure.value.__cause__ is None
+    assert failure.value.__context__ is None
+    assert sentinel not in str(failure.value)
+    assert sentinel not in caplog.text
+    assert "class=agent_execution code=agent_worker_unexpected" in caplog.text
+    assert operation.status is AgentOperationStatus.PENDING
+    assert run.status == "queued"
+    database_path.unlink()
 
 
 @pytest.mark.anyio
@@ -893,10 +951,13 @@ async def _create_seeded_agent_operation(database_url: str) -> None:
                     },
                     "intent": {
                         "trip_shape": "one_way",
+                        "date_mode": "exact",
                         "adults": 1,
                         "children": 0,
                         "infants": 0,
                         "currency": "RUB",
+                        "requested_strategies": ["direct"],
+                        "analysis_modes": [],
                         "legs": [
                             {
                                 "origin": {"kind": "airport", "value": "LED"},
@@ -912,10 +973,20 @@ async def _create_seeded_agent_operation(database_url: str) -> None:
                     },
                 },
                 scope_snapshot={
+                    "coverage": "quick",
                     "legs": [
                         {
-                            "origin": {"airport_codes": ["LED"]},
-                            "destination": {"airport_codes": ["CDG"]},
+                            "origin": {
+                                "requested_scope": {"kind": "airport", "value": "LED"},
+                                "airport_codes": ["LED"],
+                                "nearby_radius_km": 0,
+                            },
+                            "destination": {
+                                "requested_scope": {"kind": "airport", "value": "CDG"},
+                                "airport_codes": ["CDG"],
+                                "nearby_radius_km": 0,
+                            },
+                            "anywhere": None,
                             "date_constraint": {
                                 "mode": "exact",
                                 "start_date": "2026-09-10",
@@ -923,15 +994,26 @@ async def _create_seeded_agent_operation(database_url: str) -> None:
                                 "flex_days": 0,
                             },
                         }
-                    ]
+                    ],
                 },
-                capability_snapshot={"provider": "aviasales_search", "version": "v1"},
+                capability_snapshot={
+                    "provider_id": "aviasales_search",
+                    "version": "v1",
+                    "one_way": "supported",
+                    "round_trip": "supported",
+                    "native_open_jaw": "unknown",
+                    "native_multi_city": "unknown",
+                    "explicit_connection_protection": "unknown",
+                    "airport_location_semantics": "supported",
+                    "city_location_semantics": "unknown",
+                },
                 cost_model_snapshot={
                     "version": "v1",
                     "requests_per_minute": 20,
                     "start_attempts": 1,
                     "poll_rounds": 1,
                     "attempts_per_poll": 1,
+                    "worst_case_exact_http_attempts": 2,
                 },
                 parser_version="parser-v1",
                 planner_version="planner-v1",
@@ -956,6 +1038,8 @@ async def _create_seeded_agent_operation(database_url: str) -> None:
                     revision_content_hash=revision.content_hash,
                     approved_by_session_id=AGENT_SESSION_ID,
                     approved_budget={
+                        "calendar_searches": 0,
+                        "exact_searches": 1,
                         "logical_operations": 1,
                         "http_attempts": 2,
                         "deadline_seconds": 600,

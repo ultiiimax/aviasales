@@ -119,6 +119,36 @@ async def test_complete_create_persists_executable_revision_without_provider_cal
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("return_date", ("2026-09-09", "2026-09-11"))
+async def test_flexible_round_trip_invalid_return_cannot_reach_approval(
+    return_date: str,
+) -> None:
+    async with _lifecycle_harness() as harness:
+        view = await harness.service.create_plan(
+            CreateAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                text="LED → CDG",
+                selections={
+                    "departure_date": "2026-09-10",
+                    "date_mode": "flexible",
+                    "flex_days": 2,
+                    "return_date": return_date,
+                },
+                coverage=CoverageMode.QUICK,
+            )
+        )
+
+    assert view.state == "draft"
+    assert view.executable is False
+    assert view.estimate is None
+    assert tuple(item["code"] for item in view.clarifications) == (
+        "return_before_outbound_window_end",
+    )
+    assert harness.provider.calls == 0
+
+
+@pytest.mark.anyio
 async def test_edit_and_clone_keep_old_revisions_immutable_and_refresh_terminal_sources() -> None:
     async with _lifecycle_harness() as harness:
         first = await _create(harness.service)
