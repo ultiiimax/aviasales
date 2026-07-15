@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,12 +67,13 @@ class Crawl4AiMarkdownClient:
         title: str = "",
     ) -> DealPageMarkdown:
         try:
-            from crawl4ai import AsyncWebCrawler  # type: ignore[import-untyped]
-        except ImportError as exc:
+            crawler_module = importlib.import_module("crawl4ai")
+            async_web_crawler = crawler_module.AsyncWebCrawler
+        except (AttributeError, ImportError) as exc:
             raise Crawl4AiClientError("crawl4ai_unavailable") from exc
 
         try:
-            async with AsyncWebCrawler() as crawler:
+            async with async_web_crawler() as crawler:
                 result = await crawler.arun(url=url)
         except Exception as exc:  # pragma: no cover - external browser/runtime boundary
             raise Crawl4AiClientError("crawl4ai_fetch_failed") from exc

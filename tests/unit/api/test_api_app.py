@@ -115,9 +115,20 @@ def test_search_endpoint_returns_demo_cached_result_and_provider_denials() -> No
     assert "aviasales_search" in body["denied_providers"]
 
 
-def test_search_endpoint_logs_safe_structured_started_event(caplog) -> None:
+@pytest.mark.anyio
+async def test_search_endpoint_logs_safe_structured_started_event(
+    caplog,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    clean_database_path = tmp_path / "unmigrated.db"
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        f"sqlite+aiosqlite:///{clean_database_path.as_posix()}",
+    )
     caplog.set_level(logging.INFO, logger="flight_hunter.observability")
-    client = TestClient(create_app())
+    session_factory = await _session_factory()
+    client = TestClient(create_app(watch_session_factory=session_factory))
     headers = {
         "X-Flight-Hunter-Household-Id": str(HOUSEHOLD_ID),
         "X-Flight-Hunter-User-Id": str(USER_ID),
@@ -146,6 +157,7 @@ def test_search_endpoint_logs_safe_structured_started_event(caplog) -> None:
     assert "MOW" not in log_text
     assert "IST" not in log_text
     assert "authorization" not in log_text.lower()
+    assert not clean_database_path.exists()
 
 
 def test_deal_discovery_endpoint_is_disabled_without_crawler_settings() -> None:

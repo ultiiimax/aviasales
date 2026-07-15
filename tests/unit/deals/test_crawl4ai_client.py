@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import importlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx2
 import pytest
@@ -18,6 +20,52 @@ async def test_crawl4ai_client_validates_url_before_disabled_check() -> None:
 
     with pytest.raises(Crawl4AiClientError, match="deal_url_blocked_ip"):
         await client.fetch_markdown("http://127.0.0.1/admin", title="internal")
+
+
+@pytest.mark.anyio
+async def test_crawl4ai_library_mode_loads_optional_dependency_at_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported_modules: list[str] = []
+
+    class FakeCrawler:
+        async def __aenter__(self) -> FakeCrawler:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def arun(self, *, url: str) -> SimpleNamespace:
+            assert url == "https://example.com/deal"
+            return SimpleNamespace(markdown="# Runtime-loaded markdown")
+
+    def import_module(name: str) -> SimpleNamespace:
+        imported_modules.append(name)
+        return SimpleNamespace(AsyncWebCrawler=FakeCrawler)
+
+    monkeypatch.setattr(importlib, "import_module", import_module)
+    client = Crawl4AiMarkdownClient(enabled=True, mode="library", clock=lambda: NOW)
+
+    page = await client.fetch_markdown("https://example.com/deal", title="deal")
+
+    assert imported_modules == ["crawl4ai"]
+    assert page.markdown == "# Runtime-loaded markdown"
+    assert page.fetched_at == NOW
+
+
+@pytest.mark.anyio
+async def test_crawl4ai_library_mode_reports_missing_optional_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def import_missing_module(name: str) -> None:
+        assert name == "crawl4ai"
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(importlib, "import_module", import_missing_module)
+    client = Crawl4AiMarkdownClient(enabled=True, mode="library", clock=lambda: NOW)
+
+    with pytest.raises(Crawl4AiClientError, match=r"^crawl4ai_unavailable$"):
+        await client.fetch_markdown("https://example.com/deal", title="deal")
 
 
 def test_crawl4ai_fixture_reader_enforces_markdown_size_cap(tmp_path: Path) -> None:
