@@ -69,4 +69,4 @@ jobs:
       - run: uv sync --frozen --group dev
       - run: uv run flight-hunter-init-local
       - run: docker compose config --quiet
-      - run: docker compose build api worker
+      - run: docker compose build api worker agent-worker

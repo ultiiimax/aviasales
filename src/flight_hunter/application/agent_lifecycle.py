@@ -35,6 +35,7 @@ from flight_hunter.domain.agent_search import (
     TripShape,
 )
 from flight_hunter.persistence.agent_repositories import (
+    AgentOperationRepository,
     AgentPlanApprovalSnapshot,
     AgentPlanConflict,
     AgentPlanError,
@@ -43,6 +44,7 @@ from flight_hunter.persistence.agent_repositories import (
     AgentPlanRepository,
     AgentPlanRevisionRecord,
     AgentPlanRunRecord,
+    AgentRunLedgerProgress,
     AgentRunRepository,
     NewAgentPlan,
     NewAgentPlanApproval,
@@ -55,6 +57,28 @@ PARSER_VERSION = "intent-parser-v1"
 _PUBLIC_RUN_ERRORS: dict[str, str] = {
     "deadline_exceeded": "Search deadline exceeded.",
     "provider_unavailable": "Flight provider is temporarily unavailable.",
+    "agent_run_deadline_exceeded": "Search deadline exceeded.",
+    "agent_run_partial": "Search completed with partial results.",
+    "agent_http_budget_exhausted": "Search request budget exhausted.",
+    "agent_circuit_open": "Flight provider is temporarily unavailable.",
+    "agent_no_discovery_results": "No matching flight results were found.",
+    "agent_no_confirmed_offer": "No confirmed flight offer was found.",
+    "agent_plan_snapshot_invalid": "Approved search plan is invalid.",
+    "agent_operation_input_invalid": "Approved search operation is invalid.",
+    "agent_private_continuation_invalid": "Saved search continuation is invalid.",
+    "agent_private_continuation_missing": "Saved search continuation is unavailable.",
+    "agent_trip_shape_unsupported": "The approved trip shape is not supported.",
+    "agent_provider_rate_wait": "Flight provider rate limit reached.",
+    "agent_lease_expired_attempts_exhausted": "Search operation attempts were exhausted.",
+    "provider_auth": "Flight provider authentication failed.",
+    "provider_forbidden": "Flight provider denied the request.",
+    "provider_schema": "Flight provider returned an unsupported response.",
+    "provider_rate_limited": "Flight provider rate limit reached.",
+    "provider_network": "Flight provider is temporarily unavailable.",
+    "provider_server": "Flight provider is temporarily unavailable.",
+    "provider_policy_denied": "Flight provider is unavailable for this search.",
+    "provider_client_error": "Flight provider rejected the search request.",
+    "provider_capability": "Flight provider cannot execute this search.",
 }
 
 
@@ -193,6 +217,30 @@ class PlanView:
 
 
 @dataclass(frozen=True, slots=True)
+class StageCountsView:
+    total: int
+    pending: int
+    running: int
+    completed: int
+    partial: int
+    failed: int
+    skipped: int
+    cancelled: int
+
+
+@dataclass(frozen=True, slots=True)
+class OperationCountsView:
+    total: int
+    attempted: int
+    pending: int
+    leased: int
+    retry_wait: int
+    succeeded: int
+    failed: int
+    skipped: int
+
+
+@dataclass(frozen=True, slots=True)
 class RunView:
     run_id: UUID
     plan_id: UUID
@@ -205,6 +253,13 @@ class RunView:
     finished_at: datetime | None
     error_code: str | None
     public_message: str | None
+    stage_counts: StageCountsView
+    operation_counts: OperationCountsView
+    logical_operation_budget: int
+    logical_operations_consumed: int
+    http_attempt_budget: int
+    http_attempts_consumed: int
+    cancellation_requested: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +286,7 @@ class AgentLifecycleService:
         self._provider_gateway = provider_gateway
         self._plans = AgentPlanRepository(session)
         self._runs = AgentRunRepository(session)
+        self._operations = AgentOperationRepository(session)
 
     async def create_plan(self, command: CreateAgentPlan) -> PlanView:
         async with self._owned_transaction():
@@ -349,7 +405,7 @@ class AgentLifecycleService:
                 command.idempotency_key,
             )
             if existing is not None:
-                return _bound_idempotent_run(existing, command)
+                return await self._project_run(_bound_idempotent_run(existing, command))
             if (
                 command.revision_id is None
                 or command.expected_revision is None
@@ -366,7 +422,7 @@ class AgentLifecycleService:
                 command.idempotency_key,
             )
             if existing is not None:
-                return _bound_idempotent_run(existing, command)
+                return await self._project_run(_bound_idempotent_run(existing, command))
             revision = await self._expire_if_due(revision)
             if revision.state == "expired":
                 raise AgentLifecycleError("agent_plan_expired")
@@ -420,7 +476,7 @@ class AgentLifecycleService:
                 raise _execution_error(error, revision.state) from error
             except AgentPlanNotFound as error:
                 raise AgentLifecycleError("agent_plan_not_found") from error
-            return _bound_idempotent_run(stored, command)
+            return await self._project_run(_bound_idempotent_run(stored, command))
 
     async def get_plan(self, household_id: UUID, plan_id: UUID) -> PlanView:
         async with self._owned_transaction():
@@ -437,7 +493,7 @@ class AgentLifecycleService:
         async with self._owned_transaction():
             await self._require_plan(household_id, plan_id)
             runs = await self._runs.list_runs(household_id, plan_id)
-        return tuple(_run_view(run) for run in runs)
+            return await self._project_runs(household_id, runs)
 
     async def get_run(self, household_id: UUID, plan_id: UUID, run_id: UUID) -> RunView:
         async with self._owned_transaction():
@@ -445,7 +501,7 @@ class AgentLifecycleService:
             run = await self._runs.get_run(household_id, run_id)
             if run is None or run.plan_id != plan_id:
                 raise AgentLifecycleError("agent_plan_not_found")
-        return _run_view(run)
+            return await self._project_run(run)
 
     async def get_latest_run(self, household_id: UUID, plan_id: UUID) -> RunView:
         async with self._owned_transaction():
@@ -453,7 +509,7 @@ class AgentLifecycleService:
             run = await self._runs.get_latest_run(household_id, plan_id)
             if run is None:
                 raise AgentLifecycleError("agent_run_not_found")
-        return _run_view(run)
+            return await self._project_run(run)
 
     async def cancel_run(self, command: CancelAgentRun) -> RunView:
         async with self._owned_transaction():
@@ -461,7 +517,7 @@ class AgentLifecycleService:
             if run is None or run.plan_id != command.plan_id:
                 raise AgentLifecycleError("agent_plan_not_found")
             if run.status == "cancel_requested":
-                return _run_view(run)
+                return await self._project_run(run)
             if run.status not in {"queued", "running"}:
                 raise AgentLifecycleError("agent_run_cancelled")
             try:
@@ -473,7 +529,7 @@ class AgentLifecycleService:
                 )
             except AgentPlanError as error:
                 raise _lifecycle_error(error) from error
-        return _run_view(stored)
+            return await self._project_run(stored)
 
     async def get_run_results(
         self,
@@ -486,6 +542,20 @@ class AgentLifecycleService:
             if run is None or run.plan_id != plan_id:
                 raise AgentLifecycleError("agent_plan_not_found")
         return RunResultsView(run_id=run.id)
+
+    async def _project_run(self, run: AgentPlanRunRecord) -> RunView:
+        return (await self._project_runs(run.household_id, (run,)))[0]
+
+    async def _project_runs(
+        self,
+        household_id: UUID,
+        runs: Sequence[AgentPlanRunRecord],
+    ) -> tuple[RunView, ...]:
+        progress_by_run = await self._operations.get_run_ledger_progress(
+            household_id,
+            tuple(run.id for run in runs),
+        )
+        return tuple(_run_view(run, progress_by_run[run.id]) for run in runs)
 
     async def _build(
         self,
@@ -940,7 +1010,7 @@ def _estimate_view(revision: AgentPlanRevisionRecord) -> EstimateView | None:
     return EstimateView(calendar, exact, logical, http, deadline)
 
 
-def _run_view(run: AgentPlanRunRecord) -> RunView:
+def _run_view(run: AgentPlanRunRecord, progress: AgentRunLedgerProgress) -> RunView:
     public_error_code, public_message = _public_run_error(run.error_code)
     return RunView(
         run_id=run.id,
@@ -954,6 +1024,31 @@ def _run_view(run: AgentPlanRunRecord) -> RunView:
         finished_at=run.finished_at,
         error_code=public_error_code,
         public_message=public_message,
+        stage_counts=StageCountsView(
+            total=progress.stage_total,
+            pending=progress.stage_pending,
+            running=progress.stage_running,
+            completed=progress.stage_completed,
+            partial=progress.stage_partial,
+            failed=progress.stage_failed,
+            skipped=progress.stage_skipped,
+            cancelled=progress.stage_cancelled,
+        ),
+        operation_counts=OperationCountsView(
+            total=progress.operation_total,
+            attempted=progress.operation_attempted,
+            pending=progress.operation_pending,
+            leased=progress.operation_leased,
+            retry_wait=progress.operation_retry_wait,
+            succeeded=progress.operation_succeeded,
+            failed=progress.operation_failed,
+            skipped=progress.operation_skipped,
+        ),
+        logical_operation_budget=run.logical_operation_budget,
+        logical_operations_consumed=run.logical_operations_consumed,
+        http_attempt_budget=run.http_attempt_budget,
+        http_attempts_consumed=run.http_attempts_consumed,
+        cancellation_requested=run.status in {"cancel_requested", "cancelled"},
     )
 
 
@@ -962,18 +1057,18 @@ def _public_run_error(error_code: str | None) -> tuple[str | None, str | None]:
         return None, None
     if error_code in _PUBLIC_RUN_ERRORS:
         return error_code, _PUBLIC_RUN_ERRORS[error_code]
-    return "agent_run_failed", None
+    return "agent_run_failed", "Search failed."
 
 
 def _bound_idempotent_run(
     run: AgentPlanRunRecord,
     command: ExecuteAgentPlan,
-) -> RunView:
+) -> AgentPlanRunRecord:
     if command.revision_id is None or (
         run.plan_id != command.plan_id or run.revision_id != command.revision_id
     ):
         raise AgentLifecycleError("agent_run_idempotency_conflict")
-    return _run_view(run)
+    return run
 
 
 def _parsed_intent(revision: AgentPlanRevisionRecord) -> ParsedIntent:

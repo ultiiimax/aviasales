@@ -65,6 +65,7 @@ class AppSettings:
     agent_quick_deadline_seconds: int = 600
     agent_full_deadline_seconds: int = 1_800
     agent_operation_lease_seconds: int = 120
+    agent_poll_interval_seconds: int = 2
     agent_max_layover_seconds: int = 64_800
     agent_provider_circuit_failure_threshold: int = 5
     agent_provider_circuit_cooldown_seconds: int = 120
@@ -152,6 +153,11 @@ class AppSettings:
         for field_name, value in agent_positive_settings.items():
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{field_name} must be positive")
+        if (
+            type(self.agent_poll_interval_seconds) is not int
+            or self.agent_poll_interval_seconds < 0
+        ):
+            raise ValueError("agent_poll_interval_seconds must be non-negative")
         bounded_defaults = {
             "agent_quick_logical_limit": self.agent_quick_logical_limit,
             "agent_quick_calendar_limit": self.agent_quick_calendar_limit,
@@ -213,6 +219,10 @@ class AppSettings:
             agent_operation_lease_seconds=_env_int(
                 "AGENT_OPERATION_LEASE_SECONDS",
                 default=120,
+            ),
+            agent_poll_interval_seconds=_env_int(
+                "AGENT_POLL_INTERVAL_SECONDS",
+                default=2,
             ),
             agent_max_layover_seconds=_env_int(
                 "AGENT_MAX_LAYOVER_SECONDS",

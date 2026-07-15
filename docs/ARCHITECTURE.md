@@ -6,14 +6,20 @@
 
 - Один Python-пакет `src/flight_hunter` с границами domain, application,
   providers, persistence, API/web и ops.
-- Два процесса: FastAPI обслуживает API и встроенный web UI, worker выполняет
-  watch/deal/Telegram/browser/maintenance lanes.
+- Три процесса: FastAPI обслуживает API и встроенный web UI, основной worker
+  выполняет watch/deal/Telegram/browser/maintenance lanes, отдельный
+  `agent-worker` исполняет durable agent ledger.
 - Хранилище локального релиза — SQLite через SQLAlchemy async. При каждом
   соединении включены foreign keys, WAL и busy timeout; миграции ведёт Alembic.
-- В Docker Compose только API применяет миграции. Worker стартует после
-  успешного `/readyz` и пишет durable heartbeat.
+- В Docker Compose только API применяет миграции. Оба worker-процесса стартуют
+  после успешного `/readyz` и пишут раздельные durable heartbeat.
 - Основной live-источник — Aviasales mobile API. DTO провайдера преобразуются
   mapper-ом; `FakeFlightProvider` используется только как честный offline demo.
+- Agent executor материализует calendar/exact-start/exact-poll как идемпотентные
+  операции, фиксирует HTTP reservation до I/O, продолжает exact search только
+  по server-private cursor и применяет approved/current minimum RPM, deadline,
+  retry, lease и circuit-breaker границы. Публичная проекция содержит только
+  агрегированные counters/budgets и allowlisted typed errors.
 - Аутентификация — одноразовое owner invitation и bearer session. Legacy
   household/user headers в релизе выключены.
 - Playwright/Chromium — отдельная опциональная группа для локальных E2E и

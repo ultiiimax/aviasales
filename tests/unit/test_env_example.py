@@ -36,6 +36,7 @@ def test_env_example_exists_with_safe_placeholders() -> None:
     assert "AGENT_QUICK_DEADLINE_SECONDS=600" in content
     assert "AGENT_FULL_DEADLINE_SECONDS=1800" in content
     assert "AGENT_OPERATION_LEASE_SECONDS=120" in content
+    assert "AGENT_POLL_INTERVAL_SECONDS=2" in content
     assert "AGENT_MAX_LAYOVER_SECONDS=64800" in content
     assert "AGENT_PROVIDER_CIRCUIT_FAILURE_THRESHOLD=5" in content
     assert "AGENT_PROVIDER_CIRCUIT_COOLDOWN_SECONDS=120" in content

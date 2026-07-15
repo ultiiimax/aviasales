@@ -108,6 +108,10 @@ AVIASALES_SEARCH_ENABLED=true
 AVIASALES_SEARCH_SIGNATURE=<local-mobile-signature>
 AVIASALES_SEARCH_MARKER=mobile_app.<32-lowercase-hex>
 AVIASALES_SEARCH_INTERNAL_RPM=20
+AGENT_OPERATION_LEASE_SECONDS=120
+AGENT_POLL_INTERVAL_SECONDS=2
+AGENT_PROVIDER_CIRCUIT_FAILURE_THRESHOLD=5
+AGENT_PROVIDER_CIRCUIT_COOLDOWN_SECONDS=120
 ```
 
 Не коммить и не вставляй эти значения в issue, лог или клиентский bundle.
@@ -122,6 +126,12 @@ uv run flight-hunter-source-smoke --source aviasales_search --exact-search --ori
 provider refs, сырых ответов и booking URL. `blocked`, `rate_limited`,
 `auth_failed` и `unavailable` остаются честными кодами ошибок.
 
+Одобренные agent-планы исполняет отдельный durable worker. Каждый HTTP attempt
+сначала резервируется в БД, exact poll продолжается по server-private cursor, а
+публичный run показывает stage/operation counters и использованные logical/HTTP
+budgets. При выключенном провайдере, отсутствующих или невалидных credentials
+run завершается typed-кодом `provider_policy_denied` до circuit permit и HTTP.
+
 Контракт: `docs/provider-contracts/aviasales-search.md`.
 
 ## Docker Compose
@@ -135,15 +145,24 @@ docker compose config --quiet
 docker compose up --build
 ```
 
-Compose применяет миграции только в API, ждёт `/readyz` перед запуском worker,
-использует общий named volume и публикует только `127.0.0.1:8000`.
+Compose применяет миграции только в API, ждёт `/readyz` перед запуском обоих
+worker-процессов, использует общий named volume и публикует только
+`127.0.0.1:8000`. `worker` обслуживает browser/watch/deal/Telegram/maintenance,
+`agent-worker` — только durable agent runs.
 
 Статус и остановка:
 
 ```powershell
 docker compose ps
-docker compose logs --tail 100 api worker
+docker compose logs --tail 100 api worker agent-worker
 docker compose down
+```
+
+Без live-вызовов wiring проверяется так:
+
+```powershell
+uv run pytest tests/unit/application/test_agent_execution.py tests/unit/ops/test_worker_command.py tests/unit/api/test_agent_plan_api.py tests/unit/ops/test_compose_config.py -q
+docker compose config --quiet
 ```
 
 `docker compose down` сохраняет named volume. Не добавляй `--volumes`, если не

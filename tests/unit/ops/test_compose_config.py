@@ -29,7 +29,8 @@ def test_local_v1_package_compose_and_image_contracts() -> None:
     compose = Path("compose.yaml").read_text(encoding="utf-8")
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
     api = _service_block(compose, "api", "worker")
-    worker = _service_block(compose, "worker", "searxng")
+    worker = _service_block(compose, "worker", "agent-worker")
+    agent_worker = _service_block(compose, "agent-worker", "searxng")
 
     assert project["project"]["version"] == "1.0.0"
     assert __version__ == "1.0.0"
@@ -45,6 +46,20 @@ def test_local_v1_package_compose_and_image_contracts() -> None:
         r"flight-hunter-worker-healthcheck\s+- --role\s+- flight_hunter_worker",
         worker,
     )
+    assert "--roles browser,watch,deal,telegram,maintenance" in worker
+    assert "profiles:" not in agent_worker
+    assert re.search(
+        r"depends_on:\s+api:\s+condition: service_healthy",
+        agent_worker,
+    )
+    assert "flight-hunter-worker --loop --roles agent" in agent_worker
+    assert re.search(
+        r"flight-hunter-worker-healthcheck\s+- --role\s+- agent",
+        agent_worker,
+    )
+    assert "flight_hunter_data:/data" in agent_worker
+    assert "AVIASALES_SEARCH_SIGNATURE" in agent_worker
+    assert "AVIASALES_SEARCH_MARKER" in agent_worker
     assert "${APP_SECRET_KEY:?" in api
     assert 'AUTH_ALLOW_LEGACY_HEADERS: "false"' in api
     assert "uv sync --frozen --no-dev" in dockerfile
@@ -64,7 +79,7 @@ def test_ci_covers_linux_windows_browser_and_image_without_live_credentials() ->
     assert "playwright install --with-deps chromium" in workflow
     assert "pytest tests/e2e -q -m browser_e2e --strict-markers" in workflow
     assert "uv run flight-hunter-init-local" in workflow
-    assert "docker compose build api worker" in workflow
+    assert "docker compose build api worker agent-worker" in workflow
     assert "AVIASALES_SEARCH_SIGNATURE:" not in workflow
     assert "AVIASALES_SEARCH_MARKER:" not in workflow
 

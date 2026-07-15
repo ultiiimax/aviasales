@@ -7,15 +7,22 @@ from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import update
+from sqlalchemy import insert, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from flight_hunter.api.agent_routes import ERROR_STATUS, _status_for_error
+from flight_hunter.application.agent_lifecycle import _public_run_error
 from flight_hunter.persistence.agent_repositories import (
     AgentPlanRepository,
+    AgentPlanRunRecord,
     AgentRunRepository,
 )
-from flight_hunter.persistence.models import agent_search_plan_revisions_table
+from flight_hunter.persistence.models import (
+    agent_plan_runs_table,
+    agent_plan_stages_table,
+    agent_run_operations_table,
+    agent_search_plan_revisions_table,
+)
 
 
 class _ProviderCounter(Protocol):
@@ -160,8 +167,34 @@ async def test_execute_requires_real_bearer_and_never_trusts_legacy_household_he
     assert missing.status_code == 401
     assert missing.json()["code"] == "auth_context_missing"
     assert accepted.status_code == 202
-    assert accepted.json()["status"] == "queued"
-    assert accepted.json()["revision_id"] == plan["revision_id"]
+    accepted_body = accepted.json()
+    assert accepted_body["status"] == "queued"
+    assert accepted_body["revision_id"] == plan["revision_id"]
+    assert accepted_body["stage_counts"] == {
+        "total": 0,
+        "pending": 0,
+        "running": 0,
+        "completed": 0,
+        "partial": 0,
+        "failed": 0,
+        "skipped": 0,
+        "cancelled": 0,
+    }
+    assert accepted_body["operation_counts"] == {
+        "total": 0,
+        "attempted": 0,
+        "pending": 0,
+        "leased": 0,
+        "retry_wait": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
+    assert accepted_body["logical_operation_budget"] == 1
+    assert accepted_body["logical_operations_consumed"] == 0
+    assert accepted_body["http_attempt_budget"] == 27
+    assert accepted_body["http_attempts_consumed"] == 0
+    assert accepted_body["cancellation_requested"] is False
     assert agent_api_harness.provider.calls == 0
 
 
@@ -410,21 +443,7 @@ async def test_run_endpoints_never_expose_internal_error_diagnostics(
             UUID(run["run_id"]),
         )
         assert stored is not None
-        started = stored.created_at + (datetime.resolution * 1_000_000)
-        await repository.set_status(
-            household_id=stored.household_id,
-            run_id=stored.id,
-            status="running",
-            changed_at=started,
-        )
-        await repository.set_status(
-            household_id=stored.household_id,
-            run_id=stored.id,
-            status="failed",
-            changed_at=started + (datetime.resolution * 1_000_000),
-            error_code="provider_ref_secret_failure",
-            error_message=" ".join(secret_canaries),
-        )
+        await _seed_progressed_run_ledger(session, stored, secret_canaries)
         await session.commit()
 
     responses = (
@@ -449,6 +468,30 @@ async def test_run_endpoints_never_expose_internal_error_diagnostics(
     assert all(
         response.json().get("error_code") == "agent_run_failed" for response in responses[:1]
     )
+    projected = responses[0].json()
+    assert projected["stage_counts"] == {
+        "total": 1,
+        "pending": 0,
+        "running": 1,
+        "completed": 0,
+        "partial": 0,
+        "failed": 0,
+        "skipped": 0,
+        "cancelled": 0,
+    }
+    assert projected["operation_counts"] == {
+        "total": 4,
+        "attempted": 3,
+        "pending": 0,
+        "leased": 0,
+        "retry_wait": 1,
+        "succeeded": 1,
+        "failed": 1,
+        "skipped": 1,
+    }
+    assert projected["logical_operations_consumed"] == 1
+    assert projected["http_attempts_consumed"] == 4
+    assert projected["cancellation_requested"] is True
     assert not any(secret in output or secret in caplog.text for secret in secret_canaries)
 
 
@@ -506,6 +549,47 @@ def test_agent_error_status_mapping_is_exhaustive_and_unknown_is_unhandled() -> 
         _status_for_error("unknown_internal_lifecycle_code")
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    (
+        "agent_run_deadline_exceeded",
+        "agent_run_partial",
+        "agent_http_budget_exhausted",
+        "agent_circuit_open",
+        "agent_no_confirmed_offer",
+        "agent_plan_snapshot_invalid",
+        "agent_operation_input_invalid",
+        "agent_private_continuation_invalid",
+        "agent_private_continuation_missing",
+        "agent_trip_shape_unsupported",
+        "agent_provider_rate_wait",
+        "agent_lease_expired_attempts_exhausted",
+        "provider_auth",
+        "provider_forbidden",
+        "provider_schema",
+        "provider_rate_limited",
+        "provider_network",
+        "provider_server",
+        "provider_policy_denied",
+        "provider_client_error",
+    ),
+)
+def test_safe_executor_error_codes_keep_stable_public_code_and_message(error_code: str) -> None:
+    public_code, public_message = _public_run_error(error_code)
+
+    assert public_code == error_code
+    assert public_message is not None
+
+
+def test_unknown_executor_error_collapses_without_exposing_internal_sentinel() -> None:
+    sentinel = "provider_ref_internal_secret_sentinel"
+    public_code, public_message = _public_run_error(sentinel)
+
+    assert public_code == "agent_run_failed"
+    assert public_message == "Search failed."
+    assert sentinel not in repr((public_code, public_message))
+
+
 @pytest.mark.anyio
 async def test_openapi_exposes_the_complete_agent_plan_lifecycle_surface(
     agent_api_harness: _Harness,
@@ -528,8 +612,188 @@ async def test_openapi_exposes_the_complete_agent_plan_lifecycle_surface(
     result_schema = agent_api_harness.client.get("/openapi.json").json()["components"]["schemas"][
         "AgentRunResultsResponse"
     ]
+    run_schema = agent_api_harness.client.get("/openapi.json").json()["components"]["schemas"][
+        "AgentRunResponse"
+    ]
     assert result_schema["properties"]["state"]["const"] == "not_ready"
     assert "items" not in result_schema["properties"]
+    assert {
+        "stage_counts",
+        "operation_counts",
+        "logical_operation_budget",
+        "logical_operations_consumed",
+        "http_attempt_budget",
+        "http_attempts_consumed",
+        "deadline_at",
+        "cancellation_requested",
+        "error_code",
+        "public_message",
+    } <= set(run_schema["properties"])
+    assert "private_continuation" not in run_schema["properties"]
+    assert "error_message" not in run_schema["properties"]
+
+
+async def _seed_progressed_run_ledger(
+    session: AsyncSession,
+    run: AgentPlanRunRecord,
+    secret_canaries: tuple[str, ...],
+) -> None:
+    started = run.created_at + (datetime.resolution * 1_000_000)
+    cancelled = started + (datetime.resolution * 1_000_000)
+    stage_id = UUID("66666666-6666-6666-6666-666666666666")
+    start_id = UUID("77777777-7777-7777-7777-777777777770")
+    retry_id = UUID("77777777-7777-7777-7777-777777777771")
+    failed_id = UUID("77777777-7777-7777-7777-777777777772")
+    skipped_id = UUID("77777777-7777-7777-7777-777777777773")
+    await session.execute(
+        update(agent_plan_runs_table)
+        .where(agent_plan_runs_table.c.id == str(run.id))
+        .values(
+            status="cancel_requested",
+            started_at=started,
+            cancel_requested_at=cancelled,
+            error_code="provider_ref_secret_failure",
+            error_message=" ".join(secret_canaries),
+            logical_operations_consumed=1,
+            http_attempts_consumed=4,
+        )
+    )
+    await session.execute(
+        insert(agent_plan_stages_table).values(
+            id=str(stage_id),
+            household_id=str(run.household_id),
+            run_id=str(run.id),
+            stage_kind="exact_search",
+            status="running",
+            created_at=started,
+            updated_at=cancelled,
+        )
+    )
+
+    def operation_row(
+        *,
+        operation_id: UUID,
+        kind: str,
+        status: str,
+        fingerprint_char: str,
+        attempt_count: int,
+        http_attempts: int,
+        updated_at: datetime,
+        logical_root_id: UUID | None = None,
+        private_continuation: dict[str, object] | None = None,
+        next_retry_at: datetime | None = None,
+        result_type: str | None = None,
+        result_id: UUID | None = None,
+        error_code: str | None = None,
+        completed_at: datetime | None = None,
+    ) -> dict[str, object]:
+        return {
+            "id": str(operation_id),
+            "household_id": str(run.household_id),
+            "run_id": str(run.id),
+            "stage_id": str(stage_id),
+            "provider_id": "aviasales_search",
+            "operation_kind": kind,
+            "operation_fingerprint": "sha256:" + fingerprint_char * 64,
+            "logical_operation_fingerprint": "sha256:" + "a" * 64,
+            "logical_root_operation_id": (
+                str(logical_root_id) if logical_root_id is not None else None
+            ),
+            "handoff_predecessor_operation_id": None,
+            "consumes_logical_unit": kind == "exact_start",
+            "immutable_input_json": json.dumps(
+                {"origin": "LED", "destination": "CDG"},
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            "private_continuation_json": (
+                json.dumps(private_continuation, separators=(",", ":"), sort_keys=True)
+                if private_continuation is not None
+                else None
+            ),
+            "status": status,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "attempt_count": attempt_count,
+            "max_attempts": max(1, attempt_count),
+            "next_retry_at": next_retry_at,
+            "http_attempts_consumed": http_attempts,
+            "circuit_permit_token_digest": None,
+            "circuit_permit_generation": None,
+            "circuit_permit_mode": None,
+            "circuit_permit_attempt_number": None,
+            "circuit_permit_expires_at": None,
+            "circuit_permit_consumed_at": None,
+            "result_type": result_type,
+            "result_id": str(result_id) if result_id is not None else None,
+            "error_code": error_code,
+            "created_at": started,
+            "updated_at": updated_at,
+            "completed_at": completed_at,
+        }
+
+    succeeded_at = started + (datetime.resolution * 100_000)
+    retry_at = started + (datetime.resolution * 200_000)
+    failed_at = started + (datetime.resolution * 300_000)
+    skipped_at = started + (datetime.resolution * 400_000)
+    await session.execute(
+        insert(agent_run_operations_table),
+        [
+            operation_row(
+                operation_id=start_id,
+                kind="exact_start",
+                status="succeeded",
+                fingerprint_char="1",
+                attempt_count=1,
+                http_attempts=1,
+                updated_at=succeeded_at,
+                result_type="operation",
+                result_id=retry_id,
+                completed_at=succeeded_at,
+            ),
+            operation_row(
+                operation_id=retry_id,
+                kind="exact_poll",
+                status="retry_wait",
+                fingerprint_char="2",
+                attempt_count=1,
+                http_attempts=1,
+                updated_at=retry_at,
+                logical_root_id=start_id,
+                private_continuation={
+                    "search_session": secret_canaries[1],
+                    "provider_ref": secret_canaries[0],
+                    "token": secret_canaries[3],
+                },
+                next_retry_at=cancelled + (datetime.resolution * 60_000_000),
+                error_code="provider_rate_limited",
+            ),
+            operation_row(
+                operation_id=failed_id,
+                kind="exact_poll",
+                status="failed",
+                fingerprint_char="3",
+                attempt_count=2,
+                http_attempts=2,
+                updated_at=failed_at,
+                logical_root_id=start_id,
+                error_code="provider_transport",
+                completed_at=failed_at,
+            ),
+            operation_row(
+                operation_id=skipped_id,
+                kind="exact_poll",
+                status="skipped",
+                fingerprint_char="4",
+                attempt_count=0,
+                http_attempts=0,
+                updated_at=skipped_at,
+                logical_root_id=start_id,
+                error_code="agent_run_cancelled",
+                completed_at=skipped_at,
+            ),
+        ],
+    )
 
 
 def _create_plan(

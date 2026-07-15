@@ -1,7 +1,8 @@
 # Local Deployment Runbook — v1.0.0
 
-Дата: 2026-07-13. Поддерживаемая схема: один компьютер, loopback HTTP,
-FastAPI + worker + SQLite. Публичная публикация не поддерживается.
+Дата: 2026-07-15. Поддерживаемая схема: один компьютер, loopback HTTP,
+FastAPI + основной worker + agent-worker + SQLite. Публичная публикация не
+поддерживается.
 
 ## 1. Первый прямой запуск
 
@@ -15,12 +16,25 @@ uv run uvicorn flight_hunter.api.app:app --host 127.0.0.1 --port 8000
 Во втором PowerShell:
 
 ```powershell
-uv run flight-hunter-worker --loop --idle-sleep-seconds 10
+uv run flight-hunter-worker --loop --roles browser,watch,deal,telegram,maintenance --idle-sleep-seconds 10
 ```
+
+В третьем PowerShell для одобренных agent runs:
+
+```powershell
+uv run flight-hunter-worker --loop --roles agent --idle-sleep-seconds 10
+```
+
+Для live agent execution в `.env` обязательны валидные
+`AVIASALES_SEARCH_SIGNATURE` и `AVIASALES_SEARCH_MARKER`. Cadence и recovery
+задают `AGENT_POLL_INTERVAL_SECONDS`, `AGENT_OPERATION_LEASE_SECONDS`,
+`AGENT_PROVIDER_CIRCUIT_FAILURE_THRESHOLD` и
+`AGENT_PROVIDER_CIRCUIT_COOLDOWN_SECONDS`. При disabled/missing/invalid
+credentials agent-worker делает terminal typed failure до HTTP.
 
 Создание первого владельца описано в `README.md`. После приёма invitation
 очисти `AUTH_BOOTSTRAP_TOKEN` в `.env`, если новые bootstrap invitations не
-нужны, и перезапусти оба процесса.
+нужны, и перезапусти все три процесса.
 
 ## 2. Проверка состояния
 
@@ -28,6 +42,7 @@ uv run flight-hunter-worker --loop --idle-sleep-seconds 10
 Invoke-RestMethod http://127.0.0.1:8000/healthz
 Invoke-RestMethod http://127.0.0.1:8000/readyz
 uv run flight-hunter-worker-healthcheck --role flight_hunter_worker --max-age-seconds 120
+uv run flight-hunter-worker-healthcheck --role agent --max-age-seconds 120
 ```
 
 Ожидается `status=ok/ready` и worker code `ok`. `readyz` non-200 означает, что
@@ -41,7 +56,7 @@ uv run flight-hunter-worker-healthcheck --role flight_hunter_worker --max-age-se
 Для Compose:
 
 ```powershell
-docker compose stop worker api
+docker compose stop agent-worker worker api
 ```
 
 ## 4. Docker Compose
@@ -59,7 +74,7 @@ Invoke-RestMethod http://127.0.0.1:8000/readyz
 Логи и остановка:
 
 ```powershell
-docker compose logs --tail 200 api worker
+docker compose logs --tail 200 api worker agent-worker
 docker compose down
 ```
 
@@ -86,7 +101,7 @@ uv run flight-hunter-backup --database .\flight_hunter_dev.db --backup-dir .\bac
 uv run flight-hunter-backup-verify .\backups\flight_hunter_YYYYMMDDTHHMMSSZ.db
 ```
 
-Останови API/worker, запомни текущий commit и обнови код:
+Останови API/оба worker-процесса, запомни текущий commit и обнови код:
 
 ```powershell
 git rev-parse HEAD
@@ -137,7 +152,7 @@ uv run alembic upgrade head
 Compose: останови сервисы и восстанови backup из named volume:
 
 ```powershell
-docker compose stop worker api
+docker compose stop agent-worker worker api
 git switch --detach <previous-known-good-commit>
 docker compose run --rm --no-deps api uv run flight-hunter-backup-verify /data/backups/flight_hunter_YYYYMMDDTHHMMSSZ.db
 docker compose run --rm --no-deps api uv run flight-hunter-restore /data/backups/flight_hunter_YYYYMMDDTHHMMSSZ.db --database /data/flight_hunter.db

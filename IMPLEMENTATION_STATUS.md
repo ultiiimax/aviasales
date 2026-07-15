@@ -102,6 +102,34 @@ Result: `ACCEPT`, zero Critical/Important/Minor findings, clean `main` at
 `e9a1f2d`; no files were changed and no live provider call was made during
 review.
 
+Task 9 pending slice plan: add an orchestration-only durable executor over the
+accepted Task 7 ledger and Task 8 single-attempt gateway; materialize exact
+start/poll handoffs or flexible calendar shortlists within approved logical and
+HTTP budgets; persist only sanitized indicative/confirmed evidence; derive
+minimal confirmed-only ranking and honest completed/partial/failed progress;
+then wire the dedicated `agent` worker lane, public run counters, validated
+local Aviasales settings, Compose and operator docs. Prove restart, dedupe,
+cancellation/deadline zero-I/O, retry/circuit behavior and household/private
+continuation isolation fixture-only before marking the slice complete. The
+existing forward migration `0024_agent_execution_ledger` is sufficient; Task
+10 coverage breadth and Task 11 composition remain unstarted.
+
+Task 9 implementation on 2026-07-15 is complete and awaits independent review;
+the progress checkbox intentionally remains open. The dedicated agent worker now
+executes approved airport calendar/exact workflows as durable single-attempt
+operations with committed pre-I/O reservations, private cursor handoffs, fresh
+deadline/lease clocks, approved/current RPM minimums, Retry-After, circuit
+open/half-open recovery and honest cancellation/partial terminal states.
+Flexible shortlists reject route/currency/date/passenger-basis mismatches before
+exact I/O, including an unapproved round-trip return. Public run endpoints expose
+only bulk-aggregated stage/operation counters, approved/consumed budgets and
+allowlisted typed errors; unknown diagnostics collapse to `agent_run_failed`.
+Compose isolates the `agent` lane in `agent-worker`, while disabled, missing or
+invalid Aviasales credentials fail before permit/reservation/transport. No new
+migration was needed and no live provider call was made. The required four-file
+gate passes 110 tests; executor, worker, real-SQL keyset, API and Compose focused
+gates plus Ruff and mypy are recorded in `.superpowers/sdd/task-9-report.md`.
+
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic
 airport-catalog snapshots, then resolve airport/city/country/region/anywhere

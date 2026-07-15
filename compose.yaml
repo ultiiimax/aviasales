@@ -50,7 +50,8 @@ services:
     restart: unless-stopped
     stop_grace_period: 45s
     command: >
-      uv run flight-hunter-worker --loop --idle-sleep-seconds 10
+      uv run flight-hunter-worker --loop
+      --roles browser,watch,deal,telegram,maintenance --idle-sleep-seconds 10
     environment:
       DATABASE_URL: sqlite+aiosqlite:////data/flight_hunter.db
       APP_SECRET_KEY: "${APP_SECRET_KEY:?run 'uv run flight-hunter-init-local' first}"
@@ -80,6 +81,47 @@ services:
         - flight-hunter-worker-healthcheck
         - --role
         - flight_hunter_worker
+        - --max-age-seconds
+        - "120"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  agent-worker:
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    command: >
+      uv run flight-hunter-worker --loop --roles agent --idle-sleep-seconds 10
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////data/flight_hunter.db
+      APP_SECRET_KEY: "${APP_SECRET_KEY:?run 'uv run flight-hunter-init-local' first}"
+      AUTH_BOOTSTRAP_TOKEN: "${AUTH_BOOTSTRAP_TOKEN:-}"
+      AUTH_ALLOW_LEGACY_HEADERS: "false"
+      AVIASALES_SEARCH_ENABLED: "${AVIASALES_SEARCH_ENABLED:-false}"
+      AVIASALES_SEARCH_SIGNATURE: "${AVIASALES_SEARCH_SIGNATURE:-}"
+      AVIASALES_SEARCH_MARKER: "${AVIASALES_SEARCH_MARKER:-}"
+      AVIASALES_SEARCH_INTERNAL_RPM: "${AVIASALES_SEARCH_INTERNAL_RPM:-20}"
+      AGENT_OPERATION_LEASE_SECONDS: "${AGENT_OPERATION_LEASE_SECONDS:-120}"
+      AGENT_POLL_INTERVAL_SECONDS: "${AGENT_POLL_INTERVAL_SECONDS:-2}"
+      AGENT_PROVIDER_CIRCUIT_FAILURE_THRESHOLD: "${AGENT_PROVIDER_CIRCUIT_FAILURE_THRESHOLD:-5}"
+      AGENT_PROVIDER_CIRCUIT_COOLDOWN_SECONDS: "${AGENT_PROVIDER_CIRCUIT_COOLDOWN_SECONDS:-120}"
+      TELEGRAM_ENABLED: "false"
+      PERSONAL_OBSERVER_ENABLED: "false"
+    volumes:
+      - flight_hunter_data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - flight-hunter-worker-healthcheck
+        - --role
+        - agent
         - --max-age-seconds
         - "120"
       interval: 30s

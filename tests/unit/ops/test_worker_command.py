@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from flight_hunter.application.agent_operations import OperationScheduler, OperationSpec
 from flight_hunter.application.live_observations import GrantSource
 from flight_hunter.application.personal_observations import PersonalObservationService
 from flight_hunter.config import AppSettings
@@ -21,8 +24,33 @@ from flight_hunter.domain.observation import (
 from flight_hunter.domain.offers import FlightOffer, Freshness, SearchIntent
 from flight_hunter.domain.policy import UserActionGrant
 from flight_hunter.domain.search_results import BrowserObservedOffer, Confidence, DealCandidate
-from flight_hunter.ops.worker import main, run_loop
-from flight_hunter.persistence.models import mapper_registry
+from flight_hunter.ops.worker import (
+    DEFAULT_WORKER_ROLES,
+    _agent_executor,
+    _default_worker_id,
+    _empty_worker_summary,
+    _parse_worker_roles,
+    _worker_heartbeat_role,
+    main,
+    run_loop,
+    run_once,
+)
+from flight_hunter.persistence.agent_repositories import (
+    AgentOperationKind,
+    AgentOperationRepository,
+    AgentOperationStatus,
+    AgentPlanApprovalSnapshot,
+    AgentPlanRepository,
+    AgentPlanStageKind,
+    AgentRunRepository,
+    AgentStageStatus,
+    NewAgentPlan,
+    NewAgentPlanApproval,
+    NewAgentPlanRevision,
+    NewAgentPlanRun,
+    NewAgentPlanStage,
+)
+from flight_hunter.persistence.models import agent_provider_http_attempts_table, mapper_registry
 from flight_hunter.persistence.repositories import (
     BrowserObservationJobRecord,
     BrowserObservationJobRepository,
@@ -51,6 +79,259 @@ FIXTURE = Path("tests/fixtures/browser/tutu/search_result_source_specific.html")
 HOUSEHOLD_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 USER_ID = UUID("11111111-1111-1111-1111-111111111111")
 NOW = datetime.now(UTC)
+AGENT_PLAN_ID = UUID("22222222-2222-2222-2222-222222222222")
+AGENT_REVISION_ID = UUID("33333333-3333-3333-3333-333333333333")
+AGENT_APPROVAL_ID = UUID("44444444-4444-4444-4444-444444444444")
+AGENT_RUN_ID = UUID("55555555-5555-5555-5555-555555555555")
+AGENT_STAGE_ID = UUID("66666666-6666-6666-6666-666666666666")
+AGENT_OPERATION_ID = UUID("77777777-7777-7777-7777-777777777777")
+AGENT_SESSION_ID = UUID("12121212-1212-1212-1212-121212121212")
+
+
+@dataclass(frozen=True, slots=True)
+class _AgentStep:
+    operation_claimed: bool
+    operation_status: str | None
+    run_status: str | None
+
+
+class _LedgerAgentExecutor:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self.calls = 0
+
+    async def run_next(self) -> _AgentStep:
+        self.calls += 1
+        now = datetime.now(UTC)
+        runs = AgentRunRepository(self._session)
+        operations = AgentOperationRepository(self._session)
+        await runs.set_status(
+            household_id=HOUSEHOLD_ID,
+            run_id=AGENT_RUN_ID,
+            status="running",
+            changed_at=now,
+        )
+        lease = await operations.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=AGENT_RUN_ID,
+            worker_id="flight-hunter-agent-worker",
+            now=now,
+            lease_seconds=60,
+        )
+        assert lease is not None
+        failed = await operations.mark_operation_failed(
+            household_id=HOUSEHOLD_ID,
+            operation_id=lease.operation.id,
+            worker_id="flight-hunter-agent-worker",
+            error_code="fixture_terminal",
+            now=now,
+        )
+        await runs.set_status(
+            household_id=HOUSEHOLD_ID,
+            run_id=AGENT_RUN_ID,
+            status="failed",
+            changed_at=now + timedelta(microseconds=1),
+            error_code="fixture_terminal",
+        )
+        return _AgentStep(True, failed.status.value, "failed")
+
+
+def test_agent_worker_role_has_stable_parsing_heartbeat_and_idle_counters() -> None:
+    assert "agent" in DEFAULT_WORKER_ROLES
+    assert _parse_worker_roles("agent,agent") == ("agent",)
+    assert _worker_heartbeat_role(("agent",)) == "agent"
+    summary = _empty_worker_summary().to_dict()
+    expected = {
+        "agent_operations_claimed": 0,
+        "agent_operations_succeeded": 0,
+        "agent_operations_retry_scheduled": 0,
+        "agent_operations_failed": 0,
+        "agent_operations_skipped": 0,
+        "agent_runs_completed": 0,
+        "agent_runs_partial": 0,
+        "agent_runs_failed": 0,
+        "agent_runs_cancelled": 0,
+    }
+    assert {key: summary.get(key) for key in expected} == expected
+
+
+def test_compose_primary_roles_keep_legacy_worker_identity_and_healthcheck_role() -> None:
+    compose = Path("compose.yaml").read_text(encoding="utf-8")
+    worker_block = compose[compose.index("  worker:\n") : compose.index("  agent-worker:\n")]
+    raw_roles = worker_block.split("--roles ", maxsplit=1)[1].split(maxsplit=1)[0]
+    compose_roles = _parse_worker_roles(raw_roles)
+
+    assert raw_roles == "browser,watch,deal,telegram,maintenance"
+    assert _default_worker_id(compose_roles) == "flight-hunter-worker"
+    assert _worker_heartbeat_role(compose_roles) == "flight_hunter_worker"
+    assert _default_worker_id(DEFAULT_WORKER_ROLES) == "flight-hunter-worker"
+    assert _worker_heartbeat_role(DEFAULT_WORKER_ROLES) == "flight_hunter_worker"
+
+
+def test_agent_worker_role_processes_one_durable_operation_and_commits_progress(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'agent-worker.db').as_posix()}"
+    asyncio.run(_create_seeded_agent_operation(database_url))
+    created: list[_LedgerAgentExecutor] = []
+
+    def factory(
+        session: AsyncSession,
+        _settings: AppSettings,
+        _worker_id: str,
+    ) -> _LedgerAgentExecutor:
+        executor = _LedgerAgentExecutor(session)
+        created.append(executor)
+        return executor
+
+    summary = asyncio.run(
+        run_once(
+            database_url=database_url,
+            settings=_settings(),
+            worker_id="flight-hunter-agent-worker",
+            worker_roles=("agent",),
+            agent_executor_factory=factory,
+        )
+    )
+    operation, run, heartbeats = asyncio.run(_stored_agent_progress(database_url))
+
+    assert len(created) == 1 and created[0].calls == 1
+    assert operation.status is AgentOperationStatus.FAILED
+    assert operation.attempt_count == 1
+    assert run.status == "failed"
+    assert summary.agent_operations_claimed == 1
+    assert summary.agent_operations_failed == 1
+    assert summary.agent_runs_failed == 1
+    assert summary.browser_jobs_seen == 0
+    assert summary.watch_provider_calls == 0
+    assert summary.deal_jobs_processed == 0
+    assert summary.telegram_notifications_seen == 0
+    assert heartbeats[0].role == "agent"
+    assert '"agent_operations_claimed": 1' in heartbeats[0].last_summary_json
+
+
+@pytest.mark.anyio
+async def test_agent_executor_factory_wires_single_attempt_gateway_and_runtime_policy() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    settings = replace(
+        _settings(),
+        aviasales_search_enabled=True,
+        aviasales_search_signature="12345678-1234-1234-1234-123456789abc",
+        aviasales_search_marker="mobile_app." + "a" * 32,
+        aviasales_search_internal_rpm=7,
+        agent_operation_lease_seconds=19,
+        agent_poll_interval_seconds=4,
+        agent_provider_circuit_failure_threshold=3,
+        agent_provider_circuit_cooldown_seconds=41,
+    )
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        executor = _agent_executor(session, settings, "agent-worker-wiring")
+
+    assert executor._gateway._client.max_retries == 0
+    assert executor._gateway._policy.max_requests_per_minute == 7
+    assert executor._gateway._capabilities.cost_model.requests_per_minute == 7
+    assert executor._policy.provider_rpm == 7
+    assert executor._policy.operation_lease_seconds == 19
+    assert executor._policy.poll_interval_seconds == 4
+    assert executor._policy.circuit_failure_threshold == 3
+    assert executor._policy.circuit_cooldown_seconds == 41
+    assert executor._policy.circuit_probe_lease_seconds == 19
+    assert executor._provider_preflight is None
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("case_name", "enabled", "signature", "marker", "secret_canaries"),
+    (
+        (
+            "disabled",
+            False,
+            "disabled-signature-secret-canary",
+            "mobile_app.disabled-marker-secret-canary",
+            ("disabled-signature-secret-canary", "disabled-marker-secret-canary"),
+        ),
+        ("missing", True, None, None, ()),
+        (
+            "invalid",
+            True,
+            "invalid-signature-secret-canary",
+            "mobile_app.invalid-marker-secret-canary",
+            ("invalid-signature-secret-canary", "invalid-marker-secret-canary"),
+        ),
+    ),
+    ids=("disabled", "missing", "invalid"),
+)
+async def test_agent_executor_unavailable_configuration_fails_before_permit_or_transport(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    case_name: str,
+    enabled: bool,
+    signature: str | None,
+    marker: str | None,
+    secret_canaries: tuple[str, ...],
+) -> None:
+    database_url = (
+        f"sqlite+aiosqlite:///{(tmp_path / f'agent-{case_name}-preflight.db').as_posix()}"
+    )
+    await _create_seeded_agent_operation(database_url)
+
+    async def unexpected_transport(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("provider transport must not run after failed preflight")
+
+    monkeypatch.setattr(
+        "flight_hunter.ops.worker._UnavailableAgentSearchGateway.start_exact",
+        unexpected_transport,
+    )
+    engine = create_async_engine(database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    settings = replace(
+        _settings(),
+        aviasales_search_enabled=enabled,
+        aviasales_search_signature=signature,
+        aviasales_search_marker=marker,
+    )
+
+    async with sessions() as session:
+        executor = _agent_executor(session, settings, f"agent-worker-{case_name}")
+        step = await executor.run_next()
+        await session.commit()
+        run = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, AGENT_RUN_ID)
+        operation = await AgentOperationRepository(session).get_operation(
+            HOUSEHOLD_ID,
+            AGENT_OPERATION_ID,
+        )
+        circuit = await AgentOperationRepository(session).get_circuit_state("aviasales_search")
+        reservations = (
+            await session.execute(
+                select(func.count()).select_from(agent_provider_http_attempts_table)
+            )
+        ).scalar_one()
+
+    assert step.operation_claimed is True
+    assert step.operation_status == "failed"
+    assert step.run_status == "failed"
+    assert run is not None and run.status == "failed"
+    assert operation is not None and operation.error_code == "provider_policy_denied"
+    assert operation.http_attempts_consumed == 0
+    assert reservations == 0
+    assert circuit is None
+    public_observation = "\n".join(
+        (
+            caplog.text,
+            repr(step),
+            repr(run),
+            repr(operation),
+            operation.error_code,
+            run.error_code or "",
+            run.error_message or "",
+        )
+    )
+    if any(canary in public_observation for canary in secret_canaries):
+        pytest.fail("provider credential canary leaked into logs or public execution state")
+    await engine.dispose()
 
 
 def test_worker_processes_queued_browser_observation_jobs(
@@ -104,6 +385,15 @@ def test_worker_processes_queued_browser_observation_jobs(
         "deal_jobs_failed": 0,
         "deal_jobs_recovered_stale": 0,
         "deal_candidates_saved": 0,
+        "agent_operations_claimed": 0,
+        "agent_operations_succeeded": 0,
+        "agent_operations_retry_scheduled": 0,
+        "agent_operations_failed": 0,
+        "agent_operations_skipped": 0,
+        "agent_runs_completed": 0,
+        "agent_runs_partial": 0,
+        "agent_runs_failed": 0,
+        "agent_runs_cancelled": 0,
         "telegram_notifications_seen": 0,
         "telegram_notifications_sent": 0,
         "telegram_notifications_retry_scheduled": 0,
@@ -291,6 +581,15 @@ def test_worker_loop_can_stop_after_idle_iteration(
         "deal_jobs_failed": 0,
         "deal_jobs_recovered_stale": 0,
         "deal_candidates_saved": 0,
+        "agent_operations_claimed": 0,
+        "agent_operations_succeeded": 0,
+        "agent_operations_retry_scheduled": 0,
+        "agent_operations_failed": 0,
+        "agent_operations_skipped": 0,
+        "agent_runs_completed": 0,
+        "agent_runs_partial": 0,
+        "agent_runs_failed": 0,
+        "agent_runs_cancelled": 0,
         "telegram_notifications_seen": 0,
         "telegram_notifications_sent": 0,
         "telegram_notifications_retry_scheduled": 0,
@@ -332,6 +631,7 @@ def test_worker_loop_stops_after_signal_aware_idle_sleep(tmp_path: Path) -> None
     assert sleep_calls == [0.25]
     assert summary.browser_jobs_seen == 0
     assert summary.watch_jobs_processed == 0
+    assert summary.agent_operations_claimed == 0
     assert summary.telegram_notifications_seen == 0
 
 
@@ -497,6 +797,15 @@ def test_worker_cleans_expired_live_observation_state(
         "deal_jobs_failed": 0,
         "deal_jobs_recovered_stale": 0,
         "deal_candidates_saved": 0,
+        "agent_operations_claimed": 0,
+        "agent_operations_succeeded": 0,
+        "agent_operations_retry_scheduled": 0,
+        "agent_operations_failed": 0,
+        "agent_operations_skipped": 0,
+        "agent_runs_completed": 0,
+        "agent_runs_partial": 0,
+        "agent_runs_failed": 0,
+        "agent_runs_cancelled": 0,
         "telegram_notifications_seen": 0,
         "telegram_notifications_sent": 0,
         "telegram_notifications_retry_scheduled": 0,
@@ -542,6 +851,7 @@ def test_worker_drain_skips_new_claims_but_runs_maintenance(
     assert body["browser_jobs_recovered_stale"] == 0
     assert body["watch_jobs_processed"] == 0
     assert body["deal_jobs_processed"] == 0
+    assert body["agent_operations_claimed"] == 0
     assert body["telegram_notifications_seen"] == 0
     assert body["live_cleanup_grants_deleted"] == 1
     assert body["live_cleanup_observations_deleted"] == 1
@@ -556,6 +866,178 @@ async def _create_empty_database(database_url: str) -> None:
     async with engine.begin() as connection:
         await connection.run_sync(mapper_registry.metadata.create_all)
     await engine.dispose()
+
+
+async def _create_seeded_agent_operation(database_url: str) -> None:
+    engine = create_async_engine(database_url)
+    async with engine.begin() as connection:
+        await connection.run_sync(mapper_registry.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    created_at = datetime.now(UTC) - timedelta(seconds=1)
+    async with sessions() as session:
+        revision = await AgentPlanRepository(session).create_plan(
+            NewAgentPlan(
+                id=AGENT_PLAN_ID,
+                household_id=HOUSEHOLD_ID,
+                created_by_user_id=USER_ID,
+                created_at=created_at,
+            ),
+            NewAgentPlanRevision(
+                id=AGENT_REVISION_ID,
+                state="awaiting_approval",
+                plan={
+                    "coverage": "quick",
+                    "approval": {
+                        "generation": 1,
+                        "expires_at": (created_at + timedelta(hours=1)).isoformat(),
+                    },
+                    "intent": {
+                        "trip_shape": "one_way",
+                        "adults": 1,
+                        "children": 0,
+                        "infants": 0,
+                        "currency": "RUB",
+                        "legs": [
+                            {
+                                "origin": {"kind": "airport", "value": "LED"},
+                                "destination": {"kind": "airport", "value": "CDG"},
+                                "date_constraint": {
+                                    "mode": "exact",
+                                    "start_date": "2026-09-10",
+                                    "end_date": None,
+                                    "flex_days": 0,
+                                },
+                            }
+                        ],
+                    },
+                },
+                scope_snapshot={
+                    "legs": [
+                        {
+                            "origin": {"airport_codes": ["LED"]},
+                            "destination": {"airport_codes": ["CDG"]},
+                            "date_constraint": {
+                                "mode": "exact",
+                                "start_date": "2026-09-10",
+                                "end_date": None,
+                                "flex_days": 0,
+                            },
+                        }
+                    ]
+                },
+                capability_snapshot={"provider": "aviasales_search", "version": "v1"},
+                cost_model_snapshot={
+                    "version": "v1",
+                    "requests_per_minute": 20,
+                    "start_attempts": 1,
+                    "poll_rounds": 1,
+                    "attempts_per_poll": 1,
+                },
+                parser_version="parser-v1",
+                planner_version="planner-v1",
+                estimated_calendar_searches=0,
+                estimated_exact_searches=1,
+                estimated_logical_operations=1,
+                estimated_http_attempts=2,
+                estimated_deadline_seconds=600,
+                created_at=created_at,
+                expires_at=created_at + timedelta(hours=1),
+            ),
+        )
+        await AgentRunRepository(session).approve_and_execute(
+            approval=NewAgentPlanApproval(
+                id=AGENT_APPROVAL_ID,
+                household_id=HOUSEHOLD_ID,
+                revision_id=AGENT_REVISION_ID,
+                approved_by_user_id=USER_ID,
+                approved_at=created_at,
+                expires_at=created_at + timedelta(minutes=30),
+                snapshot=AgentPlanApprovalSnapshot(
+                    revision_content_hash=revision.content_hash,
+                    approved_by_session_id=AGENT_SESSION_ID,
+                    approved_budget={
+                        "logical_operations": 1,
+                        "http_attempts": 2,
+                        "deadline_seconds": 600,
+                    },
+                    approved_strategies=("direct",),
+                    risk_warning_versions={},
+                ),
+            ),
+            run=NewAgentPlanRun(
+                id=AGENT_RUN_ID,
+                execute_idempotency_key="execute:agent-worker",
+                created_at=created_at,
+                deadline_at=created_at + timedelta(minutes=10),
+            ),
+        )
+        await AgentOperationRepository(session).create_stage(
+            NewAgentPlanStage(
+                id=AGENT_STAGE_ID,
+                household_id=HOUSEHOLD_ID,
+                run_id=AGENT_RUN_ID,
+                kind=AgentPlanStageKind.EXACT_SEARCH,
+                status=AgentStageStatus.PENDING,
+                created_at=created_at,
+            )
+        )
+        await OperationScheduler(AgentOperationRepository(session)).materialize(
+            OperationSpec(
+                id=AGENT_OPERATION_ID,
+                household_id=HOUSEHOLD_ID,
+                run_id=AGENT_RUN_ID,
+                stage_id=AGENT_STAGE_ID,
+                provider_id="aviasales_search",
+                kind=AgentOperationKind.EXACT_START,
+                immutable_input={
+                    "origin": "LED",
+                    "destination": "CDG",
+                    "departure_date": "2026-09-10",
+                    "return_date": None,
+                    "adults": 1,
+                    "children": 0,
+                    "infants": 0,
+                    "passengers": 1,
+                    "currency": "RUB",
+                    "cabin": "economy",
+                    "phase": "start",
+                    "round": 0,
+                },
+                logical_workflow_input={
+                    "origin": "LED",
+                    "destination": "CDG",
+                    "departure_date": "2026-09-10",
+                    "return_date": None,
+                    "adults": 1,
+                    "children": 0,
+                    "infants": 0,
+                    "passengers": 1,
+                    "currency": "RUB",
+                    "cabin": "economy",
+                },
+                consumes_logical_unit=True,
+                private_continuation=None,
+                max_attempts=1,
+                created_at=created_at,
+            )
+        )
+        await session.commit()
+    await engine.dispose()
+
+
+async def _stored_agent_progress(database_url: str):
+    engine = create_async_engine(database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        operation = await AgentOperationRepository(session).get_operation(
+            HOUSEHOLD_ID,
+            AGENT_OPERATION_ID,
+        )
+        run = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, AGENT_RUN_ID)
+        heartbeats = await WorkerHeartbeatRepository(session).list_recent(limit=10)
+    await engine.dispose()
+    assert operation is not None and run is not None
+    return operation, run, heartbeats
 
 
 async def _set_worker_drain(database_url: str) -> None:

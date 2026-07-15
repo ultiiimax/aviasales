@@ -166,6 +166,7 @@ def test_agent_planning_settings_have_bounded_defaults() -> None:
     assert settings.agent_quick_deadline_seconds == 600
     assert settings.agent_full_deadline_seconds == 1_800
     assert settings.agent_operation_lease_seconds == 120
+    assert settings.agent_poll_interval_seconds == 2
     assert settings.agent_max_layover_seconds == 64_800
     assert settings.agent_provider_circuit_failure_threshold == 5
     assert settings.agent_provider_circuit_cooldown_seconds == 120
@@ -192,6 +193,15 @@ def test_agent_planning_settings_reject_non_positive_values(monkeypatch, name: s
     monkeypatch.setenv(name, "0")
 
     with pytest.raises(ValueError, match="must be positive"):
+        AppSettings.from_env()
+
+
+def test_agent_poll_interval_allows_zero_and_rejects_negative(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_POLL_INTERVAL_SECONDS", "0")
+    assert AppSettings.from_env().agent_poll_interval_seconds == 0
+
+    monkeypatch.setenv("AGENT_POLL_INTERVAL_SECONDS", "-1")
+    with pytest.raises(ValueError, match="agent_poll_interval_seconds must be non-negative"):
         AppSettings.from_env()
 
 

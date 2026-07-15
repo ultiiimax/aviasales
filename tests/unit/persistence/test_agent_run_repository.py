@@ -1470,6 +1470,106 @@ async def test_latest_run_orders_by_created_at_then_id(tmp_path: Path) -> None:
     await engine.dispose()
 
 
+@pytest.mark.anyio
+async def test_execution_candidate_keyset_pages_all_households_and_priorities_once(
+    tmp_path: Path,
+) -> None:
+    engine, session_factory = await _session_factory(tmp_path, "candidate-keyset.db")
+    specifications = (
+        ("running", HOUSEHOLD_ID),
+        ("queued", OTHER_HOUSEHOLD_ID),
+        ("cancel_requested", HOUSEHOLD_ID),
+        ("running", OTHER_HOUSEHOLD_ID),
+        ("cancel_requested", OTHER_HOUSEHOLD_ID),
+        ("queued", HOUSEHOLD_ID),
+    )
+
+    async with session_factory() as session:
+        repository = AgentRunRepository(session)
+        expected_ids: list[UUID] = []
+        for index, (status, household_id) in enumerate(specifications, start=1):
+            plan_id = UUID(int=100 + index)
+            revision_id = UUID(int=200 + index)
+            approval_id = UUID(int=300 + index)
+            run_id = UUID(int=400 + index)
+            created_at = NOW + timedelta(seconds=index)
+            revision = await _create_plan(
+                session,
+                plan_id=plan_id,
+                revision_id=revision_id,
+                now=created_at - timedelta(seconds=2),
+                household_id=household_id,
+            )
+            await repository.create_approval(
+                _approval(
+                    revision.content_hash,
+                    id_value=approval_id,
+                    household_id=household_id,
+                    revision_id=revision_id,
+                    approved_at=created_at - timedelta(seconds=1),
+                    expires_at=created_at + timedelta(minutes=30),
+                )
+            )
+            await repository.execute(
+                household_id=household_id,
+                approval_id=approval_id,
+                run=_run(
+                    id_value=run_id,
+                    execute_idempotency_key=f"execute:candidate:{index}",
+                    created_at=created_at,
+                ),
+            )
+            if status in {"running", "cancel_requested"}:
+                await repository.set_status(
+                    household_id=household_id,
+                    run_id=run_id,
+                    status="running",
+                    changed_at=created_at + timedelta(seconds=1),
+                )
+            if status == "cancel_requested":
+                await repository.set_status(
+                    household_id=household_id,
+                    run_id=run_id,
+                    status="cancel_requested",
+                    changed_at=created_at + timedelta(seconds=2),
+                )
+            expected_ids.append(run_id)
+        await session.commit()
+
+    async with session_factory() as session:
+        repository = AgentRunRepository(session)
+        pages: list[tuple[AgentPlanRunRecord, ...]] = []
+        cursor: AgentPlanRunRecord | None = None
+        while True:
+            page = await repository.list_execution_candidates(limit=2, after=cursor)
+            if not page:
+                break
+            pages.append(page)
+            cursor = page[-1]
+
+        candidates = tuple(candidate for page in pages for candidate in page)
+        assert [len(page) for page in pages] == [2, 2, 2]
+        assert [candidate.status for candidate in candidates] == [
+            "cancel_requested",
+            "cancel_requested",
+            "queued",
+            "queued",
+            "running",
+            "running",
+        ]
+        assert {candidate.id for candidate in candidates} == set(expected_ids)
+        assert len({candidate.id for candidate in candidates}) == len(candidates)
+        assert {candidate.household_id for candidate in candidates} == {
+            HOUSEHOLD_ID,
+            OTHER_HOUSEHOLD_ID,
+        }
+        for invalid_limit in (0, -1, True):
+            with pytest.raises(ValueError, match="limit must be a positive integer"):
+                await repository.list_execution_candidates(limit=invalid_limit)
+
+    await engine.dispose()
+
+
 async def _session_factory(
     tmp_path: Path,
     filename: str,
@@ -1487,11 +1587,12 @@ async def _create_plan(
     plan_id: UUID = PLAN_ID,
     revision_id: UUID = REVISION_ID,
     now: datetime = NOW,
+    household_id: UUID = HOUSEHOLD_ID,
 ) -> AgentPlanRevisionRecord:
     return await AgentPlanRepository(session).create_plan(
         NewAgentPlan(
             id=plan_id,
-            household_id=HOUSEHOLD_ID,
+            household_id=household_id,
             created_by_user_id=USER_ID,
             created_at=now,
         ),

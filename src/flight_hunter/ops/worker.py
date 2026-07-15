@@ -8,8 +8,18 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
-from uuid import uuid4
+from typing import Protocol
+from uuid import UUID, uuid4
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from flight_hunter.application.agent_capabilities import ProviderCapabilityRegistry
+from flight_hunter.application.agent_execution import (
+    AgentExecutionPolicy,
+    AgentExecutionService,
+    AgentExecutionStep,
+    AgentSearchGateway,
+)
 from flight_hunter.application.deal_discovery_jobs import (
     DealDiscoveryJobRunSummary,
     DealDiscoveryJobService,
@@ -29,6 +39,8 @@ from flight_hunter.config import AppSettings, load_env_file
 from flight_hunter.deals import DealDiscoveryService
 from flight_hunter.deals.crawl4ai_client import Crawl4AiMarkdownClient
 from flight_hunter.deals.searxng_client import SearxngClient
+from flight_hunter.domain.agent_evidence import DiscoverySignal
+from flight_hunter.domain.policy import ProviderPolicy
 from flight_hunter.notifications.alerts import AlertEvaluator
 from flight_hunter.persistence.database import create_database_engine
 from flight_hunter.persistence.repositories import (
@@ -51,7 +63,17 @@ from flight_hunter.persistence.repositories import (
     WorkerHeartbeatRepository,
 )
 from flight_hunter.providers.aviasales_search.adapter import AviasalesSearchAdapter
-from flight_hunter.providers.aviasales_search.client import AviasalesSearchClient
+from flight_hunter.providers.aviasales_search.client import (
+    AviasalesSearchClient,
+    SearchStartParams,
+)
+from flight_hunter.providers.aviasales_search.gateway import (
+    AviasalesSearchGateway,
+    AviasalesSearchPolicyDenied,
+    CalendarSearchParams,
+    ExactPollOutcome,
+    ExactSearchContinuation,
+)
 from flight_hunter.providers.fake import FakeFlightProvider
 from flight_hunter.providers.personal_observer import (
     PersonalObserverConfig,
@@ -60,8 +82,16 @@ from flight_hunter.providers.personal_observer import (
     crawl4ai_browser_markdown_provider_from_settings,
 )
 
-DEFAULT_WORKER_ROLES = ("browser", "watch", "deal", "telegram", "maintenance")
+PRIMARY_WORKER_ROLES = ("browser", "watch", "deal", "telegram", "maintenance")
+DEFAULT_WORKER_ROLES = (*PRIMARY_WORKER_ROLES, "agent")
 _WORKER_ROLE_VALUES = frozenset(DEFAULT_WORKER_ROLES)
+
+
+class _AgentExecutor(Protocol):
+    async def run_next(self) -> AgentExecutionStep: ...
+
+
+AgentExecutorFactory = Callable[[AsyncSession, AppSettings, str], _AgentExecutor]
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +122,15 @@ class WorkerRunSummary:
     deal_jobs_failed: int
     deal_jobs_recovered_stale: int
     deal_candidates_saved: int
+    agent_operations_claimed: int
+    agent_operations_succeeded: int
+    agent_operations_retry_scheduled: int
+    agent_operations_failed: int
+    agent_operations_skipped: int
+    agent_runs_completed: int
+    agent_runs_partial: int
+    agent_runs_failed: int
+    agent_runs_cancelled: int
     telegram_notifications_seen: int
     telegram_notifications_sent: int
     telegram_notifications_retry_scheduled: int
@@ -143,6 +182,17 @@ class WorkerRunSummary:
             deal_jobs_recovered_stale=self.deal_jobs_recovered_stale
             + other.deal_jobs_recovered_stale,
             deal_candidates_saved=self.deal_candidates_saved + other.deal_candidates_saved,
+            agent_operations_claimed=self.agent_operations_claimed + other.agent_operations_claimed,
+            agent_operations_succeeded=self.agent_operations_succeeded
+            + other.agent_operations_succeeded,
+            agent_operations_retry_scheduled=self.agent_operations_retry_scheduled
+            + other.agent_operations_retry_scheduled,
+            agent_operations_failed=self.agent_operations_failed + other.agent_operations_failed,
+            agent_operations_skipped=self.agent_operations_skipped + other.agent_operations_skipped,
+            agent_runs_completed=self.agent_runs_completed + other.agent_runs_completed,
+            agent_runs_partial=self.agent_runs_partial + other.agent_runs_partial,
+            agent_runs_failed=self.agent_runs_failed + other.agent_runs_failed,
+            agent_runs_cancelled=self.agent_runs_cancelled + other.agent_runs_cancelled,
             telegram_notifications_seen=self.telegram_notifications_seen
             + other.telegram_notifications_seen,
             telegram_notifications_sent=self.telegram_notifications_sent
@@ -200,6 +250,15 @@ class WorkerRunSummary:
             "deal_jobs_failed": self.deal_jobs_failed,
             "deal_jobs_recovered_stale": self.deal_jobs_recovered_stale,
             "deal_candidates_saved": self.deal_candidates_saved,
+            "agent_operations_claimed": self.agent_operations_claimed,
+            "agent_operations_succeeded": self.agent_operations_succeeded,
+            "agent_operations_retry_scheduled": self.agent_operations_retry_scheduled,
+            "agent_operations_failed": self.agent_operations_failed,
+            "agent_operations_skipped": self.agent_operations_skipped,
+            "agent_runs_completed": self.agent_runs_completed,
+            "agent_runs_partial": self.agent_runs_partial,
+            "agent_runs_failed": self.agent_runs_failed,
+            "agent_runs_cancelled": self.agent_runs_cancelled,
             "telegram_notifications_seen": self.telegram_notifications_seen,
             "telegram_notifications_sent": self.telegram_notifications_sent,
             "telegram_notifications_retry_scheduled": self.telegram_notifications_retry_scheduled,
@@ -238,7 +297,7 @@ def main() -> None:
     parser.add_argument(
         "--roles",
         default=None,
-        help="Comma-separated worker lanes: browser,watch,deal,telegram,maintenance",
+        help="Comma-separated worker lanes: browser,watch,deal,telegram,maintenance,agent",
     )
     parser.add_argument("--skip-live-cleanup", action="store_true")
     parser.add_argument("--skip-watch-scans", action="store_true")
@@ -304,6 +363,7 @@ async def run_once(
     heartbeat_final_status: str = "stopped",
     cleanup_expired_live_observations: bool = True,
     process_watch_scans: bool = True,
+    agent_executor_factory: AgentExecutorFactory | None = None,
 ) -> WorkerRunSummary:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -561,6 +621,22 @@ async def run_once(
                         retry_delay=timedelta(seconds=retry_delay_seconds),
                     )
                 )
+        agent_step = AgentExecutionStep(False, None, None)
+        if "agent" in roles and not worker_drained:
+            await _record_worker_heartbeat(
+                heartbeat_repository,
+                worker_id=worker_id,
+                role=heartbeat_role,
+                status="running",
+                current_phase="agent_execution",
+                current_job_kind="agent_operation",
+                started_at=started_at,
+                seen_at=datetime.now(UTC),
+            )
+            await session.commit()
+            executor_factory = agent_executor_factory or _agent_executor
+            agent_step = await executor_factory(session, settings, worker_id).run_next()
+            await session.commit()
         telegram_summary = TelegramDeliverySummary()
         if "telegram" in roles and not worker_drained:
             await _record_worker_heartbeat(
@@ -663,6 +739,15 @@ async def run_once(
             deal_jobs_failed=deal_summary.jobs_failed,
             deal_jobs_recovered_stale=deal_recovered_stale,
             deal_candidates_saved=deal_summary.candidates_saved,
+            agent_operations_claimed=int(agent_step.operation_claimed),
+            agent_operations_succeeded=int(agent_step.operation_status == "succeeded"),
+            agent_operations_retry_scheduled=int(agent_step.operation_status == "retry_wait"),
+            agent_operations_failed=int(agent_step.operation_status == "failed"),
+            agent_operations_skipped=int(agent_step.operation_status == "skipped"),
+            agent_runs_completed=int(agent_step.run_status == "completed"),
+            agent_runs_partial=int(agent_step.run_status == "partial"),
+            agent_runs_failed=int(agent_step.run_status == "failed"),
+            agent_runs_cancelled=int(agent_step.run_status == "cancelled"),
             telegram_notifications_seen=telegram_summary.notifications_seen,
             telegram_notifications_sent=telegram_summary.sent,
             telegram_notifications_retry_scheduled=telegram_summary.retry_scheduled,
@@ -751,6 +836,7 @@ async def run_loop(
             and summary.watch_jobs_recovered_stale == 0
             and summary.deal_jobs_processed == 0
             and summary.deal_jobs_recovered_stale == 0
+            and summary.agent_operations_claimed == 0
             and summary.telegram_notifications_seen == 0
             and summary.telegram_notifications_recovered_stale == 0
         ):
@@ -864,7 +950,7 @@ def _effective_worker_roles(
 
 
 def _default_worker_id(roles: tuple[str, ...]) -> str:
-    if roles == DEFAULT_WORKER_ROLES:
+    if _uses_legacy_primary_identity(roles):
         return "flight-hunter-worker"
     if len(roles) == 1:
         return f"flight-hunter-{roles[0]}-worker"
@@ -872,11 +958,19 @@ def _default_worker_id(roles: tuple[str, ...]) -> str:
 
 
 def _worker_heartbeat_role(roles: tuple[str, ...]) -> str:
-    if roles == DEFAULT_WORKER_ROLES:
+    if _uses_legacy_primary_identity(roles):
         return "flight_hunter_worker"
     if len(roles) == 1:
         return roles[0]
     return "multi"
+
+
+def _uses_legacy_primary_identity(roles: tuple[str, ...]) -> bool:
+    role_set = frozenset(roles)
+    return role_set in {
+        frozenset(PRIMARY_WORKER_ROLES),
+        frozenset(DEFAULT_WORKER_ROLES),
+    }
 
 
 def _empty_worker_summary() -> WorkerRunSummary:
@@ -907,6 +1001,15 @@ def _empty_worker_summary() -> WorkerRunSummary:
         deal_jobs_failed=0,
         deal_jobs_recovered_stale=0,
         deal_candidates_saved=0,
+        agent_operations_claimed=0,
+        agent_operations_succeeded=0,
+        agent_operations_retry_scheduled=0,
+        agent_operations_failed=0,
+        agent_operations_skipped=0,
+        agent_runs_completed=0,
+        agent_runs_partial=0,
+        agent_runs_failed=0,
+        agent_runs_cancelled=0,
         telegram_notifications_seen=0,
         telegram_notifications_sent=0,
         telegram_notifications_retry_scheduled=0,
@@ -1026,6 +1129,94 @@ def _health_message(decision: PersonalObservationRunDecision, *, status: str) ->
     if decision.retry_scheduled:
         return f"browser observation retry scheduled; code={decision.code.value}"
     return f"browser observation failed; code={decision.code.value}"
+
+
+class _UnavailableAgentSearchGateway:
+    async def start_exact(
+        self,
+        params: SearchStartParams,
+        *,
+        evidence_namespace: UUID,
+        request_fingerprint: str,
+    ) -> ExactSearchContinuation:
+        del params, evidence_namespace, request_fingerprint
+        raise AviasalesSearchPolicyDenied("provider_unavailable")
+
+    async def poll_exact_once(
+        self,
+        continuation: ExactSearchContinuation,
+        *,
+        request_fingerprint: str,
+    ) -> ExactPollOutcome:
+        del continuation, request_fingerprint
+        raise AviasalesSearchPolicyDenied("provider_unavailable")
+
+    async def calendar(
+        self,
+        params: CalendarSearchParams,
+        *,
+        evidence_namespace: UUID,
+        request_fingerprint: str,
+    ) -> tuple[DiscoverySignal, ...]:
+        del params, evidence_namespace, request_fingerprint
+        raise AviasalesSearchPolicyDenied("provider_unavailable")
+
+
+def _agent_executor(
+    session: AsyncSession,
+    settings: AppSettings,
+    worker_id: str,
+) -> AgentExecutionService:
+    gateway: AgentSearchGateway
+    provider_preflight: Callable[[], None] | None = None
+    if settings.aviasales_search_enabled and settings.aviasales_search_credentials_valid:
+        gateway = AviasalesSearchGateway(
+            client=AviasalesSearchClient(
+                signature=settings.aviasales_search_signature or "",
+                marker=settings.aviasales_search_marker or "",
+                max_retries=0,
+            ),
+            policy=ProviderPolicy.aviasales_search_live(
+                terms_verified_at=datetime.now(UTC),
+                credentials_present=True,
+                enabled=True,
+                internal_rpm=settings.aviasales_search_internal_rpm,
+            ),
+            capability_snapshot=ProviderCapabilityRegistry(
+                requests_per_minute=settings.aviasales_search_internal_rpm
+            ).snapshot(),
+        )
+    else:
+        gateway = _UnavailableAgentSearchGateway()
+        reason = _agent_provider_unavailable_reason(settings)
+
+        def deny_provider() -> None:
+            raise AviasalesSearchPolicyDenied(reason)
+
+        provider_preflight = deny_provider
+    return AgentExecutionService(
+        session=session,
+        gateway=gateway,
+        worker_id=worker_id,
+        policy=AgentExecutionPolicy(
+            provider_rpm=settings.aviasales_search_internal_rpm,
+            operation_lease_seconds=settings.agent_operation_lease_seconds,
+            circuit_failure_threshold=settings.agent_provider_circuit_failure_threshold,
+            circuit_cooldown_seconds=settings.agent_provider_circuit_cooldown_seconds,
+            circuit_probe_lease_seconds=min(30, settings.agent_operation_lease_seconds),
+            poll_interval_seconds=settings.agent_poll_interval_seconds,
+        ),
+        durability_checkpoint=session.commit,
+        provider_preflight=provider_preflight,
+    )
+
+
+def _agent_provider_unavailable_reason(settings: AppSettings) -> str:
+    if not settings.aviasales_search_enabled:
+        return "provider_disabled"
+    if not settings.aviasales_search_credentials_present:
+        return "provider_credentials_missing"
+    return "provider_credentials_invalid"
 
 
 def _watch_scan_providers(

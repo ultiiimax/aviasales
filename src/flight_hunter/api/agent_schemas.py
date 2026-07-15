@@ -196,6 +196,32 @@ class AgentPlanResponse(BaseModel):
         )
 
 
+class AgentStageCountsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    total: int
+    pending: int
+    running: int
+    completed: int
+    partial: int
+    failed: int
+    skipped: int
+    cancelled: int
+
+
+class AgentOperationCountsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    total: int
+    attempted: int
+    pending: int
+    leased: int
+    retry_wait: int
+    succeeded: int
+    failed: int
+    skipped: int
+
+
 class AgentRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -210,6 +236,13 @@ class AgentRunResponse(BaseModel):
     finished_at: datetime | None
     error_code: str | None
     public_message: str | None
+    stage_counts: AgentStageCountsResponse
+    operation_counts: AgentOperationCountsResponse
+    logical_operation_budget: int
+    logical_operations_consumed: int
+    http_attempt_budget: int
+    http_attempts_consumed: int
+    cancellation_requested: bool
 
     @classmethod
     def from_view(cls, view: RunView) -> AgentRunResponse:
