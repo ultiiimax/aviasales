@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from subprocess import CompletedProcess
 
 from flight_hunter.ops.release_check import (
+    AGENT_ACCEPTANCE_COMMANDS,
     ReleaseStageResult,
     default_stages,
     run_release_check,
@@ -35,11 +36,77 @@ def test_default_release_stages_are_deterministic() -> None:
         "types",
         "migrations",
         "upgrade_migrations",
+        "agent_acceptance",
         "security",
         "compose",
         "health",
         "browser",
     )
+
+
+def test_agent_acceptance_stage_is_fixture_only_and_targets_release_contracts() -> None:
+    backend_command, browser_command = AGENT_ACCEPTANCE_COMMANDS
+    command = (*backend_command, *browser_command)
+
+    assert backend_command[:3] == ("uv", "run", "pytest")
+    assert browser_command[:3] == ("uv", "run", "pytest")
+    assert "tests/integration/test_agent_worker_recovery.py" in command
+    assert "tests/e2e/test_agent_route_orchestrator.py" in command
+    assert "tests/unit/api/test_agent_plan_api.py" in command
+    assert "tests/unit/application/test_agent_execution.py" in command
+    assert "tests/unit/application/test_agent_lifecycle.py" in command
+    assert "tests/unit/application/test_agent_planning.py" in command
+    assert "tests/unit/ops/test_application_metrics.py" in command
+    assert "tests/unit/application/test_worker_health.py" in command
+    assert "tests/unit/api/test_admin_worker_health_api.py" in command
+    assert "tests/e2e/test_agent_route_orchestrator.py" not in backend_command
+    assert "tests/unit/application/test_agent_execution.py" not in browser_command
+    assert "browser_e2e" in browser_command
+    assert "--strict-markers" in command
+    assert not any("live" in part.lower() or "credential" in part.lower() for part in command)
+
+
+def test_agent_acceptance_runs_backend_and_browser_in_isolated_processes() -> None:
+    runner = RecordingRunner(
+        [
+            CompletedProcess(("uv",), 0, stdout="", stderr=""),
+            CompletedProcess(("uv",), 0, stdout="", stderr=""),
+        ]
+    )
+
+    results = run_release_check(
+        stages=("agent_acceptance",),
+        runner=runner,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        environ={
+            "PATH": "test-path",
+            "PYTEST_ADDOPTS": "-k inherited-selection",
+            "OPENAI_API_KEY": "inherited-openai-secret",
+            "AVIASALES_SEARCH_SIGNATURE": "inherited-aviasales-secret",
+            "TELEGRAM_BOT_TOKEN": "inherited-telegram-secret",
+        },
+    )
+
+    assert results == (ReleaseStageResult.passed("agent_acceptance"),)
+    assert [command for command, _environment in runner.calls] == list(AGENT_ACCEPTANCE_COMMANDS)
+    environments = [environment for _command, environment in runner.calls]
+    assert all(environment is not None for environment in environments)
+    for environment in environments:
+        assert environment is not None
+        assert environment["PATH"] == "test-path"
+        assert environment["PYTEST_ADDOPTS"] == ""
+        assert environment["OPENAI_API_KEY"] == ""
+        assert environment["AVIASALES_SEARCH_SIGNATURE"] == ""
+        assert environment["TELEGRAM_BOT_TOKEN"] == ""
+        assert environment["AGENT_OPENAI_ENABLED"] == "false"
+        assert environment["AGENT_MCP_ENABLED"] == "false"
+        assert environment["AGENT_CODEX_CLI_ENABLED"] == "false"
+        assert environment["AVIASALES_SEARCH_ENABLED"] == "false"
+        assert environment["FLIGHT_HUNTER_AGENT_ACCEPTANCE_FIXTURE_ONLY"] == "1"
+        assert environment["UV_OFFLINE"] == "1"
+        assert "127.0.0.1" in environment["NO_PROXY"]
+        assert environment["HTTP_PROXY"] == "http://127.0.0.1:9"
 
 
 def test_skipped_stage_has_versioned_json_reason() -> None:

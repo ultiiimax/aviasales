@@ -156,12 +156,19 @@ def test_web_ui_contains_accessible_durable_agent_plan_and_run_regions() -> None
         'id="agent-fare-analysis"',
         'aria-labelledby="agent-fare-analysis-heading"',
         'id="agent-fare-analysis-list"',
+        'id="agent-confirmed-results"',
+        'aria-labelledby="agent-confirmed-results-heading"',
+        'id="agent-confirmed-results-list"',
         'id="agent-risky-results"',
         'aria-labelledby="agent-risky-results-heading"',
         'id="agent-partial-errors" role="alert"',
     )
     for fragment in required_fragments:
         assert fragment in html
+
+    render_results = _javascript_sync_function(html, "renderAgentRunResults")
+    assert "renderAgentConfirmedResults(results)" in render_results
+    assert "results.hidden_city_candidates" in render_results
 
 
 def test_web_agent_plan_javascript_is_approval_gated_reloadable_and_cancellable() -> None:
@@ -207,7 +214,8 @@ def test_web_agent_plan_javascript_is_approval_gated_reloadable_and_cancellable(
         assert budget_field in estimate
     assert "crypto.getRandomValues" in idempotency
     assert "Math.random" not in idempotency
-    assert "/runs/latest" in reload
+    assert "}/runs`" in reload
+    assert "runList.runs" in reload
     assert "renderAgentPlan" in reload
     assert "window.localStorage.getItem(agentPlanStorageKey)" in reload
     assert "response.status === 404" in reload
@@ -458,6 +466,52 @@ def test_web_agent_plan_persists_only_versioned_plan_id_for_reload() -> None:
     assert "String(plan.plan_id)" in persisted_line
     for forbidden in ("content_hash", "token", "booking", "signature"):
         assert forbidden not in persisted_line.lower()
+
+
+def test_web_agent_run_persists_only_versioned_id_and_blocks_duplicate_execute() -> None:
+    html = TestClient(create_app()).get("/").text
+    render_run = _javascript_sync_function(html, "renderAgentRun")
+    execute = _javascript_function(html, "executeAgentPlan")
+    reload = _javascript_function(html, "reloadAgentPlan")
+    clear_agent = _javascript_sync_function(html, "clearAgentSessionState")
+    confirmed = _javascript_sync_function(html, "renderAgentConfirmedResults")
+
+    assert 'const agentRunStorageKey = "flight_hunter_agent_run_id_v1"' in html
+    persisted_line = next(
+        line
+        for line in render_run.splitlines()
+        if "localStorage.setItem(agentRunStorageKey" in line
+    )
+    assert "String(run.run_id)" in persisted_line
+    for forbidden in ("content_hash", "token", "booking", "signature"):
+        assert forbidden not in persisted_line.lower()
+
+    assert "if (agentExecuteInFlight)" in execute
+    assert "agentExecuteInFlight = true" in execute
+    assert "const executeGeneration = ++agentExecuteGeneration" in execute
+    assert "executeButton.disabled = true" in execute
+    assert 'executeButton.setAttribute("aria-busy", "true")' in execute
+    assert "finally" in execute
+    assert "executeGeneration !== agentExecuteGeneration" in execute
+    assert "agentExecuteInFlight = false" in execute
+    assert 'executeButton.setAttribute("aria-busy", "false")' in execute
+
+    assert "window.localStorage.getItem(agentRunStorageKey)" in reload
+    assert "/runs/${encodeURIComponent(storedRunId)}" in reload
+    assert "window.localStorage.removeItem(agentRunStorageKey)" in reload
+    assert "run.revision_id !== plan.revision_id" in reload
+    assert "item.revision_id === plan.revision_id" in reload
+    assert ".at(-1)" in reload
+    assert "agentExecuteGeneration += 1" in clear_agent
+
+    assert "candidate.sources" in confirmed
+    assert "candidate.rankings" in confirmed
+    assert "ranking.reasons" in confirmed
+    assert "candidate.provider_id" not in confirmed
+    assert "candidate.freshness" not in confirmed
+    assert "candidate.ranking_reasons" not in confirmed
+    assert 'region.hidden = results.state === "not_ready"' in confirmed
+    assert "agentExecuteInFlight || !executeReady" in html
 
 
 def _javascript_function(html: str, name: str) -> str:

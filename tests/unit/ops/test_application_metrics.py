@@ -49,6 +49,26 @@ def test_application_metrics_record_safe_observability_events() -> None:
         household_id="household-secret-not-a-label",
         reason="price_drop",
     )
+    log_event(
+        "agent_operation_finished",
+        operation_id="operation-secret-not-a-label",
+        status="succeeded",
+        recovered_expired_lease=True,
+        provider_denied=True,
+    )
+    log_event(
+        "agent_run_finished",
+        run_id="run-secret-not-a-label",
+        plan_id="plan-secret-not-a-label",
+        status="partial",
+        duration_ms=12_500,
+        estimated_logical_operations=8,
+        actual_logical_operations=7,
+        estimated_http_attempts=16,
+        actual_http_attempts=9,
+        useful_candidates=3,
+        provider_denials=2,
+    )
 
     text = render_application_metrics()
 
@@ -71,6 +91,17 @@ def test_application_metrics_record_safe_observability_events() -> None:
     assert "flight_hunter_search_duration_seconds_count 1" in text
     assert "flight_hunter_search_duration_seconds_sum 0.25" in text
     assert 'flight_hunter_alerts_sent_total{reason="price_drop"} 1' in text
+    assert 'flight_hunter_agent_runs_total{status="partial"} 1' in text
+    assert 'flight_hunter_agent_operations_total{status="succeeded"} 1' in text
+    assert "flight_hunter_agent_run_duration_seconds_count 1" in text
+    assert "flight_hunter_agent_run_duration_seconds_sum 12.5" in text
+    assert "flight_hunter_agent_logical_operations_estimated_total 8" in text
+    assert "flight_hunter_agent_logical_operations_actual_total 7" in text
+    assert "flight_hunter_agent_http_attempts_estimated_total 16" in text
+    assert "flight_hunter_agent_http_attempts_actual_total 9" in text
+    assert "flight_hunter_agent_useful_candidates_total 3" in text
+    assert "flight_hunter_agent_provider_denials_total 1" in text
+    assert "flight_hunter_agent_recoveries_total 1" in text
     assert "secret-not-a-label" not in text
 
 

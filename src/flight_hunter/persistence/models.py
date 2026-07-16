@@ -796,6 +796,8 @@ agent_run_operations_table = Table(
     Column("max_attempts", Integer, nullable=False),
     Column("next_retry_at", DateTime(timezone=True), nullable=True),
     Column("http_attempts_consumed", Integer, nullable=False, server_default=text("0")),
+    Column("provider_denial_count", Integer, nullable=False, server_default=text("0")),
+    Column("lease_recovery_count", Integer, nullable=False, server_default=text("0")),
     Column("circuit_permit_token_digest", String(71), nullable=True),
     Column("circuit_permit_generation", Integer, nullable=True),
     Column("circuit_permit_mode", String(20), nullable=True),

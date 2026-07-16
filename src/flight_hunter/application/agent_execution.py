@@ -237,6 +237,11 @@ class AgentExecutionStep:
     operation_claimed: bool
     operation_status: str | None
     run_status: str | None
+    recovered_operation: bool = False
+    household_id: UUID | None = None
+    run_id: UUID | None = None
+    terminal_transitioned: bool = False
+    operation_error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,7 +408,13 @@ class AgentExecutionService:
         if run is None:
             raise AgentExecutionError("agent_run_not_found")
         if run.status in _TERMINAL_RUN_STATUSES:
-            return AgentExecutionStep(False, None, run.status)
+            return AgentExecutionStep(
+                False,
+                None,
+                run.status,
+                household_id=run.household_id,
+                run_id=run.id,
+            )
 
         if run.status == "cancel_requested":
             return await self._finish_cancel_requested(run, now)
@@ -425,9 +436,21 @@ class AgentExecutionService:
                 if current is None:
                     raise AgentExecutionError("agent_run_not_found") from error
                 if current.status in _TERMINAL_RUN_STATUSES:
-                    return AgentExecutionStep(False, None, current.status)
+                    return AgentExecutionStep(
+                        False,
+                        None,
+                        current.status,
+                        household_id=current.household_id,
+                        run_id=current.id,
+                    )
                 if current.status != "running":
-                    return AgentExecutionStep(False, None, current.status)
+                    return AgentExecutionStep(
+                        False,
+                        None,
+                        current.status,
+                        household_id=current.household_id,
+                        run_id=current.id,
+                    )
                 run = current
 
         try:
@@ -440,7 +463,14 @@ class AgentExecutionService:
                 changed_at=now,
                 error_code=error.code,
             )
-            return AgentExecutionStep(False, None, failed.status)
+            return AgentExecutionStep(
+                False,
+                None,
+                failed.status,
+                household_id=failed.household_id,
+                run_id=failed.id,
+                terminal_transitioned=True,
+            )
         lease = await self._operations.claim_next_operation(
             household_id=run.household_id,
             run_id=run.id,
@@ -450,7 +480,16 @@ class AgentExecutionService:
         )
         if lease is None:
             terminal = await self._advance_or_fail(run, now)
-            return AgentExecutionStep(False, None, terminal.status if terminal else run.status)
+            return AgentExecutionStep(
+                False,
+                None,
+                terminal.status if terminal else run.status,
+                household_id=run.household_id,
+                run_id=run.id,
+                terminal_transitioned=(
+                    terminal is not None and terminal.status in _TERMINAL_RUN_STATUSES
+                ),
+            )
 
         if lease.operation.kind in {
             AgentOperationKind.CALENDAR_SEARCH,
@@ -465,10 +504,19 @@ class AgentExecutionService:
         post_operation_now = self._now()
         await self._refresh_stage_statuses(run, post_operation_now)
         terminal = await self._advance_or_fail(run, post_operation_now)
+        completed_operation = await self._operations.get_operation(
+            run.household_id,
+            lease.operation.id,
+        )
         return AgentExecutionStep(
             True,
             status.value,
             terminal.status if terminal is not None else "running",
+            lease.recovered_expired_lease,
+            run.household_id,
+            run.id,
+            terminal is not None and terminal.status in _TERMINAL_RUN_STATUSES,
+            completed_operation.error_code if completed_operation is not None else None,
         )
 
     async def _advance_or_fail(
@@ -502,14 +550,27 @@ class AgentExecutionService:
         await self._refresh_stage_statuses(run, now)
         operations = await self._operations.list_operations(run.household_id, run.id)
         if any(operation.status in _ACTIVE_OPERATION_STATUSES for operation in operations):
-            return AgentExecutionStep(False, None, "cancel_requested")
+            return AgentExecutionStep(
+                False,
+                None,
+                "cancel_requested",
+                household_id=run.household_id,
+                run_id=run.id,
+            )
         cancelled = await self._runs.set_status(
             household_id=run.household_id,
             run_id=run.id,
             status="cancelled",
             changed_at=now,
         )
-        return AgentExecutionStep(False, None, cancelled.status)
+        return AgentExecutionStep(
+            False,
+            None,
+            cancelled.status,
+            household_id=cancelled.household_id,
+            run_id=cancelled.id,
+            terminal_transitioned=True,
+        )
 
     async def _finish_deadline(
         self,
@@ -533,7 +594,13 @@ class AgentExecutionService:
         await self._refresh_stage_statuses(run, now)
         operations = await self._operations.list_operations(run.household_id, run.id)
         if any(operation.status in _ACTIVE_OPERATION_STATUSES for operation in operations):
-            return AgentExecutionStep(False, None, run.status)
+            return AgentExecutionStep(
+                False,
+                None,
+                run.status,
+                household_id=run.household_id,
+                run_id=run.id,
+            )
         confirmed = await self._evidence.list_confirmed_evidence(run.household_id, run.id)
         ranking_id = await self._saved_ranking_result_id(run, operations)
         hidden_city_confirmed = any(
@@ -559,7 +626,14 @@ class AgentExecutionService:
             changed_at=now,
             error_code=error_code,
         )
-        return AgentExecutionStep(False, None, failed.status)
+        return AgentExecutionStep(
+            False,
+            None,
+            failed.status,
+            household_id=failed.household_id,
+            run_id=failed.id,
+            terminal_transitioned=True,
+        )
 
     async def _ensure_initial_operation(
         self,

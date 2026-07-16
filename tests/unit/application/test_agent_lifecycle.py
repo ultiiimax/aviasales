@@ -961,6 +961,37 @@ async def test_list_runs_query_count_is_constant_and_limit_is_bounded() -> None:
     assert many_query_count == one_query_count
 
 
+@pytest.mark.anyio
+async def test_lifecycle_observability_is_structured_and_omits_private_inputs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private_key = "PRIVATE-IDEMPOTENCY-CANARY"
+    async with _lifecycle_harness() as harness:
+        with caplog.at_level("INFO", logger="flight_hunter.observability"):
+            plan = await _create(harness.service)
+            run = await _execute(harness.service, plan, private_key)
+            await harness.service.cancel_run(
+                CancelAgentRun(
+                    household_id=HOUSEHOLD_ID,
+                    user_id=USER_ID,
+                    plan_id=plan.plan_id,
+                    run_id=run.run_id,
+                )
+            )
+
+    rendered = "\n".join(caplog.messages)
+    assert '"event":"agent_plan_created"' in rendered
+    assert '"event":"agent_run_approved"' in rendered
+    assert '"event":"agent_run_cancel_requested"' in rendered
+    assert '"estimated_http_attempts":' in rendered
+    assert '"http_attempt_budget":' in rendered
+    assert '"parser_version":"intent-parser-v2"' in rendered
+    assert '"planner_version":"agent-plan-builder-v5"' in rendered
+    assert private_key not in rendered
+    for forbidden in ("content_hash", "idempotency", "booking", "continuation", "prompt"):
+        assert forbidden not in rendered.lower()
+
+
 @asynccontextmanager
 async def _lifecycle_harness() -> AsyncIterator[LifecycleHarness]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")

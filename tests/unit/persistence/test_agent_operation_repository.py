@@ -24,6 +24,7 @@ from flight_hunter.domain.offers import Freshness, PriceBasis
 from flight_hunter.persistence.agent_repositories import (
     AgentEvidenceError,
     AgentEvidenceRepository,
+    AgentOperationalHealthRepository,
     AgentOperationConflict,
     AgentOperationKind,
     AgentOperationRepository,
@@ -163,6 +164,7 @@ async def test_expired_lease_is_recovered_without_losing_attempts_and_live_lease
         await session.commit()
         assert first is not None
         assert first.operation.attempt_count == 1
+        assert first.recovered_expired_lease is False
 
     async with sessions() as session:
         live = await AgentOperationRepository(session).claim_next_operation(
@@ -187,6 +189,12 @@ async def test_expired_lease_is_recovered_without_losing_attempts_and_live_lease
         assert recovered.operation.id == OPERATION_ID
         assert recovered.operation.attempt_count == 2
         assert recovered.operation.lease_owner == "worker-b"
+        assert recovered.recovered_expired_lease is True
+        assert recovered.operation.lease_recovery_count == 1
+        health = await AgentOperationalHealthRepository(session).snapshot(
+            now=NOW + timedelta(seconds=31)
+        )
+        assert health.recovered_operations == 1
 
     await engine.dispose()
 
@@ -227,6 +235,86 @@ async def test_expired_final_attempt_is_terminally_recovered_without_manual_data
         assert operation.status is AgentOperationStatus.FAILED
         assert operation.error_code == "agent_lease_expired_attempts_exhausted"
         assert operation.completed_at == NOW + timedelta(seconds=12)
+        assert operation.lease_recovery_count == 1
+        health = await AgentOperationalHealthRepository(session).snapshot(
+            now=NOW + timedelta(seconds=12)
+        )
+        assert health.recovered_operations == 1
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_durable_denial_count_survives_reclaim_and_health_due_matches_claim(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "durable-agent-health.db")
+    await _seed_operation(sessions)
+
+    async with sessions() as session:
+        health = await AgentOperationalHealthRepository(session).snapshot(
+            now=NOW - timedelta(seconds=1)
+        )
+        assert health.due_operation_count == 0
+
+        lease = await AgentOperationRepository(session).claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-a",
+            now=NOW + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+        assert lease is not None
+        retry = await AgentOperationRepository(session).schedule_retry(
+            household_id=HOUSEHOLD_ID,
+            operation_id=OPERATION_ID,
+            worker_id="worker-a",
+            next_retry_at=NOW + timedelta(seconds=3),
+            error_code="provider_policy_denied",
+            now=NOW + timedelta(seconds=2),
+        )
+        await session.commit()
+        assert retry.provider_denial_count == 1
+
+    async with sessions() as session:
+        health = await AgentOperationalHealthRepository(session).snapshot(
+            now=NOW + timedelta(seconds=2)
+        )
+        assert health.due_operation_count == 0
+        assert health.provider_denials == 1
+
+        reclaimed = await AgentOperationRepository(session).claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-b",
+            now=NOW + timedelta(seconds=3),
+            lease_seconds=30,
+        )
+        assert reclaimed is not None
+        assert reclaimed.operation.error_code is None
+        assert reclaimed.operation.provider_denial_count == 1
+        await session.commit()
+
+    async with sessions() as session:
+        health = await AgentOperationalHealthRepository(session).snapshot(
+            now=NOW + timedelta(seconds=3)
+        )
+        assert health.provider_denials == 1
+        await session.execute(
+            update(agent_run_operations_table)
+            .where(agent_run_operations_table.c.id == str(OPERATION_ID))
+            .values(
+                status=AgentOperationStatus.PENDING.value,
+                lease_owner=None,
+                lease_expires_at=None,
+                attempt_count=agent_run_operations_table.c.max_attempts,
+            )
+        )
+        await session.commit()
+        exhausted_health = await AgentOperationalHealthRepository(session).snapshot(
+            now=NOW + timedelta(seconds=4)
+        )
+        assert exhausted_health.due_operation_count == 0
 
     await engine.dispose()
 

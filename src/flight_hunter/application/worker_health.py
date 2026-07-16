@@ -7,6 +7,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+from flight_hunter.persistence.agent_repositories import (
+    AgentOperationalHealthRecord,
+    AgentOperationalHealthRepository,
+)
 from flight_hunter.persistence.repositories import (
     AuditEventRepository,
     NewAuditEvent,
@@ -69,12 +73,31 @@ class WorkerHealthAlert:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentOperationalHealthItem:
+    operation_status_counts: Mapping[str, int]
+    run_status_counts: Mapping[str, int]
+    due_operation_count: int
+    oldest_due_operation_age_seconds: int | None
+    circuit_state_counts: Mapping[str, int]
+    estimated_logical_operations: int
+    actual_logical_operations: int
+    estimated_http_attempts: int
+    actual_http_attempts: int
+    confirmed_candidates: int
+    provider_denials: int
+    terminal_run_count: int
+    terminal_run_duration_seconds: float
+    recovered_operations: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerHealthSnapshot:
     checked_at: datetime
     control: WorkerControlState
     workers: tuple[WorkerHealthItem, ...]
     queues: tuple[WorkerQueueHealthItem, ...]
     alerts: tuple[WorkerHealthAlert, ...]
+    agent: AgentOperationalHealthItem | None = None
 
 
 class WorkerHealthService:
@@ -84,12 +107,14 @@ class WorkerHealthService:
         heartbeats: WorkerHeartbeatRepository,
         queues: WorkerQueueHealthRepository | None = None,
         control: WorkerControlRepository | None = None,
+        agent_health: AgentOperationalHealthRepository | None = None,
         clock: Callable[[], datetime] | None = None,
         stale_after: timedelta = timedelta(minutes=5),
     ) -> None:
         self._heartbeats = heartbeats
         self._queues = queues
         self._control = control
+        self._agent_health = agent_health
         self._clock = clock or (lambda: datetime.now(UTC))
         self._stale_after = stale_after
 
@@ -101,6 +126,9 @@ class WorkerHealthService:
             await self._queues.queue_health(now=now, stale_after=self._stale_after)
             if self._queues is not None
             else ()
+        )
+        agent_record = (
+            await self._agent_health.snapshot(now=now) if self._agent_health is not None else None
         )
         control_state = _worker_control_state(control)
         workers = tuple(
@@ -120,6 +148,7 @@ class WorkerHealthService:
             workers=workers,
             queues=queues,
             alerts=_worker_health_alerts(workers=workers, queues=queues),
+            agent=_agent_health_item(agent_record, now=now),
         )
 
 
@@ -218,6 +247,93 @@ def render_worker_health_prometheus(snapshot: WorkerHealthSnapshot) -> str:
                 subject_id=alert.subject_id,
             )
             + " 1"
+        )
+    if snapshot.agent is not None:
+        agent = snapshot.agent
+        lines.extend(
+            [
+                "# HELP flight_hunter_agent_operation_items Durable agent operations by state.",
+                "# TYPE flight_hunter_agent_operation_items gauge",
+            ]
+        )
+        for state, count in sorted(agent.operation_status_counts.items()):
+            lines.append(
+                "flight_hunter_agent_operation_items"
+                + _metric_labels(state=state)
+                + f" {_metric_number(count)}"
+            )
+        lines.extend(
+            [
+                "# HELP flight_hunter_agent_run_items Durable agent runs by status.",
+                "# TYPE flight_hunter_agent_run_items gauge",
+            ]
+        )
+        for status, count in sorted(agent.run_status_counts.items()):
+            lines.append(
+                "flight_hunter_agent_run_items"
+                + _metric_labels(status=status)
+                + f" {_metric_number(count)}"
+            )
+        if agent.oldest_due_operation_age_seconds is not None:
+            lines.extend(
+                [
+                    "# HELP flight_hunter_agent_oldest_due_operation_age_seconds "
+                    "Age of the oldest due agent operation.",
+                    "# TYPE flight_hunter_agent_oldest_due_operation_age_seconds gauge",
+                    "flight_hunter_agent_oldest_due_operation_age_seconds "
+                    f"{_metric_number(agent.oldest_due_operation_age_seconds)}",
+                ]
+            )
+        lines.extend(
+            [
+                "# HELP flight_hunter_agent_circuit_items Agent provider circuits by state.",
+                "# TYPE flight_hunter_agent_circuit_items gauge",
+            ]
+        )
+        for state, count in sorted(agent.circuit_state_counts.items()):
+            lines.append(
+                "flight_hunter_agent_circuit_items"
+                + _metric_labels(state=state)
+                + f" {_metric_number(count)}"
+            )
+        lines.extend(
+            [
+                "# HELP flight_hunter_agent_logical_operations "
+                "Approved and consumed logical operations.",
+                "# TYPE flight_hunter_agent_logical_operations gauge",
+                "flight_hunter_agent_logical_operations"
+                + _metric_labels(kind="estimated")
+                + f" {_metric_number(agent.estimated_logical_operations)}",
+                "flight_hunter_agent_logical_operations"
+                + _metric_labels(kind="actual")
+                + f" {_metric_number(agent.actual_logical_operations)}",
+                "# HELP flight_hunter_agent_http_attempts Approved and consumed HTTP attempts.",
+                "# TYPE flight_hunter_agent_http_attempts gauge",
+                "flight_hunter_agent_http_attempts"
+                + _metric_labels(kind="estimated")
+                + f" {_metric_number(agent.estimated_http_attempts)}",
+                "flight_hunter_agent_http_attempts"
+                + _metric_labels(kind="actual")
+                + f" {_metric_number(agent.actual_http_attempts)}",
+                "# HELP flight_hunter_agent_confirmed_candidates "
+                "Confirmed candidate evidence count.",
+                "# TYPE flight_hunter_agent_confirmed_candidates gauge",
+                f"flight_hunter_agent_confirmed_candidates {agent.confirmed_candidates}",
+                "# HELP flight_hunter_agent_provider_denials Durable provider denial count.",
+                "# TYPE flight_hunter_agent_provider_denials gauge",
+                f"flight_hunter_agent_provider_denials {agent.provider_denials}",
+                "# HELP flight_hunter_agent_recovered_operations "
+                "Durable expired operation lease recovery count.",
+                "# TYPE flight_hunter_agent_recovered_operations gauge",
+                f"flight_hunter_agent_recovered_operations {agent.recovered_operations}",
+                "# HELP flight_hunter_agent_terminal_run_duration_seconds "
+                "Durable terminal agent run duration summary.",
+                "# TYPE flight_hunter_agent_terminal_run_duration_seconds summary",
+                "flight_hunter_agent_terminal_run_duration_seconds_count "
+                f"{agent.terminal_run_count}",
+                "flight_hunter_agent_terminal_run_duration_seconds_sum "
+                f"{_metric_number(agent.terminal_run_duration_seconds)}",
+            ]
         )
     return "\n".join(lines) + "\n"
 
@@ -321,6 +437,34 @@ def _queue_item(
         oldest_queued_age_seconds=_age_seconds(record.oldest_queued_at, now=now),
         oldest_locked_age_seconds=_age_seconds(record.oldest_locked_at, now=now),
         warning_level=_queue_warning_level(record, drain_requested=drain_requested),
+    )
+
+
+def _agent_health_item(
+    record: AgentOperationalHealthRecord | None,
+    *,
+    now: datetime,
+) -> AgentOperationalHealthItem | None:
+    if record is None:
+        return None
+    return AgentOperationalHealthItem(
+        operation_status_counts=record.operation_status_counts,
+        run_status_counts=record.run_status_counts,
+        due_operation_count=record.due_operation_count,
+        oldest_due_operation_age_seconds=_age_seconds(
+            record.oldest_due_operation_at,
+            now=now,
+        ),
+        circuit_state_counts=record.circuit_state_counts,
+        estimated_logical_operations=record.estimated_logical_operations,
+        actual_logical_operations=record.actual_logical_operations,
+        estimated_http_attempts=record.estimated_http_attempts,
+        actual_http_attempts=record.actual_http_attempts,
+        confirmed_candidates=record.confirmed_candidates,
+        provider_denials=record.provider_denials,
+        terminal_run_count=record.terminal_run_count,
+        terminal_run_duration_seconds=record.terminal_run_duration_seconds,
+        recovered_operations=record.recovered_operations,
     )
 
 

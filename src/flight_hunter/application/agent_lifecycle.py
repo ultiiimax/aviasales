@@ -77,6 +77,7 @@ from flight_hunter.domain.agent_search import (
     TripShape,
 )
 from flight_hunter.domain.offers import Freshness, PassengerMix, PriceBasis
+from flight_hunter.ops.structured_logging import log_event
 from flight_hunter.persistence.agent_repositories import (
     AgentConfirmedOfferEvidenceRecord,
     AgentDiscoverySignalRecord,
@@ -456,7 +457,14 @@ class AgentLifecycleService:
                 raise AgentLifecycleError("agent_plan_invalid_input") from error
             except AgentPlanError as error:
                 raise _lifecycle_error(error) from error
-        return _plan_view(stored)
+        view = _plan_view(stored)
+        _log_plan_lifecycle(
+            "agent_plan_created",
+            view,
+            parser_version=stored.parser_version,
+            planner_version=stored.planner_version,
+        )
+        return view
 
     async def edit_plan(self, command: EditAgentPlan) -> PlanView:
         async with self._owned_transaction():
@@ -496,7 +504,15 @@ class AgentLifecycleService:
                 raise AgentLifecycleError("agent_plan_invalid_input") from error
             except AgentPlanError as error:
                 raise _lifecycle_error(error) from error
-        return _plan_view(stored)
+        view = _plan_view(stored)
+        _log_plan_lifecycle(
+            "agent_plan_revised",
+            view,
+            parser_version=stored.parser_version,
+            planner_version=stored.planner_version,
+            source_revision_id=command.source_revision_id,
+        )
+        return view
 
     async def clone_revision(self, command: CloneAgentPlan) -> PlanView:
         if not command.idempotency_key.strip():
@@ -537,7 +553,15 @@ class AgentLifecycleService:
                 raise AgentLifecycleError("agent_plan_invalid_input") from error
             except AgentPlanError as error:
                 raise _lifecycle_error(error) from error
-        return _plan_view(stored)
+        view = _plan_view(stored)
+        _log_plan_lifecycle(
+            "agent_plan_cloned",
+            view,
+            parser_version=stored.parser_version,
+            planner_version=stored.planner_version,
+            source_revision_id=command.source_revision_id,
+        )
+        return view
 
     async def execute_plan(self, command: ExecuteAgentPlan) -> RunView:
         if not command.idempotency_key.strip():
@@ -619,7 +643,9 @@ class AgentLifecycleService:
                 raise _execution_error(error, revision.state) from error
             except AgentPlanNotFound as error:
                 raise AgentLifecycleError("agent_plan_not_found") from error
-            return await self._project_run(_bound_idempotent_run(stored, command))
+            projected = await self._project_run(_bound_idempotent_run(stored, command))
+        _log_run_lifecycle("agent_run_approved", projected)
+        return projected
 
     async def get_plan(self, household_id: UUID, plan_id: UUID) -> PlanView:
         async with self._owned_transaction():
@@ -680,7 +706,9 @@ class AgentLifecycleService:
                 )
             except AgentPlanError as error:
                 raise _lifecycle_error(error) from error
-            return await self._project_run(stored)
+            projected = await self._project_run(stored)
+        _log_run_lifecycle("agent_run_cancel_requested", projected)
+        return projected
 
     async def get_run_results(
         self,
@@ -1524,6 +1552,51 @@ def _cost_model_payload(proposed: ProposedPlanRevision) -> dict[str, object]:
         "requests_per_minute": model.requests_per_minute,
         "worst_case_exact_http_attempts": model.worst_case_exact_http_attempts,
     }
+
+
+def _log_plan_lifecycle(
+    event: str,
+    view: PlanView,
+    *,
+    parser_version: str,
+    planner_version: str,
+    source_revision_id: UUID | None = None,
+) -> None:
+    estimate = view.estimate
+    log_event(
+        event,
+        plan_id=view.plan_id,
+        revision_id=view.revision_id,
+        source_revision_id=source_revision_id,
+        revision=view.revision,
+        state=view.state,
+        coverage=view.coverage,
+        executable=view.executable,
+        strategy_count=len(view.enabled_strategies),
+        clarification_count=len(view.clarifications),
+        parser_version=parser_version,
+        planner_version=planner_version,
+        estimated_logical_operations=(
+            estimate.logical_operations if estimate is not None else None
+        ),
+        estimated_http_attempts=estimate.http_attempts if estimate is not None else None,
+        estimated_deadline_seconds=estimate.deadline_seconds if estimate is not None else None,
+    )
+
+
+def _log_run_lifecycle(event: str, view: RunView) -> None:
+    log_event(
+        event,
+        plan_id=view.plan_id,
+        revision_id=view.revision_id,
+        run_id=view.run_id,
+        status=view.status,
+        logical_operation_budget=view.logical_operation_budget,
+        logical_operations_consumed=view.logical_operations_consumed,
+        http_attempt_budget=view.http_attempt_budget,
+        http_attempts_consumed=view.http_attempts_consumed,
+        cancellation_requested=view.cancellation_requested,
+    )
 
 
 def _plan_view(revision: AgentPlanRevisionRecord) -> PlanView:

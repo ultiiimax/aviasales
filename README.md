@@ -189,6 +189,14 @@ Credential-free gate:
 uv run flight-hunter-release-check
 ```
 
+Он включает изолированные backend-контракты агента и узкий headless Chromium
+acceptance для plan/run/reload/mobile flow. Внешние ключи и live-вызовы
+Aviasales не нужны. Если Chromium ещё не установлен:
+
+```powershell
+uv run flight-hunter-browser-bootstrap
+```
+
 Полная локальная проверка с Chromium:
 
 ```powershell
@@ -202,7 +210,12 @@ uv run flight-hunter-release-check --include-docker-build
 ```
 
 Результаты release-check — JSONL с отдельным status/code каждого этапа. Live
-Aviasales smoke в credential-free gate не входит.
+Aviasales smoke в credential-free gate не входит. Agent acceptance можно
+перезапустить отдельно:
+
+```powershell
+uv run flight-hunter-release-check --stage agent_acceptance
+```
 
 ## Backup, restore и update
 

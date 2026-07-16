@@ -465,6 +465,7 @@ def test_worker_processes_queued_browser_observation_jobs(
         "live_cleanup_offers_deleted": 0,
         "live_cleanup_idempotency_deleted": 0,
         "deal_candidates_deleted": 0,
+        "agent_operations_recovered": 0,
     }
     offers = asyncio.run(_stored_offers(database_url))
     health_events = asyncio.run(_stored_health_events(database_url))
@@ -661,6 +662,7 @@ def test_worker_loop_can_stop_after_idle_iteration(
         "live_cleanup_offers_deleted": 0,
         "live_cleanup_idempotency_deleted": 0,
         "deal_candidates_deleted": 0,
+        "agent_operations_recovered": 0,
     }
 
 
@@ -877,6 +879,7 @@ def test_worker_cleans_expired_live_observation_state(
         "live_cleanup_offers_deleted": 1,
         "live_cleanup_idempotency_deleted": 1,
         "deal_candidates_deleted": 1,
+        "agent_operations_recovered": 0,
     }
 
 

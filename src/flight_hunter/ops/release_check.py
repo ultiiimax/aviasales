@@ -60,6 +60,34 @@ STAGE_COMMANDS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+AGENT_ACCEPTANCE_COMMANDS: tuple[tuple[str, ...], ...] = (
+    (
+        "uv",
+        "run",
+        "pytest",
+        "tests/integration/test_agent_worker_recovery.py",
+        "tests/unit/api/test_agent_plan_api.py",
+        "tests/unit/application/test_agent_execution.py",
+        "tests/unit/application/test_agent_lifecycle.py",
+        "tests/unit/application/test_agent_planning.py",
+        "tests/unit/ops/test_application_metrics.py",
+        "tests/unit/application/test_worker_health.py",
+        "tests/unit/api/test_admin_worker_health_api.py",
+        "-q",
+        "--strict-markers",
+    ),
+    (
+        "uv",
+        "run",
+        "pytest",
+        "tests/e2e/test_agent_route_orchestrator.py",
+        "-q",
+        "-m",
+        "browser_e2e",
+        "--strict-markers",
+    ),
+)
+
 _BROWSER_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("uv", "run", "flight-hunter-browser-smoke"),
     (
@@ -135,6 +163,7 @@ def default_stages() -> tuple[str, ...]:
         "types",
         "migrations",
         "upgrade_migrations",
+        "agent_acceptance",
         "security",
         "compose",
         "health",
@@ -190,6 +219,8 @@ def _run_stage(
 ) -> ReleaseStageResult:
     if stage == "browser":
         commands = _BROWSER_COMMANDS
+    elif stage == "agent_acceptance":
+        commands = AGENT_ACCEPTANCE_COMMANDS
     elif stage == "docker_build":
         commands = _DOCKER_BUILD_COMMANDS
     else:
@@ -198,7 +229,12 @@ def _run_stage(
             return ReleaseStageResult.failed(stage, "unknown_stage")
         commands = (command,)
 
-    command_environment = _compose_environment(environ) if stage == "compose" else None
+    if stage == "compose":
+        command_environment = _compose_environment(environ)
+    elif stage == "agent_acceptance":
+        command_environment = _agent_acceptance_environment(environ)
+    else:
+        command_environment = None
     for index, command in enumerate(commands):
         try:
             completed = runner(command, env=command_environment)
@@ -225,6 +261,42 @@ def _compose_environment(environ: Mapping[str, str]) -> dict[str, str]:
             "AVIASALES_SEARCH_MARKER": "",
             "TELEGRAM_ENABLED": "false",
             "TELEGRAM_BOT_TOKEN": "",
+        }
+    )
+    return environment
+
+
+def _agent_acceptance_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    environment = dict(environ)
+    environment.update(
+        {
+            "APP_SECRET_KEY": secrets.token_urlsafe(48),
+            "AUTH_BOOTSTRAP_TOKEN": "",
+            "AUTH_ALLOW_LEGACY_HEADERS": "false",
+            "AGENT_PROVIDER": "deterministic_presets",
+            "AGENT_OPENAI_ENABLED": "false",
+            "AGENT_MCP_ENABLED": "false",
+            "AGENT_MCP_SERVER": "",
+            "AGENT_CODEX_CLI_ENABLED": "false",
+            "OPENAI_API_KEY": "",
+            "OPENAI_BASE_URL": "http://127.0.0.1:9",
+            "AVIASALES_SEARCH_ENABLED": "false",
+            "AVIASALES_SEARCH_SIGNATURE": "",
+            "AVIASALES_SEARCH_MARKER": "",
+            "TELEGRAM_ENABLED": "false",
+            "TELEGRAM_WEBHOOK_SECRET": "",
+            "TELEGRAM_BOT_TOKEN": "",
+            "PYTEST_ADDOPTS": "",
+            "FLIGHT_HUNTER_AGENT_ACCEPTANCE_FIXTURE_ONLY": "1",
+            "UV_OFFLINE": "1",
+            "HTTP_PROXY": "http://127.0.0.1:9",
+            "HTTPS_PROXY": "http://127.0.0.1:9",
+            "ALL_PROXY": "http://127.0.0.1:9",
+            "http_proxy": "http://127.0.0.1:9",
+            "https_proxy": "http://127.0.0.1:9",
+            "all_proxy": "http://127.0.0.1:9",
+            "NO_PROXY": "127.0.0.1,localhost,::1",
+            "no_proxy": "127.0.0.1,localhost,::1",
         }
     )
     return environment

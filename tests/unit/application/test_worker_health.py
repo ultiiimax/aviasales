@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from flight_hunter.application.worker_health import (
+    AgentOperationalHealthItem,
     WorkerControlState,
     WorkerHealthAlert,
     WorkerHealthItem,
@@ -62,6 +63,22 @@ def test_worker_health_prometheus_omits_job_ids_and_summaries() -> None:
                 message="telegram queue has stale locked work",
             ),
         ),
+        agent=AgentOperationalHealthItem(
+            operation_status_counts={"pending": 2, "leased": 1},
+            run_status_counts={"running": 1, "partial": 2},
+            due_operation_count=2,
+            oldest_due_operation_age_seconds=180,
+            circuit_state_counts={"closed": 1, "open": 1},
+            estimated_logical_operations=12,
+            actual_logical_operations=9,
+            estimated_http_attempts=24,
+            actual_http_attempts=15,
+            confirmed_candidates=4,
+            provider_denials=2,
+            terminal_run_count=2,
+            terminal_run_duration_seconds=17.5,
+            recovered_operations=3,
+        ),
     )
 
     metrics = render_worker_health_prometheus(snapshot)
@@ -79,5 +96,18 @@ def test_worker_health_prometheus_omits_job_ids_and_summaries() -> None:
         'flight_hunter_worker_alert_active{severity="critical",code="queue_stale_lock",'
         'subject_kind="queue",subject_id="telegram"} 1'
     ) in metrics
+    assert 'flight_hunter_agent_operation_items{state="pending"} 2' in metrics
+    assert 'flight_hunter_agent_run_items{status="partial"} 2' in metrics
+    assert "flight_hunter_agent_oldest_due_operation_age_seconds 180" in metrics
+    assert 'flight_hunter_agent_circuit_items{state="open"} 1' in metrics
+    assert 'flight_hunter_agent_logical_operations{kind="estimated"} 12' in metrics
+    assert 'flight_hunter_agent_logical_operations{kind="actual"} 9' in metrics
+    assert 'flight_hunter_agent_http_attempts{kind="estimated"} 24' in metrics
+    assert 'flight_hunter_agent_http_attempts{kind="actual"} 15' in metrics
+    assert "flight_hunter_agent_confirmed_candidates 4" in metrics
+    assert "flight_hunter_agent_provider_denials 2" in metrics
+    assert "flight_hunter_agent_recovered_operations 3" in metrics
+    assert "flight_hunter_agent_terminal_run_duration_seconds_count 2" in metrics
+    assert "flight_hunter_agent_terminal_run_duration_seconds_sum 17.5" in metrics
     assert "job-secret-123" not in metrics
     assert "secret-value" not in metrics

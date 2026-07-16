@@ -10,6 +10,8 @@ class _MetricState:
     counters: dict[tuple[str, tuple[tuple[str, str], ...]], float] = field(default_factory=dict)
     search_duration_count: int = 0
     search_duration_sum_seconds: float = 0.0
+    agent_run_duration_count: int = 0
+    agent_run_duration_sum_seconds: float = 0.0
 
 
 _STATE = _MetricState()
@@ -21,6 +23,8 @@ def reset_application_metrics() -> None:
         _STATE.counters.clear()
         _STATE.search_duration_count = 0
         _STATE.search_duration_sum_seconds = 0.0
+        _STATE.agent_run_duration_count = 0
+        _STATE.agent_run_duration_sum_seconds = 0.0
 
 
 def record_observability_metric(event: str, fields: Mapping[str, object]) -> None:
@@ -50,6 +54,10 @@ def record_observability_metric(event: str, fields: Mapping[str, object]) -> Non
                 "flight_hunter_alerts_sent_total",
                 {"reason": _label_field(fields, "reason")},
             )
+        elif event == "agent_run_finished":
+            _record_agent_run_finished(fields)
+        elif event == "agent_operation_finished":
+            _record_agent_operation_finished(fields)
 
 
 def render_application_metrics() -> str:
@@ -57,6 +65,8 @@ def render_application_metrics() -> str:
         counters = dict(_STATE.counters)
         search_duration_count = _STATE.search_duration_count
         search_duration_sum_seconds = _STATE.search_duration_sum_seconds
+        agent_run_duration_count = _STATE.agent_run_duration_count
+        agent_run_duration_sum_seconds = _STATE.agent_run_duration_sum_seconds
 
     lines = [
         "# HELP flight_hunter_provider_requests_total "
@@ -101,6 +111,67 @@ def render_application_metrics() -> str:
         ]
     )
     lines.extend(_counter_lines("flight_hunter_alerts_sent_total", counters))
+    lines.extend(
+        [
+            "# HELP flight_hunter_agent_runs_total Durable agent runs by terminal status.",
+            "# TYPE flight_hunter_agent_runs_total counter",
+        ]
+    )
+    lines.extend(_counter_lines("flight_hunter_agent_runs_total", counters))
+    lines.extend(
+        [
+            "# HELP flight_hunter_agent_operations_total Agent operations by outcome.",
+            "# TYPE flight_hunter_agent_operations_total counter",
+        ]
+    )
+    lines.extend(_counter_lines("flight_hunter_agent_operations_total", counters))
+    lines.extend(
+        [
+            "# HELP flight_hunter_agent_run_duration_seconds Agent run duration summary.",
+            "# TYPE flight_hunter_agent_run_duration_seconds summary",
+            "flight_hunter_agent_run_duration_seconds_count "
+            f"{_metric_number(agent_run_duration_count)}",
+            "flight_hunter_agent_run_duration_seconds_sum "
+            f"{_metric_number(agent_run_duration_sum_seconds)}",
+        ]
+    )
+    for metric_name, help_text in (
+        (
+            "flight_hunter_agent_logical_operations_estimated_total",
+            "Estimated logical operations approved by users.",
+        ),
+        (
+            "flight_hunter_agent_logical_operations_actual_total",
+            "Logical operations actually consumed.",
+        ),
+        (
+            "flight_hunter_agent_http_attempts_estimated_total",
+            "Estimated provider HTTP attempts approved by users.",
+        ),
+        (
+            "flight_hunter_agent_http_attempts_actual_total",
+            "Provider HTTP attempts actually consumed.",
+        ),
+        (
+            "flight_hunter_agent_useful_candidates_total",
+            "Confirmed useful candidates produced by terminal runs.",
+        ),
+        (
+            "flight_hunter_agent_provider_denials_total",
+            "Provider denials observed by terminal runs.",
+        ),
+        (
+            "flight_hunter_agent_recoveries_total",
+            "Expired operation leases recovered by workers.",
+        ),
+    ):
+        lines.extend(
+            [
+                f"# HELP {metric_name} {help_text}",
+                f"# TYPE {metric_name} counter",
+            ]
+        )
+        lines.extend(_counter_lines(metric_name, counters))
     return "\n".join(lines) + "\n"
 
 
@@ -125,6 +196,52 @@ def _record_provider_call(fields: Mapping[str, object]) -> None:
             "flight_hunter_provider_errors_total",
             {"provider": provider, "endpoint": endpoint, "error": error},
         )
+
+
+def _record_agent_run_finished(fields: Mapping[str, object]) -> None:
+    status = _enum_label_field(
+        fields,
+        "status",
+        allowed={"completed", "partial", "failed", "cancelled"},
+    )
+    _increment("flight_hunter_agent_runs_total", {"status": status})
+    duration_ms = _numeric_field(fields, "duration_ms", default=0)
+    _STATE.agent_run_duration_count += 1
+    _STATE.agent_run_duration_sum_seconds += max(duration_ms, 0) / 1000
+    for field_name, metric_name in (
+        (
+            "estimated_logical_operations",
+            "flight_hunter_agent_logical_operations_estimated_total",
+        ),
+        (
+            "actual_logical_operations",
+            "flight_hunter_agent_logical_operations_actual_total",
+        ),
+        (
+            "estimated_http_attempts",
+            "flight_hunter_agent_http_attempts_estimated_total",
+        ),
+        (
+            "actual_http_attempts",
+            "flight_hunter_agent_http_attempts_actual_total",
+        ),
+        ("useful_candidates", "flight_hunter_agent_useful_candidates_total"),
+    ):
+        amount = max(_numeric_field(fields, field_name, default=0), 0)
+        _increment(metric_name, {}, amount=amount)
+
+
+def _record_agent_operation_finished(fields: Mapping[str, object]) -> None:
+    status = _enum_label_field(
+        fields,
+        "status",
+        allowed={"succeeded", "retry_wait", "failed", "skipped"},
+    )
+    _increment("flight_hunter_agent_operations_total", {"status": status})
+    if fields.get("recovered_expired_lease") is True:
+        _increment("flight_hunter_agent_recoveries_total", {})
+    if fields.get("provider_denied") is True:
+        _increment("flight_hunter_agent_provider_denials_total", {})
 
 
 def _increment(name: str, labels: Mapping[str, str], *, amount: float = 1.0) -> None:
@@ -158,6 +275,16 @@ def _optional_label_field(fields: Mapping[str, object], key: str) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _enum_label_field(
+    fields: Mapping[str, object],
+    key: str,
+    *,
+    allowed: set[str],
+) -> str:
+    value = _label_field(fields, key)
+    return value if value in allowed else "unknown"
 
 
 def _numeric_field(fields: Mapping[str, object], key: str, *, default: float) -> float:

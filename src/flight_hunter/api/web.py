@@ -834,6 +834,10 @@ def render_index_html() -> str:
               <h4 id="agent-fare-analysis-heading">Анализ цены</h4>
               <div id="agent-fare-analysis-list">Анализ ещё не рассчитан.</div>
             </section>
+            <section class="agent-plan-region" id="agent-confirmed-results" aria-labelledby="agent-confirmed-results-heading" hidden>
+              <h4 id="agent-confirmed-results-heading">Подтверждённые варианты</h4>
+              <div id="agent-confirmed-results-list">Подтверждённых вариантов ещё нет.</div>
+            </section>
             <section class="agent-plan-region" id="agent-risky-results" aria-labelledby="agent-risky-results-heading" hidden>
               <h4 id="agent-risky-results-heading">Hidden-city исследования</h4>
               <div id="agent-risky-results-list">Нет подтверждённых рискованных вариантов.</div>
@@ -1008,11 +1012,14 @@ def render_index_html() -> str:
     let watchRecords = [];
     let currentAgentPlan = null;
     let currentAgentRun = null;
+    let agentExecuteInFlight = false;
+    let agentExecuteGeneration = 0;
     let lastAgentPrompt = "";
     let agentEditMode = false;
     let agentSessionGeneration = 0;
     const sessionTokenKey = "flight_hunter_session_token";
     const agentPlanStorageKey = "flight_hunter_agent_plan_id_v1";
+    const agentRunStorageKey = "flight_hunter_agent_run_id_v1";
 
     const manualConfirmationActions = [
       {status: "confirmed", label: "Совпала"},
@@ -1082,6 +1089,8 @@ def render_index_html() -> str:
       agentSessionGeneration += 1;
       currentAgentPlan = null;
       currentAgentRun = null;
+      agentExecuteGeneration += 1;
+      agentExecuteInFlight = false;
       agentEditMode = false;
       lastAgentPrompt = "";
       document.getElementById("agent-plan-card").hidden = true;
@@ -1101,12 +1110,14 @@ def render_index_html() -> str:
         "agent-plan-expiry",
         "agent-run-progress",
         "agent-fare-analysis-list",
+        "agent-confirmed-results-list",
         "agent-risky-results-list",
         "agent-partial-errors"
       ].forEach((id) => {
         document.getElementById(id).textContent = "";
       });
       document.getElementById("agent-plan-execute").disabled = true;
+      document.getElementById("agent-plan-execute").setAttribute("aria-busy", "false");
       document.getElementById("agent-hidden-city-warning").hidden = true;
       document.getElementById("agent-hidden-city-warning-list").replaceChildren();
       document.getElementById("agent-hidden-city-ack").checked = false;
@@ -1114,6 +1125,7 @@ def render_index_html() -> str:
       document.getElementById("agent-plan-edit").disabled = true;
       document.getElementById("agent-run-cancel").disabled = true;
       document.getElementById("agent-fare-analysis").hidden = true;
+      document.getElementById("agent-confirmed-results").hidden = true;
       document.getElementById("agent-risky-results").hidden = true;
       document.getElementById("agent-partial-errors").hidden = true;
       agentActionList.replaceChildren();
@@ -1124,6 +1136,8 @@ def render_index_html() -> str:
 
     function clearSession() {
       window.localStorage.removeItem(sessionTokenKey);
+      window.localStorage.removeItem(agentPlanStorageKey);
+      window.localStorage.removeItem(agentRunStorageKey);
       authState.textContent = "Session: не выполнен вход";
       authSignoutButton.disabled = true;
       renderSignedOutState();
@@ -2623,7 +2637,9 @@ def render_index_html() -> str:
       });
 
       const executeButton = document.getElementById("agent-plan-execute");
-      executeButton.disabled = !executeReady || (hiddenCityEnabled && !warningAck.checked);
+      executeButton.disabled = agentExecuteInFlight
+        || !executeReady
+        || (hiddenCityEnabled && !warningAck.checked);
       executeButton.title = executeReady && !hiddenCityEnabled
         ? "Запустить ровно эту замороженную ревизию"
         : hiddenCityEnabled
@@ -2638,6 +2654,9 @@ def render_index_html() -> str:
       editButton.disabled = !editReady;
       editButton.title = editReady ? "Уточнить запрос и создать новую ревизию" : "Ревизия закрыта";
       document.getElementById("agent-risky-results").hidden = !hiddenCityEnabled;
+      document.getElementById("agent-confirmed-results").hidden = true;
+      document.getElementById("agent-confirmed-results-list").textContent =
+        "Подтверждённых вариантов ещё нет.";
       document.getElementById("agent-risky-results-list").textContent = hiddenCityEnabled
         ? "Подтверждённых вариантов ещё нет. Рискованные варианты не смешиваются с обычными."
         : "Нет подтверждённых рискованных вариантов.";
@@ -2753,6 +2772,7 @@ def render_index_html() -> str:
 
     function renderAgentRun(run) {
       currentAgentRun = run;
+      window.localStorage.setItem(agentRunStorageKey, String(run.run_id));
       const progress = document.getElementById("agent-run-progress");
       const cancelButton = document.getElementById("agent-run-cancel");
       const partialErrors = document.getElementById("agent-partial-errors");
@@ -2927,8 +2947,56 @@ def render_index_html() -> str:
       }
     }
 
+    function renderAgentConfirmedResults(results) {
+      const region = document.getElementById("agent-confirmed-results");
+      const list = document.getElementById("agent-confirmed-results-list");
+      const candidates = results.candidates || [];
+      list.replaceChildren();
+      region.hidden = results.state === "not_ready";
+      if (results.state !== "ready" || candidates.length === 0) {
+        list.textContent = results.state === "unavailable"
+          ? "Подтверждённые результаты недоступны: evidence не прошли проверку."
+          : "Подтверждённых вариантов нет.";
+        return;
+      }
+      candidates.forEach((candidate, index) => {
+        const card = document.createElement("article");
+        card.className = "agent-hidden-city-result";
+        const title = document.createElement("strong");
+        const amount = candidate.total_amount || {};
+        title.textContent =
+          `${index + 1}. ${formatMinorAmount(amount.minor_units, amount.currency)}`;
+        const facts = document.createElement("div");
+        facts.className = "small";
+        const sources = (candidate.sources || []).join(", ") || "источник неизвестен";
+        facts.textContent =
+          `${candidate.passengers} пасс. · CONFIRMED`
+          + ` · ${sources}`
+          + ` · наблюдалось ${candidate.observed_at || "неизвестно"}`;
+        const route = document.createElement("div");
+        route.className = "small";
+        route.textContent = (candidate.ordered_legs || [])
+          .map((leg) => `${leg.origin}→${leg.destination}`)
+          .join(" · ") || "Маршрут подтверждён evidence.";
+        const boundaries = document.createElement("div");
+        boundaries.className = "small";
+        boundaries.textContent = (candidate.ticket_boundaries || []).length > 1
+          ? `${candidate.ticket_boundaries.length} отдельных билета; self-transfer виден заранее.`
+          : "Один билет или граница билета не требует отдельного предупреждения.";
+        const reasons = document.createElement("div");
+        reasons.className = "small";
+        const rankingReasons = (candidate.rankings || [])
+          .flatMap((ranking) => ranking.reasons || []);
+        reasons.textContent = rankingReasons.join(" · ")
+          || "Ранжирование выполнено по подтверждённым фактам.";
+        card.append(title, facts, route, boundaries, reasons);
+        list.append(card);
+      });
+    }
+
     function renderAgentRunResults(results) {
       renderAgentFareAnalysis(results.analysis);
+      renderAgentConfirmedResults(results);
       const region = document.getElementById("agent-risky-results");
       const list = document.getElementById("agent-risky-results-list");
       const candidates = results.hidden_city_candidates || [];
@@ -3101,6 +3169,7 @@ def render_index_html() -> str:
     }
 
     async function executeAgentPlan() {
+      if (agentExecuteInFlight) return;
       const summary = currentAgentPlan ? currentAgentPlan.summary || {} : {};
       const hiddenCityEnabled = summary.hidden_city_enabled === true;
       const hiddenCityAcknowledged = document.getElementById("agent-hidden-city-ack").checked;
@@ -3112,35 +3181,54 @@ def render_index_html() -> str:
       ) return;
       const sessionGeneration = agentSessionGeneration;
       const plan = currentAgentPlan;
-      const response = await agentSessionFetch(
-        `${agentPlanUrl(plan.plan_id)}/execute`,
-        {
-          method: "POST",
-          headers: authHeaders({
-            "Content-Type": "application/json",
-            "Idempotency-Key": freshIdempotencyKey()
-          }),
-          body: JSON.stringify({
-            revision_id: plan.revision_id,
-            expected_revision: plan.revision,
-            content_hash: plan.content_hash,
-            hidden_city_warning_version: hiddenCityEnabled
-              ? summary.hidden_city_warning_version
-              : null
-          })
-        },
-        sessionGeneration
-      );
-      if (!response) return;
-      if (!response.ok) {
-        const message = await codedMessage(response);
+      const executeButton = document.getElementById("agent-plan-execute");
+      const executeGeneration = ++agentExecuteGeneration;
+      agentExecuteInFlight = true;
+      executeButton.disabled = true;
+      executeButton.setAttribute("aria-busy", "true");
+      try {
+        const response = await agentSessionFetch(
+          `${agentPlanUrl(plan.plan_id)}/execute`,
+          {
+            method: "POST",
+            headers: authHeaders({
+              "Content-Type": "application/json",
+              "Idempotency-Key": freshIdempotencyKey()
+            }),
+            body: JSON.stringify({
+              revision_id: plan.revision_id,
+              expected_revision: plan.revision,
+              content_hash: plan.content_hash,
+              hidden_city_warning_version: hiddenCityEnabled
+                ? summary.hidden_city_warning_version
+                : null
+            })
+          },
+          sessionGeneration
+        );
+        if (!response) return;
+        if (!response.ok) {
+          const message = await codedMessage(response);
+          if (!agentSessionIsCurrent(sessionGeneration)) return;
+          throw new Error(message);
+        }
+        const run = await response.json();
         if (!agentSessionIsCurrent(sessionGeneration)) return;
-        throw new Error(message);
+        renderAgentRun(run);
+        await reloadAgentPlan();
+      } finally {
+        if (executeGeneration !== agentExecuteGeneration) return;
+        agentExecuteInFlight = false;
+        executeButton.setAttribute("aria-busy", "false");
+        if (agentSessionIsCurrent(sessionGeneration) && currentAgentPlan) {
+          const currentSummary = currentAgentPlan.summary || {};
+          const needsHiddenCityAck = currentSummary.hidden_city_enabled === true
+            && !document.getElementById("agent-hidden-city-ack").checked;
+          executeButton.disabled = currentAgentPlan.state !== "awaiting_approval"
+            || !currentAgentPlan.executable
+            || needsHiddenCityAck;
+        }
       }
-      const run = await response.json();
-      if (!agentSessionIsCurrent(sessionGeneration)) return;
-      renderAgentRun(run);
-      await reloadAgentPlan();
     }
 
     async function cloneAgentPlanAsFull() {
@@ -3184,6 +3272,7 @@ def render_index_html() -> str:
       if (!sessionToken()) return;
       const sessionGeneration = agentSessionGeneration;
       const storedPlanId = window.localStorage.getItem(agentPlanStorageKey);
+      const storedRunId = window.localStorage.getItem(agentRunStorageKey);
       if (!storedPlanId) return;
       const response = await agentSessionFetch(
         agentPlanUrl(storedPlanId),
@@ -3193,6 +3282,7 @@ def render_index_html() -> str:
       if (!response) return;
       if (response.status === 404) {
         window.localStorage.removeItem(agentPlanStorageKey);
+        window.localStorage.removeItem(agentRunStorageKey);
         currentAgentPlan = null;
         currentAgentRun = null;
         document.getElementById("agent-plan-card").hidden = true;
@@ -3206,22 +3296,50 @@ def render_index_html() -> str:
       const plan = await response.json();
       if (!agentSessionIsCurrent(sessionGeneration)) return;
       renderAgentPlan(plan);
-      const runResponse = await agentSessionFetch(
-        `${agentPlanUrl(storedPlanId)}/runs/latest`,
-        {headers: authHeaders()},
-        sessionGeneration
-      );
-      if (!runResponse) return;
-      if (runResponse.status === 404) {
+      let run = null;
+      if (storedRunId) {
+        const storedRunResponse = await agentSessionFetch(
+          `${agentPlanUrl(storedPlanId)}/runs/${encodeURIComponent(storedRunId)}`,
+          {headers: authHeaders()},
+          sessionGeneration
+        );
+        if (!storedRunResponse) return;
+        if (storedRunResponse.status === 404) {
+          window.localStorage.removeItem(agentRunStorageKey);
+        } else if (!storedRunResponse.ok) {
+          const message = await codedMessage(storedRunResponse);
+          if (!agentSessionIsCurrent(sessionGeneration)) return;
+          throw new Error(message);
+        } else {
+          run = await storedRunResponse.json();
+          if (run.revision_id !== plan.revision_id) {
+            window.localStorage.removeItem(agentRunStorageKey);
+            run = null;
+          }
+        }
+      }
+      if (!run) {
+        const runListResponse = await agentSessionFetch(
+          `${agentPlanUrl(storedPlanId)}/runs`,
+          {headers: authHeaders()},
+          sessionGeneration
+        );
+        if (!runListResponse) return;
+        if (!runListResponse.ok) {
+          const message = await codedMessage(runListResponse);
+          if (!agentSessionIsCurrent(sessionGeneration)) return;
+          throw new Error(message);
+        }
+        const runList = await runListResponse.json();
+        run = (runList.runs || [])
+          .filter((item) => item.revision_id === plan.revision_id)
+          .at(-1) || null;
+      }
+      if (!run) {
+        window.localStorage.removeItem(agentRunStorageKey);
         renderAgentRunPlaceholder("Запуск ещё не создан.");
         return;
       }
-      if (!runResponse.ok) {
-        const message = await codedMessage(runResponse);
-        if (!agentSessionIsCurrent(sessionGeneration)) return;
-        throw new Error(message);
-      }
-      const run = await runResponse.json();
       if (!agentSessionIsCurrent(sessionGeneration)) return;
       renderAgentRun(run);
       if (["queued", "running", "cancel_requested"].includes(run.status)) {
@@ -3313,6 +3431,7 @@ def render_index_html() -> str:
 
     function renderAgentRunPlaceholder(message) {
       currentAgentRun = null;
+      window.localStorage.removeItem(agentRunStorageKey);
       document.getElementById("agent-run-progress").textContent = message;
       document.getElementById("agent-run-cancel").disabled = true;
       document.getElementById("agent-partial-errors").hidden = true;
@@ -3615,7 +3734,7 @@ def render_index_html() -> str:
       const executeReady = currentAgentPlan.state === "awaiting_approval"
         && currentAgentPlan.executable === true;
       document.getElementById("agent-plan-execute").disabled =
-        !executeReady || (hiddenCityEnabled && !event.target.checked);
+        agentExecuteInFlight || !executeReady || (hiddenCityEnabled && !event.target.checked);
     });
     document.getElementById("agent-plan-full").addEventListener("click", cloneAgentPlanAsFull);
     document.getElementById("agent-run-cancel").addEventListener("click", cancelAgentRun);

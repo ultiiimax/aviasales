@@ -49,6 +49,22 @@ def test_admin_worker_health_returns_durable_heartbeats_without_secrets(monkeypa
     assert queues["browser"]["warning_level"] == "drained"
     assert queues["telegram"]["stale_count"] == 1
     assert queues["telegram"]["warning_level"] == "stale"
+    assert body["agent"] == {
+        "operation_status_counts": {},
+        "run_status_counts": {},
+        "due_operation_count": 0,
+        "oldest_due_operation_age_seconds": None,
+        "circuit_state_counts": {},
+        "estimated_logical_operations": 0,
+        "actual_logical_operations": 0,
+        "estimated_http_attempts": 0,
+        "actual_http_attempts": 0,
+        "confirmed_candidates": 0,
+        "provider_denials": 0,
+        "terminal_run_count": 0,
+        "terminal_run_duration_seconds": 0.0,
+        "recovered_operations": 0,
+    }
     alerts = {(alert["code"], alert["subject_id"]): alert for alert in body["alerts"]}
     assert alerts[("worker_stale", "worker-a")]["severity"] == "critical"
     assert alerts[("queue_stale_lock", "telegram")]["severity"] == "critical"
@@ -71,6 +87,10 @@ def test_admin_worker_metrics_returns_prometheus_text_without_job_ids_or_summari
     assert "flight_hunter_worker_health_checked_at_seconds" in text
     assert 'flight_hunter_worker_info{worker_id="worker-a"' in text
     assert 'flight_hunter_worker_queue_items{lane="telegram",state="stale"} 1' in text
+    assert "flight_hunter_agent_oldest_due_operation_age_seconds" not in text
+    assert "flight_hunter_agent_confirmed_candidates 0" in text
+    assert "flight_hunter_agent_provider_denials 0" in text
+    assert "flight_hunter_agent_recovered_operations 0" in text
     assert (
         'flight_hunter_worker_alert_active{severity="critical",code="queue_stale_lock",'
         'subject_kind="queue",subject_id="telegram"} 1'

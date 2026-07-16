@@ -43,6 +43,15 @@ from flight_hunter.deals.searxng_client import SearxngClient
 from flight_hunter.domain.agent_evidence import DiscoverySignal
 from flight_hunter.domain.policy import ProviderPolicy
 from flight_hunter.notifications.alerts import AlertEvaluator
+from flight_hunter.ops.structured_logging import log_event
+from flight_hunter.persistence.agent_repositories import (
+    AGENT_PROVIDER_DENIAL_CODES,
+    AgentEvidenceRepository,
+    AgentOperationKind,
+    AgentOperationRepository,
+    AgentOperationResultType,
+    AgentRunRepository,
+)
 from flight_hunter.persistence.database import create_database_engine
 from flight_hunter.persistence.repositories import (
     AlertDedupeRepository,
@@ -152,6 +161,7 @@ class WorkerRunSummary:
     live_cleanup_offers_deleted: int
     live_cleanup_idempotency_deleted: int
     deal_candidates_deleted: int
+    agent_operations_recovered: int = 0
 
     def merge(self, other: WorkerRunSummary) -> WorkerRunSummary:
         return WorkerRunSummary(
@@ -230,6 +240,8 @@ class WorkerRunSummary:
             live_cleanup_idempotency_deleted=self.live_cleanup_idempotency_deleted
             + other.live_cleanup_idempotency_deleted,
             deal_candidates_deleted=self.deal_candidates_deleted + other.deal_candidates_deleted,
+            agent_operations_recovered=self.agent_operations_recovered
+            + other.agent_operations_recovered,
         )
 
     def to_dict(self) -> dict[str, int]:
@@ -282,6 +294,7 @@ class WorkerRunSummary:
             "live_cleanup_offers_deleted": self.live_cleanup_offers_deleted,
             "live_cleanup_idempotency_deleted": self.live_cleanup_idempotency_deleted,
             "deal_candidates_deleted": self.deal_candidates_deleted,
+            "agent_operations_recovered": self.agent_operations_recovered,
         }
 
 
@@ -649,6 +662,7 @@ async def run_once(
             try:
                 agent_step = await executor_factory(session, settings, worker_id).run_next()
                 await session.commit()
+                await _record_agent_observability(session, agent_step)
             except Exception:
                 agent_failed = True
                 _LOGGER.error("worker_failure class=agent_execution code=agent_worker_unexpected")
@@ -762,6 +776,7 @@ async def run_once(
             agent_operations_retry_scheduled=int(agent_step.operation_status == "retry_wait"),
             agent_operations_failed=int(agent_step.operation_status == "failed"),
             agent_operations_skipped=int(agent_step.operation_status == "skipped"),
+            agent_operations_recovered=int(bool(getattr(agent_step, "recovered_operation", False))),
             agent_runs_completed=int(agent_step.run_status == "completed"),
             agent_runs_partial=int(agent_step.run_status == "partial"),
             agent_runs_failed=int(agent_step.run_status == "failed"),
@@ -1051,6 +1066,80 @@ def _empty_worker_summary() -> WorkerRunSummary:
         live_cleanup_offers_deleted=0,
         live_cleanup_idempotency_deleted=0,
         deal_candidates_deleted=0,
+        agent_operations_recovered=0,
+    )
+
+
+async def _record_agent_observability(
+    session: AsyncSession,
+    step: AgentExecutionStep,
+) -> None:
+    recovered_operation = bool(getattr(step, "recovered_operation", False))
+    if step.operation_claimed:
+        operation_error_code = getattr(step, "operation_error_code", None)
+        log_event(
+            "agent_operation_finished",
+            status=step.operation_status,
+            recovered_expired_lease=recovered_operation,
+            error_code=operation_error_code,
+            provider_denied=operation_error_code in AGENT_PROVIDER_DENIAL_CODES,
+        )
+    terminal_transitioned = bool(getattr(step, "terminal_transitioned", False))
+    household_id = getattr(step, "household_id", None)
+    run_id = getattr(step, "run_id", None)
+    if (
+        not terminal_transitioned
+        or not isinstance(household_id, UUID)
+        or not isinstance(run_id, UUID)
+    ):
+        return
+    run = await AgentRunRepository(session).get_run(household_id, run_id)
+    if run is None or run.finished_at is None:
+        return
+    operations = await AgentOperationRepository(session).list_operations(
+        household_id,
+        run_id,
+    )
+    evidence = await AgentEvidenceRepository(session).list_confirmed_evidence(
+        household_id,
+        run_id,
+    )
+    ranker_version: str | None = None
+    ranking_operation = next(
+        (
+            operation
+            for operation in operations
+            if operation.kind is AgentOperationKind.RANKING
+            and operation.result_type is AgentOperationResultType.RANKING_SNAPSHOT
+            and operation.result_id is not None
+        ),
+        None,
+    )
+    if ranking_operation is not None and ranking_operation.result_id is not None:
+        ranking = await AgentEvidenceRepository(session).get_ranking_snapshot(
+            household_id,
+            ranking_operation.result_id,
+        )
+        raw_ranker_version = ranking.ranking.get("version") if ranking is not None else None
+        if isinstance(raw_ranker_version, str):
+            ranker_version = raw_ranker_version
+    started_at = run.started_at or run.created_at
+    duration_ms = max(0, round((run.finished_at - started_at).total_seconds() * 1000))
+    log_event(
+        "agent_run_finished",
+        household_id=run.household_id,
+        plan_id=run.plan_id,
+        run_id=run.id,
+        status=run.status,
+        error_code=run.error_code,
+        ranker_version=ranker_version,
+        duration_ms=duration_ms,
+        estimated_logical_operations=run.logical_operation_budget,
+        actual_logical_operations=run.logical_operations_consumed,
+        estimated_http_attempts=run.http_attempt_budget,
+        actual_http_attempts=run.http_attempts_consumed,
+        useful_candidates=len(evidence),
+        provider_denials=sum(operation.provider_denial_count for operation in operations),
     )
 
 

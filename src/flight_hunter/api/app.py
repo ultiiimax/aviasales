@@ -98,6 +98,7 @@ from flight_hunter.application.watch_service import (
     WatchService,
 )
 from flight_hunter.application.worker_health import (
+    AgentOperationalHealthItem,
     WorkerControlService,
     WorkerControlState,
     WorkerHealthAlert,
@@ -154,6 +155,7 @@ from flight_hunter.notifications.telegram import (
 )
 from flight_hunter.ops.application_metrics import render_application_metrics
 from flight_hunter.ops.structured_logging import log_event
+from flight_hunter.persistence.agent_repositories import AgentOperationalHealthRepository
 from flight_hunter.persistence.database import create_database_engine, current_alembic_head
 from flight_hunter.persistence.repositories import (
     AgentAuditRepository,
@@ -400,6 +402,23 @@ class AdminWorkerHealthAlertResponse(BaseModel):
     message: str
 
 
+class AdminAgentOperationalHealthResponse(BaseModel):
+    operation_status_counts: dict[str, int]
+    run_status_counts: dict[str, int]
+    due_operation_count: int
+    oldest_due_operation_age_seconds: int | None
+    circuit_state_counts: dict[str, int]
+    estimated_logical_operations: int
+    actual_logical_operations: int
+    estimated_http_attempts: int
+    actual_http_attempts: int
+    confirmed_candidates: int
+    provider_denials: int
+    terminal_run_count: int
+    terminal_run_duration_seconds: float
+    recovered_operations: int
+
+
 class AdminWorkerHealthResponse(BaseModel):
     checked_at: str
     workers_limit: int
@@ -408,6 +427,7 @@ class AdminWorkerHealthResponse(BaseModel):
     workers: list[AdminWorkerHealthItemResponse]
     queues: list[AdminWorkerQueueHealthResponse]
     alerts: list[AdminWorkerHealthAlertResponse]
+    agent: AdminAgentOperationalHealthResponse
 
 
 class AdminWorkerControlUpdateRequest(BaseModel):
@@ -1357,9 +1377,16 @@ def create_app(
         return ReadyResponse(status="ready", database="ok")
 
     @app.get("/api/v1/metrics", response_class=PlainTextResponse)
-    def application_metrics() -> PlainTextResponse:
+    async def application_metrics() -> PlainTextResponse:
+        async with session_factory() as session:
+            durable_snapshot = await WorkerHealthService(
+                heartbeats=WorkerHeartbeatRepository(session),
+                queues=WorkerQueueHealthRepository(session),
+                control=WorkerControlRepository(session),
+                agent_health=AgentOperationalHealthRepository(session),
+            ).snapshot()
         return PlainTextResponse(
-            render_application_metrics(),
+            render_application_metrics() + render_worker_health_prometheus(durable_snapshot),
             media_type="text/plain; version=0.0.4",
         )
 
@@ -1699,6 +1726,7 @@ def create_app(
                 heartbeats=WorkerHeartbeatRepository(session),
                 queues=WorkerQueueHealthRepository(session),
                 control=WorkerControlRepository(session),
+                agent_health=AgentOperationalHealthRepository(session),
             ).snapshot(limit=workers_limit, offset=workers_offset)
         return AdminWorkerHealthResponse(
             checked_at=snapshot.checked_at.isoformat(),
@@ -1708,6 +1736,7 @@ def create_app(
             workers=[_admin_worker_health_item_response(worker) for worker in snapshot.workers],
             queues=[_admin_worker_queue_health_response(queue) for queue in snapshot.queues],
             alerts=[_admin_worker_health_alert_response(alert) for alert in snapshot.alerts],
+            agent=_admin_agent_operational_health_response(snapshot.agent),
         )
 
     @app.get("/api/v1/admin/workers/metrics", response_class=PlainTextResponse)
@@ -1720,6 +1749,7 @@ def create_app(
                 heartbeats=WorkerHeartbeatRepository(session),
                 queues=WorkerQueueHealthRepository(session),
                 control=WorkerControlRepository(session),
+                agent_health=AgentOperationalHealthRepository(session),
             ).snapshot(limit=workers_limit, offset=workers_offset)
         return PlainTextResponse(
             render_worker_health_prometheus(snapshot),
@@ -4087,6 +4117,29 @@ def _admin_worker_health_alert_response(
         subject_kind=alert.subject_kind,
         subject_id=alert.subject_id,
         message=alert.message,
+    )
+
+
+def _admin_agent_operational_health_response(
+    agent: AgentOperationalHealthItem | None,
+) -> AdminAgentOperationalHealthResponse:
+    if agent is None:
+        raise RuntimeError("agent operational health is unavailable")
+    return AdminAgentOperationalHealthResponse(
+        operation_status_counts=dict(agent.operation_status_counts),
+        run_status_counts=dict(agent.run_status_counts),
+        due_operation_count=agent.due_operation_count,
+        oldest_due_operation_age_seconds=agent.oldest_due_operation_age_seconds,
+        circuit_state_counts=dict(agent.circuit_state_counts),
+        estimated_logical_operations=agent.estimated_logical_operations,
+        actual_logical_operations=agent.actual_logical_operations,
+        estimated_http_attempts=agent.estimated_http_attempts,
+        actual_http_attempts=agent.actual_http_attempts,
+        confirmed_candidates=agent.confirmed_candidates,
+        provider_denials=agent.provider_denials,
+        terminal_run_count=agent.terminal_run_count,
+        terminal_run_duration_seconds=agent.terminal_run_duration_seconds,
+        recovered_operations=agent.recovered_operations,
     )
 
 

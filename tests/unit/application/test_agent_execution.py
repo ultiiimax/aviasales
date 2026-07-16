@@ -4911,7 +4911,7 @@ async def test_http_reservation_is_durable_before_uncaught_process_crash(
             clock,
             durability_checkpoint=recovered_session.commit,
         )
-        await recovered.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+        recovery_step = await recovered.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
         await recovered_session.commit()
         after_retry = await AgentRunRepository(recovered_session).get_run(
             HOUSEHOLD_ID,
@@ -4919,6 +4919,7 @@ async def test_http_reservation_is_durable_before_uncaught_process_crash(
         )
 
     assert after_retry is not None and after_retry.http_attempts_consumed == 2
+    assert recovery_step.recovered_operation is True
     assert len(gateway.start_calls) == 2
     await engine.dispose()
 

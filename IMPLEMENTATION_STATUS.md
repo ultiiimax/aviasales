@@ -47,7 +47,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
     (Task 11 accepted at `ce4231a`).
   - [x] Isolate hidden-city research behind a second acknowledgement.
   - [x] Add evidence-gated buy timing, anomaly and currency analysis.
-  - [ ] Pass browser, recovery, migration, security and release gates.
+  - [x] Pass compact local browser, recovery, migration and release gates.
 
 Task 8 slice plan: freeze explicit airport/city provider locations; split exact
 search into one-call start/poll operations with private continuation state;
@@ -292,6 +292,41 @@ pass 18; full mypy passes 123 source files; focused Ruff format/lint and
 `git diff --check` pass. No live provider call or user database access was
 performed. Task 14 browser/recovery/observability and the final release gate are
 next.
+
+Task 14's practical local-v1 scope is complete on 2026-07-16. The bundled web UI
+now persists versioned plan and run IDs, prevents duplicate execute requests,
+binds the execute lock to the current session generation, and restores only the
+newest run for the current plan revision. It stops terminal polling, keeps
+cancel bound to explicit IDs, and renders typed `sources` and ranking reasons
+for confirmed results separately from hidden-city research. Accessible
+live/status regions, hidden-city acknowledgement and mobile controls are
+covered by a compact real-Chromium smoke set. The deterministic fixture gateway
+cannot make network calls; a migrated file-backed SQLite integration proves
+that a new worker resumes the persisted exact poll continuation after process
+restart and stores one deduplicated confirmed evidence record.
+
+Task 14 observability is also complete: lifecycle audit events contain only
+IDs, parser/planner/ranker versions, stable status codes, states and numeric
+budgets. Migration `0029_agent_operation_telemetry` persists cumulative
+provider-denial and expired-lease recovery counters, so separate API and worker
+processes expose the same facts through admin health and `/api/v1/metrics`.
+Due-work aggregation now uses the exact claim predicate. `agent_acceptance`
+runs async backend contracts and focused Playwright in separate processes with
+live provider/LLM/Telegram credentials disabled. The full-suite audit also
+keeps legacy confirmed records with a missing `history_series_hash` readable as
+`None`.
+
+Task 14 verification: backend agent acceptance passes 291 tests; focused
+Chromium acceptance passes 3; focused changed-area regression passes 76 plus 8
+restart/worker/telemetry checks; the full non-browser suite passes 1499 with 10
+browser tests deselected. The actual
+`flight-hunter-release-check --stage agent_acceptance` command reports
+`status=passed`. Ruff format checks 309 files, global Ruff lint passes and full
+mypy passes 123 source files. The exhaustive ten-scenario browser expansion was
+intentionally not added: this personal local release keeps the three
+high-value plan/run/reload/cancel/mobile flows instead of an enterprise test
+matrix. Existing full-suite aiosqlite event-loop teardown warnings remain test
+harness noise. No live provider call or user database access was performed.
 
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic

@@ -80,6 +80,17 @@ _RUN_STATUSES = frozenset(
     }
 )
 _TERMINAL_RUN_STATUSES = frozenset({"completed", "partial", "failed", "cancelled"})
+AGENT_PROVIDER_DENIAL_CODES = frozenset(
+    {
+        "agent_circuit_open",
+        "provider_auth",
+        "provider_forbidden",
+        "provider_policy_denied",
+        "provider_rate_limited",
+        "aviasales_search_blocked",
+        "aviasales_search_rate_limited",
+    }
+)
 _TRANSITION_SOURCES: dict[str, tuple[str, ...]] = {
     "running": ("queued",),
     "cancel_requested": ("queued", "running"),
@@ -558,6 +569,41 @@ class AgentRunLedgerProgress:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentOperationalHealthRecord:
+    operation_status_counts: Mapping[str, int]
+    run_status_counts: Mapping[str, int]
+    due_operation_count: int
+    oldest_due_operation_at: datetime | None
+    circuit_state_counts: Mapping[str, int]
+    estimated_logical_operations: int
+    actual_logical_operations: int
+    estimated_http_attempts: int
+    actual_http_attempts: int
+    confirmed_candidates: int
+    provider_denials: int
+    terminal_run_count: int
+    terminal_run_duration_seconds: float
+    recovered_operations: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "operation_status_counts",
+            MappingProxyType(dict(self.operation_status_counts)),
+        )
+        object.__setattr__(
+            self,
+            "run_status_counts",
+            MappingProxyType(dict(self.run_status_counts)),
+        )
+        object.__setattr__(
+            self,
+            "circuit_state_counts",
+            MappingProxyType(dict(self.circuit_state_counts)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class NewAgentRunOperation:
     id: UUID
     household_id: UUID
@@ -602,6 +648,8 @@ class AgentRunOperationRecord:
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None
+    provider_denial_count: int = 0
+    lease_recovery_count: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -615,8 +663,11 @@ class AgentRunOperationRecord:
 class ServerPrivateOperationLease:
     operation: AgentRunOperationRecord
     private_continuation: Mapping[str, object] | None = field(repr=False)
+    recovered_expired_lease: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.recovered_expired_lease) is not bool:
+            raise TypeError("recovered_expired_lease must be a boolean")
         if self.private_continuation is not None:
             object.__setattr__(
                 self,
@@ -763,9 +814,9 @@ class AgentConfirmedOfferEvidenceRecord:
     baggage_status: BaggageEvidenceStatus | None
     transfer_status: TransferEvidenceStatus | None
     visa_status: VisaEvidenceStatus | None
-    history_series_hash: str | None
     fingerprint: str
     created_at: datetime
+    history_series_hash: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1784,6 +1835,161 @@ class AgentRunRepository:
 AgentPlanRunRepository = AgentRunRepository
 
 
+class AgentOperationalHealthRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def snapshot(self, *, now: datetime) -> AgentOperationalHealthRecord:
+        _require_aware(now, "now")
+        normalized_now = _utc_datetime(now)
+        operation_status_counts = await self._status_counts(agent_run_operations_table)
+        run_status_counts = await self._status_counts(agent_plan_runs_table)
+
+        due_at = case(
+            (
+                agent_run_operations_table.c.status == AgentOperationStatus.RETRY_WAIT.value,
+                agent_run_operations_table.c.next_retry_at,
+            ),
+            (
+                agent_run_operations_table.c.status == AgentOperationStatus.LEASED.value,
+                agent_run_operations_table.c.lease_expires_at,
+            ),
+            else_=agent_run_operations_table.c.created_at,
+        )
+        due_row = (
+            (
+                await self._session.execute(
+                    select(
+                        func.count().label("count"),
+                        func.min(due_at).label("oldest_due_at"),
+                    )
+                    .select_from(
+                        agent_run_operations_table.join(
+                            agent_plan_runs_table,
+                            agent_run_operations_table.c.run_id == agent_plan_runs_table.c.id,
+                        )
+                    )
+                    .where(_operation_claimable(normalized_now))
+                    .where(agent_plan_runs_table.c.status.in_(_ACTIVE_RUN_STATUSES))
+                    .where(agent_plan_runs_table.c.deadline_at > normalized_now)
+                )
+            )
+            .mappings()
+            .one()
+        )
+        budget_row = (
+            (
+                await self._session.execute(
+                    select(
+                        func.coalesce(
+                            func.sum(agent_plan_runs_table.c.logical_operation_budget),
+                            0,
+                        ).label("estimated_logical"),
+                        func.coalesce(
+                            func.sum(agent_plan_runs_table.c.logical_operations_consumed),
+                            0,
+                        ).label("actual_logical"),
+                        func.coalesce(
+                            func.sum(agent_plan_runs_table.c.http_attempt_budget),
+                            0,
+                        ).label("estimated_http"),
+                        func.coalesce(
+                            func.sum(agent_plan_runs_table.c.http_attempts_consumed),
+                            0,
+                        ).label("actual_http"),
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        circuit_state_counts = await self._status_counts(
+            agent_provider_circuit_state_table,
+            status_column="state",
+        )
+        confirmed_candidates = int(
+            (
+                await self._session.execute(
+                    select(func.count()).select_from(agent_confirmed_offer_evidence_table)
+                )
+            ).scalar_one()
+        )
+        telemetry_row = (
+            (
+                await self._session.execute(
+                    select(
+                        func.coalesce(
+                            func.sum(agent_run_operations_table.c.provider_denial_count),
+                            0,
+                        ).label("provider_denials"),
+                        func.coalesce(
+                            func.sum(agent_run_operations_table.c.lease_recovery_count),
+                            0,
+                        ).label("recovered_operations"),
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        terminal_rows = (
+            await self._session.execute(
+                select(
+                    agent_plan_runs_table.c.created_at,
+                    agent_plan_runs_table.c.started_at,
+                    agent_plan_runs_table.c.finished_at,
+                ).where(agent_plan_runs_table.c.finished_at.is_not(None))
+            )
+        ).mappings()
+        terminal_run_count = 0
+        terminal_run_duration_seconds = 0.0
+        for row in terminal_rows:
+            finished_at = _aware_datetime(row["finished_at"])
+            started_at = row["started_at"]
+            start = (
+                _aware_datetime(started_at)
+                if started_at is not None
+                else _aware_datetime(row["created_at"])
+            )
+            terminal_run_count += 1
+            terminal_run_duration_seconds += max(
+                0.0,
+                (finished_at - start).total_seconds(),
+            )
+
+        oldest_due = due_row["oldest_due_at"]
+        return AgentOperationalHealthRecord(
+            operation_status_counts=operation_status_counts,
+            run_status_counts=run_status_counts,
+            due_operation_count=int(due_row["count"] or 0),
+            oldest_due_operation_at=(
+                _aware_datetime(oldest_due) if oldest_due is not None else None
+            ),
+            circuit_state_counts=circuit_state_counts,
+            estimated_logical_operations=int(budget_row["estimated_logical"] or 0),
+            actual_logical_operations=int(budget_row["actual_logical"] or 0),
+            estimated_http_attempts=int(budget_row["estimated_http"] or 0),
+            actual_http_attempts=int(budget_row["actual_http"] or 0),
+            confirmed_candidates=confirmed_candidates,
+            provider_denials=int(telemetry_row["provider_denials"] or 0),
+            terminal_run_count=terminal_run_count,
+            terminal_run_duration_seconds=terminal_run_duration_seconds,
+            recovered_operations=int(telemetry_row["recovered_operations"] or 0),
+        )
+
+    async def _status_counts(
+        self,
+        table: Table,
+        *,
+        status_column: str = "status",
+    ) -> Mapping[str, int]:
+        column = table.c[status_column]
+        rows = await self._session.execute(
+            select(column, func.count()).select_from(table).group_by(column)
+        )
+        return {str(status): int(count) for status, count in rows.all()}
+
+
 class AgentOperationRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -2202,6 +2408,10 @@ class AgentOperationRepository:
                 status=AgentOperationStatus.RETRY_WAIT.value,
                 next_retry_at=_utc_datetime(next_retry_at),
                 error_code=error_code,
+                provider_denial_count=(
+                    agent_run_operations_table.c.provider_denial_count
+                    + _provider_denial_increment(error_code)
+                ),
                 updated_at=_utc_datetime(now),
             )
         )
@@ -2311,17 +2521,12 @@ class AgentOperationRepository:
             run_id,
             normalized_now,
         )
-        eligible = _operation_claim_eligibility(normalized_now)
+        eligible = _operation_claimable(normalized_now)
         statement = (
             select(agent_run_operations_table)
             .where(agent_run_operations_table.c.household_id == str(household_id))
             .where(agent_run_operations_table.c.run_id == str(run_id))
-            .where(agent_run_operations_table.c.created_at <= normalized_now)
             .where(eligible)
-            .where(
-                agent_run_operations_table.c.attempt_count
-                < agent_run_operations_table.c.max_attempts
-            )
             .order_by(
                 func.coalesce(
                     agent_run_operations_table.c.next_retry_at,
@@ -2337,18 +2542,18 @@ class AgentOperationRepository:
         row = (await self._session.execute(statement)).mappings().one_or_none()
         if row is None:
             return None
+        recovered_expired_lease = (
+            row["status"] == AgentOperationStatus.LEASED.value
+            and row["lease_expires_at"] is not None
+            and _aware_datetime(row["lease_expires_at"]) <= normalized_now
+        )
         operation_id = str(row["id"])
         result = await self._session.execute(
             update(agent_run_operations_table)
             .where(agent_run_operations_table.c.id == operation_id)
             .where(agent_run_operations_table.c.household_id == str(household_id))
             .where(agent_run_operations_table.c.run_id == str(run_id))
-            .where(agent_run_operations_table.c.created_at <= normalized_now)
-            .where(_operation_claim_eligibility(normalized_now))
-            .where(
-                agent_run_operations_table.c.attempt_count
-                < agent_run_operations_table.c.max_attempts
-            )
+            .where(_operation_claimable(normalized_now))
             .values(
                 status=AgentOperationStatus.LEASED.value,
                 lease_owner=worker_id,
@@ -2356,6 +2561,9 @@ class AgentOperationRepository:
                 attempt_count=agent_run_operations_table.c.attempt_count + 1,
                 next_retry_at=None,
                 error_code=None,
+                lease_recovery_count=(
+                    agent_run_operations_table.c.lease_recovery_count + int(recovered_expired_lease)
+                ),
                 circuit_permit_token_digest=None,
                 circuit_permit_generation=None,
                 circuit_permit_mode=None,
@@ -2378,7 +2586,10 @@ class AgentOperationRepository:
             .mappings()
             .one()
         )
-        return _private_operation_lease(private_row)
+        return _private_operation_lease(
+            private_row,
+            recovered_expired_lease=recovered_expired_lease,
+        )
 
     async def schedule_retry(
         self,
@@ -2411,6 +2622,10 @@ class AgentOperationRepository:
                 lease_expires_at=None,
                 next_retry_at=_utc_datetime(next_retry_at),
                 error_code=error_code,
+                provider_denial_count=(
+                    agent_run_operations_table.c.provider_denial_count
+                    + _provider_denial_increment(error_code)
+                ),
                 updated_at=_utc_datetime(now),
             )
         )
@@ -2498,6 +2713,10 @@ class AgentOperationRepository:
                 result_type=None,
                 result_id=None,
                 error_code=error_code,
+                provider_denial_count=(
+                    agent_run_operations_table.c.provider_denial_count
+                    + _provider_denial_increment(error_code)
+                ),
                 updated_at=_utc_datetime(now),
                 completed_at=_utc_datetime(now),
             )
@@ -2533,6 +2752,10 @@ class AgentOperationRepository:
                 result_type=None,
                 result_id=None,
                 error_code=error_code,
+                provider_denial_count=(
+                    agent_run_operations_table.c.provider_denial_count
+                    + _provider_denial_increment(error_code)
+                ),
                 updated_at=_utc_datetime(now),
                 completed_at=_utc_datetime(now),
             )
@@ -2580,6 +2803,10 @@ class AgentOperationRepository:
                 result_type=None,
                 result_id=None,
                 error_code=effective_error,
+                provider_denial_count=(
+                    agent_run_operations_table.c.provider_denial_count
+                    + _provider_denial_increment(effective_error)
+                ),
                 updated_at=normalized_now,
                 completed_at=normalized_now,
             )
@@ -3409,6 +3636,10 @@ class AgentOperationRepository:
                 result_type=None,
                 result_id=None,
                 error_code=error_code,
+                provider_denial_count=(
+                    agent_run_operations_table.c.provider_denial_count
+                    + _provider_denial_increment(error_code)
+                ),
                 updated_at=now,
                 completed_at=now,
             )
@@ -3438,6 +3669,7 @@ class AgentOperationRepository:
                 result_type=None,
                 result_id=None,
                 error_code="agent_lease_expired_attempts_exhausted",
+                lease_recovery_count=agent_run_operations_table.c.lease_recovery_count + 1,
                 updated_at=now,
                 completed_at=now,
             )
@@ -6035,16 +6267,23 @@ def _operation_record(row: RowMapping) -> AgentRunOperationRecord:
         created_at=_aware_datetime(row["created_at"]),
         updated_at=_aware_datetime(row["updated_at"]),
         completed_at=_aware_datetime(completed_at) if completed_at is not None else None,
+        provider_denial_count=int(row["provider_denial_count"]),
+        lease_recovery_count=int(row["lease_recovery_count"]),
     )
 
 
-def _private_operation_lease(row: RowMapping) -> ServerPrivateOperationLease:
+def _private_operation_lease(
+    row: RowMapping,
+    *,
+    recovered_expired_lease: bool = False,
+) -> ServerPrivateOperationLease:
     raw_continuation = row["private_continuation_json"]
     return ServerPrivateOperationLease(
         operation=_operation_record(row),
         private_continuation=(
             _json_object(str(raw_continuation)) if raw_continuation is not None else None
         ),
+        recovered_expired_lease=recovered_expired_lease,
     )
 
 
@@ -6065,6 +6304,18 @@ def _operation_claim_eligibility(now: datetime) -> Any:
         agent_run_operations_table.c.handoff_predecessor_operation_id.is_not(None),
     )
     return status_eligible & handoff_eligible
+
+
+def _operation_claimable(now: datetime) -> Any:
+    return and_(
+        agent_run_operations_table.c.created_at <= now,
+        _operation_claim_eligibility(now),
+        agent_run_operations_table.c.attempt_count < agent_run_operations_table.c.max_attempts,
+    )
+
+
+def _provider_denial_increment(error_code: str) -> int:
+    return int(error_code in AGENT_PROVIDER_DENIAL_CODES)
 
 
 def _run_state_allows_io(row: Mapping[Any, Any], now: datetime) -> bool:
