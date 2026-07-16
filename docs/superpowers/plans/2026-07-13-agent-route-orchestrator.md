@@ -1570,15 +1570,27 @@ No live provider call or user database access was performed.
 **Files:**
 - Create: `src/flight_hunter/application/agent_analysis.py`
 - Modify: `src/flight_hunter/domain/agent_evidence.py`
+- Modify: `src/flight_hunter/application/agent_planning.py`
+- Modify: `src/flight_hunter/application/agent_operations.py`
 - Modify: `src/flight_hunter/application/agent_execution.py`
+- Modify: `src/flight_hunter/application/agent_result_records.py`
 - Modify: `src/flight_hunter/application/agent_reporting.py`
 - Modify: `src/flight_hunter/persistence/agent_repositories.py`
+- Modify: `src/flight_hunter/persistence/models.py`
 - Modify: `src/flight_hunter/api/agent_schemas.py`
+- Modify: `src/flight_hunter/api/agent_routes.py`
 - Modify: `src/flight_hunter/api/web.py`
+- Create: `migrations/versions/0028_agent_fare_analysis_history.py`
 - Create: `tests/unit/application/test_agent_analysis.py`
+- Modify: `tests/unit/application/test_agent_execution.py`
+- Modify: `tests/unit/application/test_agent_operations.py`
+- Modify: `tests/unit/application/test_agent_planning.py`
 - Create: `tests/unit/persistence/test_agent_history_repository.py`
+- Modify: `tests/unit/persistence/test_agent_evidence_repository.py`
+- Modify: `tests/unit/persistence/test_alembic_upgrade.py`
 - Modify: `tests/unit/api/test_agent_plan_api.py`
 - Modify: `tests/unit/api/test_web_ui.py`
+- Modify: `tests/integration/test_upgrade_from_pre_v1.py`
 
 **Interfaces:**
 - Produces: `HistorySeriesKey`, `BuyTimingAssessment`, `AnomalyAssessment`, `CurrencyComparison`.
@@ -1609,6 +1621,8 @@ Also cover all evidence gates:
 - missing FX provider returns `fx_provider_unavailable`;
 - mismatched flight/seller/fare/baggage/rules returns `not_comparable`.
 - each market/currency provider query is materialized as an approved logical operation and reserves all real HTTP attempts.
+- legacy confirmed evidence with no canonical series hash is excluded rather than guessed;
+- analysis snapshots are append-only, idempotent and household-isolated.
 
 - [ ] **Step 2: Run focused tests and confirm analysis is absent**
 
@@ -1635,7 +1649,12 @@ class HistorySeriesKey:
     product_key: ProductKey | None
 ```
 
-Persist the canonical series hash on confirmed evidence and index it with `observed_at`. `market_minimum` and `same_product` queries never mix.
+Migration `0028_agent_fare_analysis_history` adds a nullable canonical series
+hash to confirmed evidence for forward compatibility, indexes
+`(household_id, history_series_hash, observed_at, id)`, and adds immutable
+analysis snapshots. New exact evidence stores the hash; legacy `NULL` rows are
+not backfilled from incomplete facts and are excluded from analysis.
+`market_minimum` and `same_product` queries never mix.
 
 - [ ] **Step 4: Implement robust deterministic assessments**
 
@@ -1643,9 +1662,18 @@ Use integer/`Decimal` calculations. Publish sample count, dates, weeks, span, pe
 
 Anomaly wording is always `suspected_anomaly`. External feed/search text may be displayed as untrusted research references but never contributes price evidence.
 
+The executor stores one deterministic analysis snapshot per run after confirmed
+evidence is durable. Reads return that snapshot and never silently recompute an
+old run against newer history.
+
 - [ ] **Step 5: Implement currency comparability**
 
 Stable flight fingerprint includes airports, ordered segments, carrier/flight number, local departure timestamps, and cabin. Require equivalent seller/gate, fare code/family, baggage, ticket structure, and known refund/change rules. Without all material equivalence plus fresh FX and fee assumptions, show side-by-side amounts without a savings claim.
+
+Currency/market searches execute only when their exact variants were frozen in
+the approved plan and budget. Until an FX provider/config is enabled, the
+production result is `fx_provider_unavailable`; no default market list, FX rate,
+card fee or savings amount is invented.
 
 - [ ] **Step 6: Verify analytics and UI wording**
 

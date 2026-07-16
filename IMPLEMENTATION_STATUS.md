@@ -268,6 +268,18 @@ intentionally skipped because no browser runtime was requested. Implementation
 is committed at `cabeeeb`. No live provider call or user database access was
 performed.
 
+Task 13 active slice plan: add exact typed history keys, robust buy-timing and
+suspected-anomaly assessments, and fail-closed currency comparison over
+confirmed append-only evidence only. Forward migration
+`0028_agent_fare_analysis_history` will add a nullable canonical series hash,
+the household/series/time query index, and immutable per-run analysis
+snapshots. New evidence receives a deterministic hash; legacy `NULL` rows stay
+excluded because their missing comparability facts cannot be reconstructed
+honestly. Provider market/currency variants may execute only when frozen into
+the approved plan and HTTP budget. With no configured FX provider, the stable
+production result is `fx_provider_unavailable`; no rates, fees, markets or
+savings claims are inferred.
+
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic
 airport-catalog snapshots, then resolve airport/city/country/region/anywhere
