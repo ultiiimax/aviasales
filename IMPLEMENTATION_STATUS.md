@@ -24,12 +24,15 @@ This file is maintained by coding agents. Mark a slice done only after implement
   through the same contract after credentials arrive.
 - Design:
   `docs/superpowers/specs/2026-07-17-human-readable-places-and-airlines-design.md`.
+- Implementation plan:
+  `docs/superpowers/plans/2026-07-17-human-readable-places-and-airlines.md`.
 - Progress:
   - [x] Audit the existing airport, provider and result presentation paths.
   - [x] Confirm universal city-group versus specific-airport behavior.
   - [x] Select the hybrid local/provider directory architecture.
-  - [ ] Review and accept the written design.
-  - [ ] Write and execute the implementation plan through TDD.
+  - [x] Review and accept the written design.
+  - [x] Write the implementation plan.
+  - [ ] Execute the implementation plan through TDD.
   - [ ] Verify desktop/mobile, commit to `main` and restart locally.
 
 ## Previous Slice: Search-first UI redesign
