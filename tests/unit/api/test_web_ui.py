@@ -179,9 +179,10 @@ def test_web_agent_plan_javascript_is_approval_gated_reloadable_and_cancellable(
     assert "/execute" in execute
     assert 'currentAgentPlan.state !== "awaiting_approval"' in execute
     assert "!currentAgentPlan.executable" in execute
-    assert "currentAgentPlan.summary.hidden_city_enabled === true" in execute
-    assert "hidden_city_warning_version" not in execute
-    assert '"hidden-city-v1"' not in execute
+    assert "currentAgentPlan.summary.hidden_city_enabled === true" not in execute
+    assert "hidden_city_warning_version" in execute
+    assert "summary.hidden_city_warning_version" in execute
+    assert "agent-hidden-city-ack" in execute
     assert "revision_id" in execute
     assert "expected_revision" in execute
     assert "content_hash" in execute
@@ -193,6 +194,10 @@ def test_web_agent_plan_javascript_is_approval_gated_reloadable_and_cancellable(
         assert f'"{terminal_state}"' in clone
     assert "cloneReady" in render
     assert "executeReady" in render
+    assert "summary.hidden_city_warnings" in render
+    assert "agent-hidden-city-warning" in render
+    assert "agent-hidden-city-ack" in render
+    assert "checked = false" in render
     assert "!hiddenCityEnabled" in render
     assert "нужно отдельное подтверждение риска" in render
     for budget_field in ("logical_operations", "calendar_searches", "exact_searches", "limit"):
@@ -246,6 +251,28 @@ def test_web_agent_plan_javascript_is_approval_gated_reloadable_and_cancellable(
         "Виза не нужна",
     ):
         assert false_claim not in html
+
+
+def test_web_hidden_city_results_are_fetched_into_a_separate_actionless_section() -> None:
+    html = TestClient(create_app()).get("/").text
+
+    render = _javascript_sync_function(html, "renderAgentRunResults")
+    load = _javascript_function(html, "loadAgentRunResults")
+    poll = _javascript_function(html, "pollAgentRun")
+    reload = _javascript_function(html, "reloadAgentPlan")
+
+    assert "hidden_city_candidates" in render
+    assert "booking_action_available" in render
+    assert "watch_available" in render
+    assert "candidate.source_id" in render
+    assert "candidate.observed_at" in render
+    assert "LIVE" in render
+    assert "Покупка и отслеживание отключены" in render
+    assert "createWatchFromSearch" not in render
+    assert "/results" in load
+    assert "renderAgentRunResults" in load
+    assert "loadAgentRunResults" in poll
+    assert "loadAgentRunResults" in reload
 
 
 def test_web_agent_entry_points_auth_render_and_revision_actions_share_plan_card() -> None:

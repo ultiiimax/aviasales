@@ -16,6 +16,10 @@ from flight_hunter.api.agent_schemas import (
     AgentRunResultsResponse,
 )
 from flight_hunter.application import agent_lifecycle as agent_lifecycle_module
+from flight_hunter.application.agent_hidden_city import (
+    HiddenCityContext,
+    classify_hidden_city,
+)
 from flight_hunter.application.agent_lifecycle import RunResultsView, _public_run_error
 from flight_hunter.application.agent_reporting import CandidateRanker, FactReportBuilder
 from flight_hunter.application.booking_actions import (
@@ -708,6 +712,12 @@ async def test_hidden_city_requires_the_exact_warning_version(
     agent_api_harness: _Harness,
 ) -> None:
     plan = _create_plan(agent_api_harness, hidden_city=True).json()
+    assert plan["summary"]["hidden_city_warning_version"] == "hidden-city-v1"
+    assert {warning["code"] for warning in plan["summary"]["hidden_city_warnings"]} == {
+        "checked_baggage_continues",
+        "later_segments_may_be_cancelled",
+        "carrier_contract_risk",
+    }
     missing = agent_api_harness.client.post(
         f"/api/v1/agent/search-plans/{plan['plan_id']}/execute",
         headers={**agent_api_harness.auth_headers, "Idempotency-Key": "hidden-missing"},
@@ -1095,6 +1105,108 @@ def test_ready_results_schema_exposes_typed_facts_without_provider_reference() -
     rendered = json.dumps(payload)
     assert "PRIVATE-provider-reference" not in rendered
     assert "provider_offer_id" not in rendered
+
+
+def test_hidden_city_results_are_separate_research_only_and_force_actions_off() -> None:
+    observed_at = datetime(2026, 7, 16, 12, tzinfo=UTC)
+    evidence = ConfirmedOfferEvidence(
+        id=UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1"),
+        provider_id="aviasales_search",
+        provider_offer_id="PRIVATE-hidden-city-reference",
+        origin="LED",
+        destination="FCO",
+        departure_date=date(2026, 9, 10),
+        return_date=None,
+        total_amount=Money(15_000, "RUB"),
+        passengers=1,
+        observed_at=observed_at,
+        segment_ids=("safe-led-cdg", "safe-cdg-fco"),
+        segments=(
+            FlightSegmentSummary(
+                airline_code="FV",
+                airline_name="Fixture Air",
+                flight_number="FV100",
+                origin="LED",
+                destination="CDG",
+                depart_at="2026-09-10 08:00",
+                arrive_at="2026-09-10 10:00",
+            ),
+            FlightSegmentSummary(
+                airline_code="FV",
+                airline_name="Fixture Air",
+                flight_number="FV101",
+                origin="CDG",
+                destination="FCO",
+                depart_at="2026-09-10 11:00",
+                arrive_at="2026-09-10 13:00",
+            ),
+        ),
+        protection_status=ProtectionStatus.UNKNOWN,
+        baggage_summary=None,
+    )
+    decision = classify_hidden_city(
+        evidence,
+        "CDG",
+        HiddenCityContext(plan_leg_index=0, final_plan_leg_index=0),
+    )
+    assert decision.candidate is not None
+
+    response = AgentRunResultsResponse.from_view(
+        RunResultsView(
+            run_id=UUID("55555555-5555-4555-8555-555555555556"),
+            state="ready",
+            evidence_available=True,
+            hidden_city_candidates=(decision.candidate,),
+        )
+    )
+    payload = response.model_dump(mode="json", exclude_none=True)
+
+    assert "ranking" not in payload
+    assert "candidates" not in payload
+    assert payload["hidden_city_candidates"] == [
+        {
+            "evidence_id": str(evidence.id),
+            "desired_airport": "CDG",
+            "ticketed_destination": "FCO",
+            "actionability": "research_only_not_actionable",
+            "total_amount": {"minor_units": 15_000, "currency": "RUB"},
+            "passengers": 1,
+            "source_id": "aviasales_search",
+            "freshness": "live",
+            "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+            "flown_segments": [
+                {
+                    "airline_code": "FV",
+                    "airline_name": "Fixture Air",
+                    "flight_number": "FV100",
+                    "origin": "LED",
+                    "destination": "CDG",
+                    "depart_at": "2026-09-10 08:00",
+                    "arrive_at": "2026-09-10 10:00",
+                }
+            ],
+            "skipped_segments": [
+                {
+                    "airline_code": "FV",
+                    "airline_name": "Fixture Air",
+                    "flight_number": "FV101",
+                    "origin": "CDG",
+                    "destination": "FCO",
+                    "depart_at": "2026-09-10 11:00",
+                    "arrive_at": "2026-09-10 13:00",
+                }
+            ],
+            "warning_version": "hidden-city-v1",
+            "warnings": [
+                "checked_baggage_continues",
+                "later_segments_may_be_cancelled",
+                "carrier_contract_risk",
+            ],
+            "booking_action_available": False,
+            "watch_available": False,
+        }
+    ]
+    assert "PRIVATE-hidden-city-reference" not in json.dumps(payload)
 
 
 @pytest.mark.anyio

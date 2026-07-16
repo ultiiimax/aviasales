@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 from typing import Literal, Protocol, cast
@@ -17,6 +17,12 @@ from flight_hunter.application.agent_composition import (
     FrozenCompositionLeg,
     LegEvidencePool,
     RouteComposer,
+)
+from flight_hunter.application.agent_hidden_city import (
+    HIDDEN_CITY_WARNING_VERSION,
+    HiddenCityCandidate,
+    HiddenCityContext,
+    classify_hidden_city,
 )
 from flight_hunter.application.agent_operations import (
     OperationScheduler,
@@ -36,6 +42,7 @@ from flight_hunter.application.agent_result_records import (
 )
 from flight_hunter.application.agent_scope import finite_route_pairs
 from flight_hunter.domain.agent_evidence import (
+    CheckedBaggageState,
     ComposedRouteCandidate,
     ConfirmedOfferEvidence,
     DiscoverySignal,
@@ -81,6 +88,7 @@ from flight_hunter.persistence.agent_repositories import (
     AgentStageStatus,
     AttemptKind,
     AttemptReservationStatus,
+    BaggageEvidenceStatus,
     CircuitPermitStatus,
     NewAgentBookingActionDescriptor,
     NewAgentConfirmedOfferEvidence,
@@ -229,6 +237,14 @@ class _AnywhereRule:
 
 
 @dataclass(frozen=True, slots=True)
+class _HiddenCityRule:
+    version: str
+    plan_leg_index: int
+    desired_airports: tuple[str, ...]
+    discovery_rule: _AnywhereRule
+
+
+@dataclass(frozen=True, slots=True)
 class _SearchLeg:
     ordinal: int
     route_pairs: tuple[_RoutePair, ...]
@@ -266,6 +282,8 @@ class _Workflow:
     split_bindings: tuple[_SplitBinding, ...] = ()
     anywhere_rule: _AnywhereRule | None = None
     anywhere_signals: tuple[AgentDiscoverySignalRecord, ...] = ()
+    hidden_city_rule: _HiddenCityRule | None = None
+    hidden_city_signals: tuple[AgentDiscoverySignalRecord, ...] = ()
 
     @property
     def passengers(self) -> int:
@@ -415,6 +433,7 @@ class AgentExecutionService:
             AgentOperationKind.EXACT_START,
             AgentOperationKind.EXACT_POLL,
             AgentOperationKind.SUGGEST_DISCOVERY,
+            AgentOperationKind.HIDDEN_CITY_DISCOVERY,
         }:
             status = await self._run_network_operation(run, lease, now)
         else:
@@ -493,7 +512,16 @@ class AgentExecutionService:
             return AgentExecutionStep(False, None, run.status)
         confirmed = await self._evidence.list_confirmed_evidence(run.household_id, run.id)
         ranking_id = await self._saved_ranking_result_id(run, operations)
-        has_publishable_results = bool(confirmed) and ranking_id is not None
+        hidden_city_confirmed = any(
+            record.itinerary_evidence.get("search_role") == "hidden_city" for record in confirmed
+        )
+        normal_confirmed = any(
+            record.itinerary_evidence.get("search_role", "base") != "hidden_city"
+            for record in confirmed
+        )
+        has_publishable_results = hidden_city_confirmed or (
+            normal_confirmed and ranking_id is not None
+        )
         terminal_status: Literal["partial", "failed"] = (
             "partial" if has_publishable_results else "failed"
         )
@@ -629,7 +657,10 @@ class AgentExecutionService:
 
         anywhere_existing: tuple[AgentDiscoverySignalRecord, ...] = ()
         anywhere_remaining_capacity: int | None = None
-        if lease.operation.kind is AgentOperationKind.SUGGEST_DISCOVERY:
+        if lease.operation.kind in {
+            AgentOperationKind.SUGGEST_DISCOVERY,
+            AgentOperationKind.HIDDEN_CITY_DISCOVERY,
+        }:
             try:
                 (
                     anywhere_existing,
@@ -939,14 +970,18 @@ class AgentExecutionService:
         workflow: _Workflow,
         operation: AgentRunOperationRecord,
     ) -> tuple[tuple[AgentDiscoverySignalRecord, ...], int]:
-        rule = workflow.anywhere_rule
-        if rule is None:
-            raise AgentExecutionError("agent_operation_input_invalid")
-        _anywhere_params(operation.immutable_input, workflow)
+        rule = _operation_discovery_rule(workflow, operation.kind)
+        search_role = _discovery_search_role(operation.kind)
+        _anywhere_params(operation.immutable_input, workflow, rule=rule)
         current_origin = _iata(operation.immutable_input["origin"], "origin")
         current_source = _text(operation.immutable_input["source_id"], "source_id")
         current_limit = _anywhere_binding_seed_limit(rule, current_origin, current_source)
-        ordered = await self._validated_durable_anywhere_records(run, workflow)
+        ordered = await self._validated_durable_discovery_records(
+            run,
+            workflow,
+            rule=rule,
+            search_role=search_role,
+        )
         current_count = sum(
             record.origin == current_origin
             and _text(record.signal_evidence.get("source_id"), "source_id") == current_source
@@ -962,11 +997,47 @@ class AgentExecutionService:
         rule = workflow.anywhere_rule
         if rule is None:
             raise AgentExecutionError("agent_operation_input_invalid")
+        return await self._validated_durable_discovery_records(
+            run,
+            workflow,
+            rule=rule,
+            search_role="anywhere",
+        )
+
+    async def _validated_durable_hidden_city_records(
+        self,
+        run: AgentPlanRunRecord,
+        workflow: _Workflow,
+    ) -> tuple[AgentDiscoverySignalRecord, ...]:
+        hidden_city_rule = workflow.hidden_city_rule
+        if hidden_city_rule is None:
+            raise AgentExecutionError("agent_operation_input_invalid")
+        return await self._validated_durable_discovery_records(
+            run,
+            workflow,
+            rule=hidden_city_rule.discovery_rule,
+            search_role="hidden_city",
+        )
+
+    async def _validated_durable_discovery_records(
+        self,
+        run: AgentPlanRunRecord,
+        workflow: _Workflow,
+        *,
+        rule: _AnywhereRule,
+        search_role: str,
+    ) -> tuple[AgentDiscoverySignalRecord, ...]:
         records = await self._evidence.list_discovery_signals(run.household_id, run.id)
         eligible_destinations = dict(rule.eligible_destination_countries)
         candidate_bindings: set[tuple[str, str, str]] = set()
         counts_by_binding: dict[tuple[str, str], int] = {}
         for record in records:
+            record_role = record.signal_evidence.get(
+                "search_role",
+                "anywhere" if record.source_kind is DiscoverySource.HOT_OFFER else "base",
+            )
+            if record_role != search_role:
+                continue
             source_id = _text(record.signal_evidence.get("source_id"), "source_id")
             binding = (record.origin, source_id)
             candidate_binding = (*binding, record.destination)
@@ -995,7 +1066,20 @@ class AgentExecutionService:
                 *binding,
             ):
                 raise AgentExecutionError("agent_discovery_evidence_invalid")
-        ordered = tuple(sorted(records, key=_stored_discovery_order))
+        ordered = tuple(
+            sorted(
+                (
+                    record
+                    for record in records
+                    if record.signal_evidence.get(
+                        "search_role",
+                        ("anywhere" if record.source_kind is DiscoverySource.HOT_OFFER else "base"),
+                    )
+                    == search_role
+                ),
+                key=_stored_discovery_order,
+            )
+        )
         if len(ordered) > rule.max_destination_seeds:
             raise AgentExecutionError("agent_discovery_evidence_invalid")
         return ordered
@@ -1054,11 +1138,33 @@ class AgentExecutionService:
                     if candidate.kind is AgentOperationKind.EXACT_START
                 )
                 _validated_anywhere_exact_source_ids(exact_operations, workflow)
+            if (
+                workflow.hidden_city_rule is not None
+                and operation.kind
+                in {
+                    AgentOperationKind.EXACT_START,
+                    AgentOperationKind.EXACT_POLL,
+                }
+                and operation.immutable_input.get("search_role") == "hidden_city"
+            ):
+                exact_operations = tuple(
+                    candidate
+                    for candidate in await self._operations.list_operations(
+                        operation.household_id,
+                        operation.run_id,
+                    )
+                    if candidate.kind is AgentOperationKind.EXACT_START
+                    and candidate.immutable_input.get("search_role") == "hidden_city"
+                )
+                _validated_hidden_city_exact_source_ids(exact_operations, workflow)
             if operation.kind is AgentOperationKind.EXACT_START:
                 binding = _exact_binding_from_immutable(operation.immutable_input, workflow)
                 if operation.immutable_input.get("phase") != "start":
                     raise AgentExecutionError("agent_operation_input_invalid")
-                if workflow.anywhere_rule is not None:
+                if workflow.anywhere_rule is not None or (
+                    workflow.hidden_city_rule is not None
+                    and operation.immutable_input.get("search_role") == "hidden_city"
+                ):
                     _source_signal_id_for_binding(operation.immutable_input, workflow, binding)
                 _start_params(operation.immutable_input, workflow)
                 if binding.passengers != workflow.passengers:
@@ -1070,8 +1176,15 @@ class AgentExecutionService:
             if operation.kind is AgentOperationKind.CALENDAR_SEARCH:
                 _calendar_params(operation.immutable_input, workflow)
                 return workflow
-            if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY:
-                _anywhere_params(operation.immutable_input, workflow)
+            if operation.kind in {
+                AgentOperationKind.SUGGEST_DISCOVERY,
+                AgentOperationKind.HIDDEN_CITY_DISCOVERY,
+            }:
+                _anywhere_params(
+                    operation.immutable_input,
+                    workflow,
+                    rule=_operation_discovery_rule(workflow, operation.kind),
+                )
                 return workflow
         except (KeyError, TypeError, ValueError):
             validation_error = AgentExecutionError("agent_operation_input_invalid")
@@ -1107,7 +1220,10 @@ class AgentExecutionService:
         ):
             raise AgentExecutionError("agent_operation_input_invalid")
         root_binding = _exact_binding_from_immutable(root.immutable_input, workflow)
-        if workflow.anywhere_rule is not None:
+        if workflow.anywhere_rule is not None or (
+            workflow.hidden_city_rule is not None
+            and root.immutable_input.get("search_role") == "hidden_city"
+        ):
             _source_signal_id_for_binding(root.immutable_input, workflow, root_binding)
         if (
             root_binding != binding
@@ -1198,7 +1314,10 @@ class AgentExecutionService:
                 evidence_namespace=operation.id,
                 request_fingerprint=operation.operation_fingerprint,
             )
-        if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY:
+        if operation.kind in {
+            AgentOperationKind.SUGGEST_DISCOVERY,
+            AgentOperationKind.HIDDEN_CITY_DISCOVERY,
+        }:
             if anywhere_remaining_capacity is None or anywhere_remaining_capacity <= 0:
                 raise AgentExecutionError("agent_operation_input_invalid")
             current_origin = _iata(operation.immutable_input["origin"], "origin")
@@ -1213,6 +1332,7 @@ class AgentExecutionService:
                 _anywhere_params(
                     operation.immutable_input,
                     workflow,
+                    rule=_operation_discovery_rule(workflow, operation.kind),
                     max_results=anywhere_remaining_capacity,
                     excluded_destination_airports=excluded_destinations,
                 ),
@@ -1229,7 +1349,10 @@ class AgentExecutionService:
         now: datetime,
     ) -> AgentOperationStatus:
         operation = lease.operation
-        if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY:
+        if operation.kind in {
+            AgentOperationKind.SUGGEST_DISCOVERY,
+            AgentOperationKind.HIDDEN_CITY_DISCOVERY,
+        }:
             signals = cast(tuple[DiscoverySignal, ...], outcome)
             if not signals:
                 workflow = await self._workflow(run)
@@ -1325,15 +1448,52 @@ class AgentExecutionService:
 
         poll_outcome = cast(ExactPollOutcome, outcome)
         workflow = await self._workflow(run)
-        eligible_evidence = tuple(
-            evidence
-            for evidence in poll_outcome.evidence
-            if _evidence_allowed_by_strategy(workflow, evidence)
+        hidden_city_search = operation.immutable_input.get("search_role") == "hidden_city"
+        strategy_eligible_evidence = (
+            poll_outcome.evidence
+            if hidden_city_search
+            else tuple(
+                evidence
+                for evidence in poll_outcome.evidence
+                if _evidence_allowed_by_strategy(workflow, evidence)
+            )
         )
+        hidden_city_candidates: dict[UUID, HiddenCityCandidate] = {}
+        if hidden_city_search:
+            hidden_city_rule = workflow.hidden_city_rule
+            if hidden_city_rule is None:
+                raise AgentExecutionError("agent_operation_input_invalid")
+            context = HiddenCityContext(
+                plan_leg_index=hidden_city_rule.plan_leg_index,
+                final_plan_leg_index=len(workflow.search_legs) - 1,
+            )
+            for evidence in strategy_eligible_evidence:
+                for desired_airport in hidden_city_rule.desired_airports:
+                    decision = classify_hidden_city(
+                        evidence,
+                        desired_airport,
+                        context,
+                    )
+                    if decision.candidate is not None:
+                        hidden_city_candidates[evidence.id] = decision.candidate
+                        break
+            eligible_evidence = tuple(
+                evidence
+                for evidence in strategy_eligible_evidence
+                if evidence.id in hidden_city_candidates
+            )
+        else:
+            eligible_evidence = strategy_eligible_evidence
         if eligible_evidence:
             stored_evidence = tuple(
                 [
-                    await self._append_confirmed(run, operation, evidence, now)
+                    await self._append_confirmed(
+                        run,
+                        operation,
+                        evidence,
+                        now,
+                        hidden_city_candidate=hidden_city_candidates.get(evidence.id),
+                    )
                     for evidence in eligible_evidence
                 ]
             )
@@ -1341,15 +1501,16 @@ class AgentExecutionService:
                 descriptor.evidence_id: descriptor
                 for descriptor in poll_outcome.booking_descriptors
             }
-            for stored in stored_evidence:
-                descriptor = descriptors_by_evidence.get(stored.id)
-                if descriptor is not None:
-                    await self._append_booking_descriptor(
-                        run,
-                        stored,
-                        descriptor,
-                        now,
-                    )
+            if operation.immutable_input.get("search_role") != "hidden_city":
+                for stored in stored_evidence:
+                    descriptor = descriptors_by_evidence.get(stored.id)
+                    if descriptor is not None:
+                        await self._append_booking_descriptor(
+                            run,
+                            stored,
+                            descriptor,
+                            now,
+                        )
             succeeded = await self._operations.mark_operation_succeeded(
                 household_id=run.household_id,
                 operation_id=operation.id,
@@ -1658,8 +1819,54 @@ class AgentExecutionService:
                         changed_at=now,
                         error_code="agent_operation_input_invalid",
                     )
+        if workflow.hidden_city_rule is not None:
+            hidden_discovery_operations = tuple(
+                operation
+                for operation in operations
+                if operation.kind is AgentOperationKind.HIDDEN_CITY_DISCOVERY
+            )
+            if await self._materialize_next_hidden_city_discovery(
+                current,
+                workflow,
+                hidden_discovery_operations,
+                now,
+            ):
+                await self._refresh_stage_statuses(current, now)
+                return None
+            hidden_exact_operations = tuple(
+                operation
+                for operation in operations
+                if operation.kind is AgentOperationKind.EXACT_START
+                and operation.immutable_input.get("search_role") == "hidden_city"
+            )
+            if workflow.hidden_city_signals and not hidden_exact_operations:
+                await self._materialize_hidden_city_exact(
+                    current,
+                    workflow,
+                    now,
+                )
+                return None
+            if hidden_exact_operations:
+                try:
+                    _validated_hidden_city_exact_source_ids(
+                        hidden_exact_operations,
+                        workflow,
+                    )
+                except AgentExecutionError:
+                    return await self._runs.set_status(
+                        household_id=run.household_id,
+                        run_id=run.id,
+                        status="failed",
+                        changed_at=now,
+                        error_code="agent_operation_input_invalid",
+                    )
         confirmed = await self._evidence.list_confirmed_evidence(run.household_id, run.id)
-        if confirmed:
+        normal_confirmed = tuple(
+            record
+            for record in confirmed
+            if record.itinerary_evidence.get("search_role", "base") != "hidden_city"
+        )
+        if normal_confirmed:
             if (
                 workflow.composition_rule_version is not None
                 and await self._materialize_split_exact(
@@ -1671,7 +1878,11 @@ class AgentExecutionService:
             ):
                 await self._refresh_stage_statuses(current, now)
                 return None
-            composed = await self._composition_candidates(current, workflow, confirmed)
+            composed = await self._composition_candidates(
+                current,
+                workflow,
+                normal_confirmed,
+            )
             composition_operations = tuple(
                 operation
                 for operation in operations
@@ -1680,7 +1891,7 @@ class AgentExecutionService:
             if composed and not composition_operations:
                 await self._materialize_composition(
                     current,
-                    confirmed,
+                    normal_confirmed,
                     now,
                 )
                 return None
@@ -1796,6 +2007,76 @@ class AgentExecutionService:
             return True
         return False
 
+    async def _materialize_next_hidden_city_discovery(
+        self,
+        run: AgentPlanRunRecord,
+        workflow: _Workflow,
+        existing: Sequence[AgentRunOperationRecord],
+        now: datetime,
+    ) -> bool:
+        hidden_city_rule = workflow.hidden_city_rule
+        if hidden_city_rule is None:
+            raise AgentExecutionError("agent_plan_snapshot_invalid")
+        rule = hidden_city_rule.discovery_rule
+        existing_bindings: set[tuple[str, str]] = set()
+        for operation in existing:
+            if operation.kind is not AgentOperationKind.HIDDEN_CITY_DISCOVERY:
+                raise AgentExecutionError("agent_operation_input_invalid")
+            try:
+                binding = (
+                    _iata(operation.immutable_input["origin"], "origin"),
+                    _text(operation.immutable_input["source_id"], "source_id"),
+                )
+            except (KeyError, TypeError, ValueError):
+                raise AgentExecutionError("agent_operation_input_invalid") from None
+            if binding in existing_bindings:
+                raise AgentExecutionError("agent_operation_input_invalid")
+            existing_bindings.add(binding)
+        stage = await self._stage(
+            run,
+            AgentPlanStageKind.EXACT_SEARCH,
+            prefix=0x02,
+            now=now,
+        )
+        for ordinal, (origin, source_id) in enumerate(_anywhere_bindings(rule)):
+            if (origin, source_id) in existing_bindings:
+                continue
+            immutable_input = {
+                "origin": origin,
+                "date_from": rule.date_start.isoformat(),
+                "date_to": rule.date_end.isoformat(),
+                "max_destination_seeds": rule.max_destination_seeds,
+                "seed_limit": _anywhere_binding_seed_limit(rule, origin, source_id),
+                "source_id": source_id,
+                "currency": workflow.currency,
+                "adults": 1,
+                "children": 0,
+                "infants": 0,
+                "search_role": "hidden_city",
+            }
+            await self._scheduler.materialize(
+                OperationSpec(
+                    id=_stable_uuid(
+                        run.id,
+                        0x70 + min(ordinal, 0x07),
+                        f"hidden-city-discovery:{origin}:{source_id}",
+                    ),
+                    household_id=run.household_id,
+                    run_id=run.id,
+                    stage_id=stage.id,
+                    provider_id=_PROVIDER_ID,
+                    kind=AgentOperationKind.HIDDEN_CITY_DISCOVERY,
+                    immutable_input=immutable_input,
+                    logical_workflow_input=immutable_input,
+                    consumes_logical_unit=True,
+                    private_continuation=None,
+                    max_attempts=workflow.start_attempts,
+                    created_at=now,
+                )
+            )
+            return True
+        return False
+
     async def _finish_from_failures(
         self,
         run: AgentPlanRunRecord,
@@ -1814,7 +2095,12 @@ class AgentExecutionService:
             if operation.status is AgentOperationStatus.SKIPPED
         )
         if confirmed:
-            if await self._saved_ranking_result_id(run, operations) is None:
+            normal_confirmed = tuple(
+                record
+                for record in confirmed
+                if record.itinerary_evidence.get("search_role", "base") != "hidden_city"
+            )
+            if normal_confirmed and await self._saved_ranking_result_id(run, operations) is None:
                 error_code = next(
                     (
                         operation.error_code
@@ -1971,6 +2257,37 @@ class AgentExecutionService:
                 source_signal_id=signal.id,
             )
 
+    async def _materialize_hidden_city_exact(
+        self,
+        run: AgentPlanRunRecord,
+        workflow: _Workflow,
+        now: datetime,
+    ) -> None:
+        hidden_city_rule = workflow.hidden_city_rule
+        if hidden_city_rule is None or not workflow.hidden_city_signals:
+            raise AgentExecutionError("agent_plan_snapshot_invalid")
+        stage = await self._stage(
+            run,
+            AgentPlanStageKind.EXACT_SEARCH,
+            prefix=0x02,
+            now=now,
+        )
+        for ordinal, signal in enumerate(workflow.hidden_city_signals):
+            await self._materialize_exact_start(
+                run,
+                stage.id,
+                workflow,
+                origin=signal.origin,
+                destination=signal.destination,
+                departure_date=signal.departure_date,
+                return_date=None,
+                ordinal=ordinal,
+                now=now,
+                source_signal_id=signal.id,
+                leg_ordinal=hidden_city_rule.plan_leg_index,
+                search_role="hidden_city",
+            )
+
     async def _append_discovery(
         self,
         run: AgentPlanRunRecord,
@@ -2005,6 +2322,11 @@ class AgentExecutionService:
                         "route_key": f"{signal.origin}-{signal.destination}",
                         "source_id": _text(operation.immutable_input["source_id"], "source_id"),
                         "source_version": "aviasales_hot_offers-v1",
+                        "search_role": (
+                            "hidden_city"
+                            if operation.kind is AgentOperationKind.HIDDEN_CITY_DISCOVERY
+                            else "anywhere"
+                        ),
                     }
                     if signal.source_kind is DiscoverySource.HOT_OFFER
                     else {
@@ -2026,7 +2348,18 @@ class AgentExecutionService:
         operation: AgentRunOperationRecord,
         evidence: ConfirmedOfferEvidence,
         now: datetime,
+        *,
+        hidden_city_candidate: HiddenCityCandidate | None = None,
     ) -> AgentConfirmedOfferEvidenceRecord:
+        search_role = _text(
+            operation.immutable_input.get("search_role", "base"),
+            "search_role",
+        )
+        if (search_role == "hidden_city") != (hidden_city_candidate is not None):
+            raise AgentExecutionError("agent_hidden_city_evidence_invalid")
+        checked_baggage = evidence.checked_baggage
+        if checked_baggage is None:
+            raise AgentExecutionError("agent_confirmed_evidence_invalid")
         return await self._evidence.append_confirmed_evidence(
             NewAgentConfirmedOfferEvidence(
                 id=evidence.id,
@@ -2047,10 +2380,7 @@ class AgentExecutionService:
                         operation.immutable_input.get("leg_ordinal", 0),
                         "leg_ordinal",
                     ),
-                    search_role=_text(
-                        operation.immutable_input.get("search_role", "base"),
-                        "search_role",
-                    ),
+                    search_role=search_role,
                     split_source_evidence_id=(
                         UUID(
                             _text(
@@ -2080,9 +2410,14 @@ class AgentExecutionService:
                             "infants",
                         ),
                     ),
+                    hidden_city_candidate=hidden_city_candidate,
                 ),
                 protection_status=evidence.protection_status,
-                baggage_status=None,
+                baggage_status={
+                    CheckedBaggageState.INCLUDED: BaggageEvidenceStatus.INCLUDED,
+                    CheckedBaggageState.NOT_INCLUDED: BaggageEvidenceStatus.NOT_INCLUDED,
+                    CheckedBaggageState.UNKNOWN: BaggageEvidenceStatus.UNKNOWN,
+                }[checked_baggage],
                 transfer_status=None,
                 visa_status=None,
                 fingerprint=_evidence_fingerprint(evidence.id),
@@ -2202,6 +2537,7 @@ class AgentExecutionService:
         now: datetime,
         source_signal_id: UUID | None = None,
         leg_ordinal: int = 0,
+        search_role: str = "base",
         split_source_evidence_id: UUID | None = None,
         split_component_ordinal: int | None = None,
     ) -> AgentRunOperationRecord:
@@ -2217,7 +2553,11 @@ class AgentExecutionService:
             return_date=return_date,
             leg_ordinal=leg_ordinal,
         )
+        if search_role not in {"base", "hidden_city"}:
+            raise AgentExecutionError("agent_operation_input_invalid")
         if split_source_evidence_id is not None:
+            if search_role != "base":
+                raise AgentExecutionError("agent_operation_input_invalid")
             if split_component_ordinal not in {0, 1}:
                 raise AgentExecutionError("agent_operation_input_invalid")
             logical_input.update(
@@ -2229,11 +2569,17 @@ class AgentExecutionService:
             )
         elif split_component_ordinal is not None:
             raise AgentExecutionError("agent_operation_input_invalid")
+        elif search_role == "hidden_city":
+            if source_signal_id is None:
+                raise AgentExecutionError("agent_operation_input_invalid")
+            logical_input["search_role"] = "hidden_city"
         operation_identity = (
             f"exact-start:{leg_ordinal}:{origin}:{destination}:{departure_date}:{return_date}"
         )
         if split_source_evidence_id is not None:
             operation_identity += f":split:{split_source_evidence_id}:{split_component_ordinal}"
+        elif search_role == "hidden_city":
+            operation_identity += f":hidden-city:{source_signal_id}"
         return await self._scheduler.materialize(
             OperationSpec(
                 id=_stable_uuid(
@@ -2388,6 +2734,8 @@ class AgentExecutionService:
                     ),
                 }
             )
+        elif root.immutable_input.get("search_role") == "hidden_city":
+            logical_input["search_role"] = "hidden_city"
         private_continuation = _private_continuation(continuation, poll_round)
         continuation_digest = _private_continuation_digest(private_continuation)
         return await self._scheduler.materialize(
@@ -2406,6 +2754,16 @@ class AgentExecutionService:
                     **logical_input,
                     "phase": "poll",
                     "poll_round": poll_round,
+                    **(
+                        {
+                            "source_signal_id": _text(
+                                root.immutable_input["source_signal_id"],
+                                "source_signal_id",
+                            )
+                        }
+                        if root.immutable_input.get("search_role") == "hidden_city"
+                        else {}
+                    ),
                 },
                 logical_workflow_input=logical_input,
                 consumes_logical_unit=False,
@@ -2662,6 +3020,11 @@ class AgentExecutionService:
         confirmed = await self._evidence.list_confirmed_evidence(
             run.household_id,
             run.id,
+        )
+        confirmed = tuple(
+            record
+            for record in confirmed
+            if record.itinerary_evidence.get("search_role", "base") != "hidden_city"
         )
         try:
             bound_ids = tuple(
@@ -3019,6 +3382,7 @@ class AgentExecutionService:
                 RouteStrategy.THROUGH_TICKET,
                 RouteStrategy.SPLIT_TICKET,
                 RouteStrategy.SELF_TRANSFER,
+                RouteStrategy.HIDDEN_CITY,
             }
             if not set(requested_strategies) <= supported_strategies:
                 raise AgentExecutionError("agent_strategy_unsupported")
@@ -3288,6 +3652,33 @@ class AgentExecutionService:
                         departure_end_date=departure_end,
                     ),
                 )
+            hidden_city_rule: _HiddenCityRule | None = None
+            raw_hidden_city = plan.get("hidden_city")
+            if RouteStrategy.HIDDEN_CITY in requested_strategies:
+                if trip_shape is not TripShape.ONE_WAY or anywhere_rule is not None:
+                    raise AgentExecutionError("agent_hidden_city_plan_invalid")
+                hidden_city_rule = _hidden_city_rule_from_plan(
+                    _mapping(raw_hidden_city, "hidden-city rule"),
+                    plan_leg_index=len(search_legs) - 1,
+                    origin_codes=tuple(
+                        route_pair.origin for route_pair in search_legs[-1].route_pairs
+                    ),
+                    desired_airports=tuple(
+                        route_pair.destination for route_pair in search_legs[-1].route_pairs
+                    ),
+                    date_start=search_legs[-1].departure_date,
+                    date_end=search_legs[-1].departure_end_date,
+                    coverage=coverage,
+                    origin_catalog_checksum=_text(
+                        _mapping(
+                            _mapping(scope_legs[-1], "hidden-city scope leg")["origin"],
+                            "hidden-city origin scope",
+                        )["catalog_checksum"],
+                        "hidden-city origin catalog checksum",
+                    ),
+                )
+            elif raw_hidden_city is not None:
+                raise AgentExecutionError("agent_hidden_city_plan_invalid")
             start_attempts = _positive_int(cost.get("start_attempts", 1), "start_attempts")
             poll_rounds = _positive_int(cost.get("poll_rounds", 1), "poll_rounds")
             attempts_per_poll = _positive_int(
@@ -3306,7 +3697,7 @@ class AgentExecutionService:
             ):
                 raise ValueError("http estimate is inconsistent")
             if anywhere_rule is not None:
-                if split_requested:
+                if split_requested or hidden_city_rule is not None:
                     raise AgentExecutionError("agent_split_anywhere_unsupported")
                 discovery_query_work = len(anywhere_rule.origins) * len(
                     anywhere_rule.discovery_source_ids
@@ -3346,8 +3737,30 @@ class AgentExecutionService:
                             (split_leg.departure_end_date - split_leg.departure_date).days + 1
                         )
                     expected_exact += split_surface * max_split_hubs_per_leg * 2
+                if hidden_city_rule is not None:
+                    hidden_discovery_rule = hidden_city_rule.discovery_rule
+                    expected_calendar += max(
+                        hidden_discovery_rule.max_destination_seeds,
+                        len(hidden_discovery_rule.origins)
+                        * len(hidden_discovery_rule.discovery_source_ids),
+                    )
+                    expected_exact += hidden_discovery_rule.exact_verification_limit
                 if calendar_estimate != expected_calendar or exact_estimate != expected_exact:
                     raise ValueError("per-leg workflow estimates are inconsistent")
+            hidden_calendar_limit = (
+                0
+                if hidden_city_rule is None
+                else max(
+                    hidden_city_rule.discovery_rule.max_destination_seeds,
+                    len(hidden_city_rule.discovery_rule.origins)
+                    * len(hidden_city_rule.discovery_rule.discovery_source_ids),
+                )
+            )
+            hidden_exact_limit = (
+                0
+                if hidden_city_rule is None
+                else hidden_city_rule.discovery_rule.exact_verification_limit
+            )
             effective_strategies = requested_strategies or (RouteStrategy.THROUGH_TICKET,)
             split_bindings = (
                 _split_bindings_from_confirmed_records(
@@ -3383,8 +3796,8 @@ class AgentExecutionService:
                 currency=currency,
                 one_way=trip_shape is TripShape.ONE_WAY,
                 strategies=effective_strategies,
-                exact_limit=exact_estimate,
-                calendar_limit=calendar_estimate,
+                exact_limit=exact_estimate - hidden_exact_limit,
+                calendar_limit=calendar_estimate - hidden_calendar_limit,
                 start_attempts=start_attempts,
                 poll_rounds=poll_rounds,
                 attempts_per_poll=attempts_per_poll,
@@ -3397,7 +3810,19 @@ class AgentExecutionService:
                 split_bindings=split_bindings,
                 anywhere_rule=anywhere_rule,
                 anywhere_signals=anywhere_signals,
+                hidden_city_rule=hidden_city_rule,
             )
+            if hidden_city_rule is not None:
+                hidden_records = await self._validated_durable_hidden_city_records(
+                    run,
+                    workflow,
+                )
+                workflow = replace(
+                    workflow,
+                    hidden_city_signals=hidden_records[
+                        : hidden_city_rule.discovery_rule.exact_verification_limit
+                    ],
+                )
         except (KeyError, IndexError, TypeError, ValueError):
             workflow = None
         if workflow is None:
@@ -3506,11 +3931,12 @@ def _anywhere_rule_from_snapshot(
     date_start: date,
     date_end: date,
     coverage: str,
+    require_anywhere_intent: bool = True,
 ) -> _AnywhereRule:
-    if _intent_scope_identity(first_plan_leg, "destination") != (
-        LocationScopeKind.ANYWHERE.value,
-        None,
-    ):
+    if require_anywhere_intent and _intent_scope_identity(
+        first_plan_leg,
+        "destination",
+    ) != (LocationScopeKind.ANYWHERE.value, None):
         raise ValueError("anywhere rule differs from intent")
     origins = tuple(
         _iata(item, "anywhere origin")
@@ -3580,6 +4006,59 @@ def _anywhere_rule_from_snapshot(
         taxonomy_version=_text(value["taxonomy_version"], "anywhere taxonomy version"),
         coverage=coverage,
         eligible_destination_countries=eligible,
+    )
+
+
+def _hidden_city_rule_from_plan(
+    value: Mapping[str, object],
+    *,
+    plan_leg_index: int,
+    origin_codes: tuple[str, ...],
+    desired_airports: tuple[str, ...],
+    date_start: date,
+    date_end: date,
+    coverage: str,
+    origin_catalog_checksum: str,
+) -> _HiddenCityRule:
+    version = _text(value["version"], "hidden-city rule version")
+    stored_leg_index = _non_negative_int(
+        value["plan_leg_index"],
+        "hidden-city plan leg index",
+    )
+    stored_desired_airports = tuple(
+        _iata(item, "hidden-city desired airport")
+        for item in _sequence(
+            value["desired_airports"],
+            "hidden-city desired airports",
+        )
+    )
+    normalized_origins = tuple(dict.fromkeys(origin_codes))
+    normalized_desired = tuple(dict.fromkeys(desired_airports))
+    discovery = _anywhere_rule_from_snapshot(
+        _mapping(value["discovery"], "hidden-city discovery rule"),
+        first_plan_leg={},
+        origin_codes=normalized_origins,
+        date_start=date_start,
+        date_end=date_end,
+        coverage=coverage,
+        require_anywhere_intent=False,
+    )
+    eligible = {code for code, _country in discovery.eligible_destination_countries}
+    if (
+        version != "hidden-city-search-v1"
+        or stored_leg_index != plan_leg_index
+        or stored_desired_airports != normalized_desired
+        or not stored_desired_airports
+        or len(set(stored_desired_airports)) != len(stored_desired_airports)
+        or eligible.intersection(stored_desired_airports)
+        or discovery.catalog_checksum != origin_catalog_checksum
+    ):
+        raise ValueError("hidden-city rule is not bound to the final finite leg")
+    return _HiddenCityRule(
+        version=version,
+        plan_leg_index=stored_leg_index,
+        desired_airports=stored_desired_airports,
+        discovery_rule=discovery,
     )
 
 
@@ -3660,7 +4139,10 @@ def _validated_provider_outcome(
                 observed_by=observed_by,
             )
 
-        if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY:
+        if operation.kind in {
+            AgentOperationKind.SUGGEST_DISCOVERY,
+            AgentOperationKind.HIDDEN_CITY_DISCOVERY,
+        }:
             if type(outcome) is not tuple or not all(
                 isinstance(signal, DiscoverySignal) for signal in outcome
             ):
@@ -3768,10 +4250,12 @@ def _validated_anywhere_signals(
     remaining_capacity: int | None,
     existing_candidate_bindings: frozenset[tuple[str, str, str]],
 ) -> tuple[DiscoverySignal, ...]:
-    params = _anywhere_params(operation.immutable_input, workflow)
-    rule = workflow.anywhere_rule
-    if rule is None:
-        raise ValueError("anywhere discovery requires a frozen rule")
+    rule = _operation_discovery_rule(workflow, operation.kind)
+    params = _anywhere_params(
+        operation.immutable_input,
+        workflow,
+        rule=rule,
+    )
     eligible = dict(rule.eligible_destination_countries)
     if type(remaining_capacity) is not int or remaining_capacity < 1:
         raise ValueError("anywhere discovery requires positive remaining capacity")
@@ -4150,8 +4634,9 @@ def _confirmed_itinerary_evidence(
     split_source_evidence_id: UUID | None = None,
     split_component_ordinal: int | None = None,
     passenger_mix: PassengerMix | None = None,
+    hidden_city_candidate: HiddenCityCandidate | None = None,
 ) -> dict[str, object]:
-    if search_role not in {"base", "split_component"}:
+    if search_role not in {"base", "split_component", "hidden_city"}:
         raise ValueError("unsupported evidence search role")
     if search_role == "base" and (
         split_source_evidence_id is not None or split_component_ordinal is not None
@@ -4161,9 +4646,13 @@ def _confirmed_itinerary_evidence(
         split_source_evidence_id is None or split_component_ordinal not in {0, 1}
     ):
         raise ValueError("split component evidence requires source and ordinal")
+    if (search_role == "hidden_city") != (hidden_city_candidate is not None):
+        raise ValueError("hidden-city evidence requires its typed candidate")
     normalized_passenger_mix = passenger_mix or evidence.passenger_mix
     if normalized_passenger_mix is None:
         raise ValueError("confirmed evidence passenger mix is missing")
+    if evidence.ticket_shape is None or evidence.checked_baggage is None:
+        raise ValueError("confirmed evidence ticket facts are missing")
     itinerary: dict[str, object] = {
         "leg_ordinal": leg_ordinal,
         "search_role": search_role,
@@ -4179,6 +4668,9 @@ def _confirmed_itinerary_evidence(
             "infants": normalized_passenger_mix.infants,
         },
         "price_basis": evidence.price_basis.value,
+        "ticket_shape": evidence.ticket_shape.value,
+        "checked_baggage": evidence.checked_baggage.value,
+        "baggage_summary": evidence.baggage_summary,
         "segments": [
             {
                 "segment_ref": evidence.segment_ids[index],
@@ -4200,6 +4692,17 @@ def _confirmed_itinerary_evidence(
         "seller": evidence.seller_name,
         "ticket_structure": "provider_ticket",
     }
+    if hidden_city_candidate is not None:
+        itinerary.update(
+            {
+                "hidden_city_desired_airport": hidden_city_candidate.desired_airport,
+                "hidden_city_ticketed_destination": (hidden_city_candidate.ticketed_destination),
+                "hidden_city_actionability": hidden_city_candidate.actionability.value,
+                "hidden_city_warning_version": HIDDEN_CITY_WARNING_VERSION,
+                "booking_action_available": False,
+                "watch_available": False,
+            }
+        )
     if split_source_evidence_id is not None:
         itinerary["split_source_evidence_id"] = str(split_source_evidence_id)
     if split_component_ordinal is not None:
@@ -4669,6 +5172,30 @@ def _calendar_params(
     )
 
 
+def _operation_discovery_rule(
+    workflow: _Workflow,
+    operation_kind: AgentOperationKind,
+) -> _AnywhereRule:
+    if operation_kind is AgentOperationKind.SUGGEST_DISCOVERY:
+        rule = workflow.anywhere_rule
+    elif operation_kind is AgentOperationKind.HIDDEN_CITY_DISCOVERY:
+        hidden_city_rule = workflow.hidden_city_rule
+        rule = hidden_city_rule.discovery_rule if hidden_city_rule is not None else None
+    else:
+        rule = None
+    if rule is None:
+        raise AgentExecutionError("agent_operation_input_invalid")
+    return rule
+
+
+def _discovery_search_role(operation_kind: AgentOperationKind) -> str:
+    if operation_kind is AgentOperationKind.SUGGEST_DISCOVERY:
+        return "anywhere"
+    if operation_kind is AgentOperationKind.HIDDEN_CITY_DISCOVERY:
+        return "hidden_city"
+    raise AgentExecutionError("agent_operation_input_invalid")
+
+
 def _anywhere_bindings(rule: _AnywhereRule) -> tuple[tuple[str, str], ...]:
     bindings = tuple(
         (origin, source_id) for origin in rule.origins for source_id in rule.discovery_source_ids
@@ -4699,11 +5226,12 @@ def _anywhere_params(
     immutable_input: Mapping[str, object],
     workflow: _Workflow,
     *,
+    rule: _AnywhereRule | None = None,
     max_results: int | None = None,
     excluded_destination_airports: frozenset[str] = frozenset(),
 ) -> AnywhereDiscoveryParams:
-    rule = workflow.anywhere_rule
-    if rule is None:
+    effective_rule = rule or workflow.anywhere_rule
+    if effective_rule is None:
         raise AgentExecutionError("agent_operation_input_invalid")
     try:
         origin = _iata(immutable_input["origin"], "origin")
@@ -4722,18 +5250,20 @@ def _anywhere_params(
     except (KeyError, TypeError, ValueError):
         raise AgentExecutionError("agent_operation_input_invalid") from None
     if (
-        origin not in rule.origins
-        or date_from != rule.date_start
-        or date_to != rule.date_end
-        or source_id not in rule.discovery_source_ids
-        or max_destination_seeds != rule.max_destination_seeds
-        or seed_limit != _anywhere_binding_seed_limit(rule, origin, source_id)
+        origin not in effective_rule.origins
+        or date_from != effective_rule.date_start
+        or date_to != effective_rule.date_end
+        or source_id not in effective_rule.discovery_source_ids
+        or max_destination_seeds != effective_rule.max_destination_seeds
+        or seed_limit != _anywhere_binding_seed_limit(effective_rule, origin, source_id)
         or (adults, children, infants) != (1, 0, 0)
         or currency != workflow.currency
     ):
         raise AgentExecutionError("agent_operation_input_invalid")
     effective_max_results = seed_limit if max_results is None else max_results
-    allowed_destinations = frozenset(code for code, _country in rule.eligible_destination_countries)
+    allowed_destinations = frozenset(
+        code for code, _country in effective_rule.eligible_destination_countries
+    )
     if (
         type(effective_max_results) is not int
         or effective_max_results <= 0
@@ -4809,6 +5339,27 @@ def _exact_binding_from_immutable(
                 ),
                 None,
             )
+        hidden_city_match = None
+        if search_role == "hidden_city":
+            hidden_city_rule = workflow.hidden_city_rule
+            if hidden_city_rule is not None:
+                eligible_destinations = {
+                    code
+                    for code, _country in (
+                        hidden_city_rule.discovery_rule.eligible_destination_countries
+                    )
+                }
+                hidden_city_match = (
+                    candidate.leg_ordinal == hidden_city_rule.plan_leg_index
+                    and candidate.origin in hidden_city_rule.discovery_rule.origins
+                    and candidate.destination in eligible_destinations
+                    and hidden_city_rule.discovery_rule.date_start
+                    <= candidate.departure_date
+                    <= hidden_city_rule.discovery_rule.date_end
+                    and candidate.return_date is None
+                    and immutable_input.get("split_source_evidence_id") is None
+                    and immutable_input.get("split_component_ordinal") is None
+                )
         base_binding = (
             search_leg is not None
             and _RoutePair(candidate.origin, candidate.destination) in search_leg.route_pairs
@@ -4821,7 +5372,7 @@ def _exact_binding_from_immutable(
             and immutable_input.get("split_component_ordinal") is None
         )
         valid = (
-            (base_binding or split_match is not None)
+            (base_binding or split_match is not None or hidden_city_match is True)
             and candidate.adults == workflow.adults
             and candidate.children == workflow.children
             and candidate.infants == workflow.infants
@@ -4854,9 +5405,11 @@ def _source_signal_id_for_binding(
         raise AgentExecutionError("agent_operation_input_invalid") from error
     if str(source_signal_id) != raw_source_signal_id:
         raise AgentExecutionError("agent_operation_input_invalid")
-    matching_signals = tuple(
-        signal for signal in workflow.anywhere_signals if signal.id == source_signal_id
+    search_role = immutable_input.get("search_role", "base")
+    source_signals = (
+        workflow.hidden_city_signals if search_role == "hidden_city" else workflow.anywhere_signals
     )
+    matching_signals = tuple(signal for signal in source_signals if signal.id == source_signal_id)
     if len(matching_signals) != 1:
         raise AgentExecutionError("agent_operation_input_invalid")
     signal = matching_signals[0]
@@ -4865,7 +5418,7 @@ def _source_signal_id_for_binding(
         or signal.destination != binding.destination
         or signal.departure_date != binding.departure_date
         or signal.return_date is not None
-        or binding.return_date != workflow.return_date
+        or binding.return_date != (None if search_role == "hidden_city" else workflow.return_date)
     ):
         raise AgentExecutionError("agent_operation_input_invalid")
     return source_signal_id
@@ -4886,6 +5439,39 @@ def _validated_anywhere_exact_source_ids(
     actual_source_ids: set[UUID] = set()
     for operation in operations:
         if operation.kind is not AgentOperationKind.EXACT_START:
+            raise AgentExecutionError("agent_operation_input_invalid")
+        binding = _exact_binding_from_immutable(operation.immutable_input, workflow)
+        source_signal_id = _source_signal_id_for_binding(
+            operation.immutable_input,
+            workflow,
+            binding,
+        )
+        if source_signal_id in actual_source_ids:
+            raise AgentExecutionError("agent_operation_input_invalid")
+        actual_source_ids.add(source_signal_id)
+    if frozenset(actual_source_ids) != expected_source_ids:
+        raise AgentExecutionError("agent_operation_input_invalid")
+    return frozenset(actual_source_ids)
+
+
+def _validated_hidden_city_exact_source_ids(
+    operations: Sequence[AgentRunOperationRecord],
+    workflow: _Workflow,
+) -> frozenset[UUID]:
+    expected_source_ids = frozenset(signal.id for signal in workflow.hidden_city_signals)
+    if (
+        workflow.hidden_city_rule is None
+        or not expected_source_ids
+        or len(expected_source_ids) != len(workflow.hidden_city_signals)
+        or len(operations) != len(expected_source_ids)
+    ):
+        raise AgentExecutionError("agent_operation_input_invalid")
+    actual_source_ids: set[UUID] = set()
+    for operation in operations:
+        if (
+            operation.kind is not AgentOperationKind.EXACT_START
+            or operation.immutable_input.get("search_role") != "hidden_city"
+        ):
             raise AgentExecutionError("agent_operation_input_invalid")
         binding = _exact_binding_from_immutable(operation.immutable_input, workflow)
         source_signal_id = _source_signal_id_for_binding(

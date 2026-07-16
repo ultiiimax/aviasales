@@ -12,6 +12,14 @@ from uuid import UUID, uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from flight_hunter.agent.presets import PRESET_EDITS, AgentPresetId
+from flight_hunter.application.agent_hidden_city import (
+    HIDDEN_CITY_WARNING_VERSION,
+    HIDDEN_CITY_WARNINGS,
+    HiddenCityCandidate,
+    HiddenCityContext,
+    HiddenCityWarning,
+    classify_hidden_city,
+)
 from flight_hunter.application.agent_intent import (
     ClarificationAction,
     IntentClarification,
@@ -46,6 +54,7 @@ from flight_hunter.application.agent_result_records import (
     confirmed_record_to_evidence,
 )
 from flight_hunter.application.agent_scope import (
+    AnywhereDiscoveryRule,
     CoverageMode,
     FrozenAirportScope,
     finite_route_pairs,
@@ -68,6 +77,7 @@ from flight_hunter.domain.agent_search import (
 )
 from flight_hunter.domain.offers import Freshness, PassengerMix, PriceBasis
 from flight_hunter.persistence.agent_repositories import (
+    AgentConfirmedOfferEvidenceRecord,
     AgentDiscoverySignalRecord,
     AgentEvidenceRepository,
     AgentOperationKind,
@@ -92,7 +102,6 @@ from flight_hunter.persistence.agent_repositories import (
     NewAgentPlanRun,
 )
 
-HIDDEN_CITY_WARNING_VERSION = "hidden-city-v1"
 PARSER_VERSION = "intent-parser-v2"
 _PROVIDER_ID = "aviasales_search"
 _PROVIDER_CLOCK_SKEW = timedelta(minutes=5)
@@ -247,6 +256,8 @@ class PlanSummaryView:
     scope: tuple[PlanScopeLegView, ...]
     provider: PlanProviderView
     hidden_city_enabled: bool
+    hidden_city_warning_version: str | None = None
+    hidden_city_warnings: tuple[HiddenCityWarning, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,18 +376,27 @@ class RunResultsView:
     state: Literal["not_ready", "ready", "unavailable"] = "not_ready"
     evidence_available: bool = False
     report: FactReport | None = None
+    hidden_city_candidates: tuple[HiddenCityCandidate, ...] = ()
     error_code: Literal["agent_results_unavailable"] | None = None
 
     def __post_init__(self) -> None:
+        hidden_city_candidates = tuple(self.hidden_city_candidates)
+        if not all(
+            isinstance(candidate, HiddenCityCandidate) for candidate in hidden_city_candidates
+        ):
+            raise TypeError("hidden_city_candidates must contain typed candidates")
         if self.state == "ready":
-            if self.report is None or self.error_code is not None:
-                raise ValueError("ready results require a report and no error")
-        elif self.report is not None:
-            raise ValueError("non-ready results cannot contain a report")
+            if (self.report is None and not hidden_city_candidates) or self.error_code is not None:
+                raise ValueError("ready results require publishable facts and no error")
+        elif self.report is not None or hidden_city_candidates:
+            raise ValueError("non-ready results cannot contain publishable facts")
         elif self.state == "unavailable" and self.error_code is None:
             raise ValueError("unavailable results require an error code")
         elif self.state == "not_ready" and self.error_code is not None:
             raise ValueError("not-ready results cannot contain an error code")
+        if hidden_city_candidates and not self.evidence_available:
+            raise ValueError("hidden-city facts require evidence_available")
+        object.__setattr__(self, "hidden_city_candidates", hidden_city_candidates)
 
 
 class AgentLifecycleService:
@@ -671,6 +691,34 @@ class AgentLifecycleService:
                 run_id,
             )
             evidence_available = bool(confirmed_records or composed_records)
+            revision = await self._plans.get_revision(household_id, run.revision_id)
+            try:
+                hidden_city_candidates = (
+                    ()
+                    if revision is None
+                    else _hidden_city_candidates_from_records(
+                        revision,
+                        confirmed_records,
+                    )
+                )
+                if revision is None and any(
+                    record.itinerary_evidence.get("search_role") == "hidden_city"
+                    for record in confirmed_records
+                ):
+                    raise StoredAgentEvidenceError("hidden-city revision is missing")
+            except (
+                KeyError,
+                RuntimeError,
+                StoredAgentEvidenceError,
+                TypeError,
+                ValueError,
+            ):
+                return RunResultsView(
+                    run_id=run.id,
+                    state="unavailable",
+                    evidence_available=evidence_available,
+                    error_code="agent_results_unavailable",
+                )
             operations = await self._operations.list_operations(household_id, run_id)
             ranking_operations = tuple(
                 operation
@@ -681,6 +729,18 @@ class AgentLifecycleService:
                 and operation.result_id is not None
             )
             if not ranking_operations:
+                if hidden_city_candidates and run.status in {
+                    "completed",
+                    "partial",
+                    "failed",
+                    "cancelled",
+                }:
+                    return RunResultsView(
+                        run_id=run.id,
+                        state="ready",
+                        evidence_available=True,
+                        hidden_city_candidates=hidden_city_candidates,
+                    )
                 return RunResultsView(
                     run_id=run.id,
                     state=(
@@ -706,7 +766,6 @@ class AgentLifecycleService:
                 household_id,
                 cast(UUID, ranking_operations[0].result_id),
             )
-            revision = await self._plans.get_revision(household_id, run.revision_id)
             try:
                 if ranking_record is None or revision is None:
                     raise StoredAgentEvidenceError("ranking snapshot is missing")
@@ -776,6 +835,7 @@ class AgentLifecycleService:
                 state="ready",
                 evidence_available=True,
                 report=report,
+                hidden_city_candidates=hidden_city_candidates,
             )
 
     async def _booking_action_tokens(
@@ -1219,6 +1279,16 @@ def _plan_payload(
             if proposed.composition_rule is not None
             else None
         ),
+        "hidden_city": (
+            {
+                "version": proposed.hidden_city_rule.version,
+                "plan_leg_index": proposed.hidden_city_rule.plan_leg_index,
+                "desired_airports": list(proposed.hidden_city_rule.desired_airports),
+                "discovery": _anywhere_rule_payload(proposed.hidden_city_rule.discovery_rule),
+            }
+            if proposed.hidden_city_rule is not None
+            else None
+        ),
         "clarifications": [
             _clarification_payload(clarification) for clarification in proposed.clarifications
         ],
@@ -1306,24 +1376,7 @@ def _scope_payload(proposed: ProposedPlanRevision) -> dict[str, object]:
                     else None
                 ),
                 "anywhere": (
-                    {
-                        "origin_airports": list(leg.anywhere_rule.origin_airports),
-                        "date_start": leg.anywhere_rule.date_start.isoformat(),
-                        "date_end": leg.anywhere_rule.date_end.isoformat(),
-                        "allowed_country_codes": list(leg.anywhere_rule.allowed_country_codes),
-                        "excluded_country_codes": list(leg.anywhere_rule.excluded_country_codes),
-                        "discovery_source_ids": list(leg.anywhere_rule.discovery_source_ids),
-                        "max_destination_seeds": leg.anywhere_rule.max_destination_seeds,
-                        "exact_verification_limit": leg.anywhere_rule.exact_verification_limit,
-                        "catalog_checksum": leg.anywhere_rule.catalog_checksum,
-                        "taxonomy_version": leg.anywhere_rule.taxonomy_version,
-                        "eligible_destination_countries": [
-                            {"code": code, "country_code": country_code}
-                            for code, country_code in (
-                                leg.anywhere_rule.eligible_destination_countries
-                            )
-                        ],
-                    }
+                    _anywhere_rule_payload(leg.anywhere_rule)
                     if leg.anywhere_rule is not None
                     else None
                 ),
@@ -1331,6 +1384,25 @@ def _scope_payload(proposed: ProposedPlanRevision) -> dict[str, object]:
                 "reciprocal_anywhere_return": leg.reciprocal_anywhere_return,
             }
             for leg in proposed.frozen_legs
+        ],
+    }
+
+
+def _anywhere_rule_payload(rule: AnywhereDiscoveryRule) -> dict[str, object]:
+    return {
+        "origin_airports": list(rule.origin_airports),
+        "date_start": rule.date_start.isoformat(),
+        "date_end": rule.date_end.isoformat(),
+        "allowed_country_codes": list(rule.allowed_country_codes),
+        "excluded_country_codes": list(rule.excluded_country_codes),
+        "discovery_source_ids": list(rule.discovery_source_ids),
+        "max_destination_seeds": rule.max_destination_seeds,
+        "exact_verification_limit": rule.exact_verification_limit,
+        "catalog_checksum": rule.catalog_checksum,
+        "taxonomy_version": rule.taxonomy_version,
+        "eligible_destination_countries": [
+            {"code": code, "country_code": country_code}
+            for code, country_code in rule.eligible_destination_countries
         ],
     }
 
@@ -1447,6 +1519,7 @@ def _plan_summary_view(revision: AgentPlanRevisionRecord) -> PlanSummaryView:
     children = _stored_int(intent.get("children"), "children")
     infants = _stored_int(intent.get("infants"), "infants")
     strategies = tuple(str(value) for value in _sequence(intent.get("requested_strategies", [])))
+    hidden_city_enabled = RouteStrategy.HIDDEN_CITY.value in strategies
     return PlanSummaryView(
         trip_shape=_required_stored_str(intent.get("trip_shape"), "trip_shape"),
         date_mode=_required_stored_str(intent.get("date_mode"), "date_mode"),
@@ -1475,7 +1548,9 @@ def _plan_summary_view(revision: AgentPlanRevisionRecord) -> PlanSummaryView:
                 "requests_per_minute",
             ),
         ),
-        hidden_city_enabled=RouteStrategy.HIDDEN_CITY.value in strategies,
+        hidden_city_enabled=hidden_city_enabled,
+        hidden_city_warning_version=(HIDDEN_CITY_WARNING_VERSION if hidden_city_enabled else None),
+        hidden_city_warnings=HIDDEN_CITY_WARNINGS if hidden_city_enabled else (),
     )
 
 
@@ -2299,6 +2374,96 @@ def _revision_passenger_mix(revision: AgentPlanRevisionRecord) -> PassengerMix:
         adults=_stored_int(intent["adults"], "adults"),
         children=_stored_int(intent["children"], "children"),
         infants=_stored_int(intent["infants"], "infants"),
+    )
+
+
+def _hidden_city_candidates_from_records(
+    revision: AgentPlanRevisionRecord,
+    records: Sequence[AgentConfirmedOfferEvidenceRecord],
+) -> tuple[HiddenCityCandidate, ...]:
+    hidden_records = tuple(
+        record
+        for record in records
+        if record.itinerary_evidence.get("search_role") == "hidden_city"
+    )
+    plan = _json_mapping(revision.plan_json)
+    raw_rule = plan.get("hidden_city")
+    if not hidden_records:
+        if raw_rule is not None:
+            _mapping(raw_rule)
+        return ()
+    rule = _mapping(raw_rule)
+    if _required_stored_str(rule.get("version"), "hidden-city rule version") != (
+        "hidden-city-search-v1"
+    ):
+        raise StoredAgentEvidenceError("hidden-city rule version is invalid")
+    plan_leg_index = _stored_int(
+        rule.get("plan_leg_index"),
+        "hidden-city plan leg index",
+    )
+    desired_airports = tuple(
+        _required_stored_str(value, "hidden-city desired airport")
+        for value in _sequence(rule.get("desired_airports", ()))
+    )
+    intent = _mapping(plan["intent"])
+    final_plan_leg_index = len(_sequence(intent.get("legs", ()))) - 1
+    if (
+        plan_leg_index != final_plan_leg_index
+        or final_plan_leg_index < 0
+        or not desired_airports
+        or len(set(desired_airports)) != len(desired_airports)
+    ):
+        raise StoredAgentEvidenceError("hidden-city rule leg binding is invalid")
+    passenger_mix = _revision_passenger_mix(revision)
+    candidates: list[HiddenCityCandidate] = []
+    for record in hidden_records:
+        if (
+            record.baggage_status is None
+            or record.freshness is not Freshness.LIVE
+            or record.itinerary_evidence.get("checked_baggage") != record.baggage_status.value
+        ):
+            raise StoredAgentEvidenceError(
+                "hidden-city evidence requires explicit live baggage facts"
+            )
+        itinerary = record.itinerary_evidence
+        desired_airport = _required_stored_str(
+            itinerary.get("hidden_city_desired_airport"),
+            "hidden-city desired airport",
+        )
+        if desired_airport not in desired_airports:
+            raise StoredAgentEvidenceError("hidden-city desired airport is not approved")
+        evidence = confirmed_record_to_evidence(
+            record,
+            fallback_passenger_mix=passenger_mix,
+        )
+        decision = classify_hidden_city(
+            evidence,
+            desired_airport,
+            HiddenCityContext(
+                plan_leg_index=plan_leg_index,
+                final_plan_leg_index=final_plan_leg_index,
+            ),
+        )
+        candidate = decision.candidate
+        if (
+            candidate is None
+            or itinerary.get("hidden_city_ticketed_destination") != candidate.ticketed_destination
+            or itinerary.get("hidden_city_actionability") != candidate.actionability.value
+            or itinerary.get("hidden_city_warning_version") != HIDDEN_CITY_WARNING_VERSION
+            or itinerary.get("booking_action_available") is not False
+            or itinerary.get("watch_available") is not False
+        ):
+            raise StoredAgentEvidenceError("hidden-city evidence metadata is invalid")
+        candidates.append(candidate)
+    return tuple(
+        sorted(
+            candidates,
+            key=lambda candidate: (
+                candidate.source_evidence.total_amount.minor_units,
+                -candidate.source_evidence.observed_at.timestamp(),
+                str(candidate.source_evidence.id),
+            ),
+        )
     )
 
 

@@ -149,6 +149,14 @@ class AgentPlanProviderSummaryResponse(BaseModel):
     requests_per_minute: int | None
 
 
+class AgentHiddenCityWarningResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    code: str
+    message_ru: str
+    message_en: str
+
+
 class AgentPlanSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -160,6 +168,8 @@ class AgentPlanSummaryResponse(BaseModel):
     scope: list[AgentPlanScopeLegSummaryResponse]
     provider: AgentPlanProviderSummaryResponse
     hidden_city_enabled: bool
+    hidden_city_warning_version: str | None
+    hidden_city_warnings: list[AgentHiddenCityWarningResponse]
 
 
 class AgentPlanResponse(BaseModel):
@@ -471,12 +481,31 @@ class AgentCandidateFactResponse(BaseModel):
     booking_action: AgentBookingActionResponse
 
 
+class AgentHiddenCityCandidateResponse(BaseModel):
+    evidence_id: UUID
+    desired_airport: str
+    ticketed_destination: str
+    actionability: Literal["eligible", "research_only_not_actionable"]
+    total_amount: AgentMoneyResponse
+    passengers: int
+    source_id: str
+    freshness: Literal["live"]
+    observed_at: datetime
+    flown_segments: list[AgentSegmentResponse]
+    skipped_segments: list[AgentSegmentResponse]
+    warning_version: Literal["hidden-city-v1"]
+    warnings: list[str]
+    booking_action_available: Literal[False]
+    watch_available: Literal[False]
+
+
 class AgentRunResultsResponse(BaseModel):
     run_id: UUID
     state: Literal["not_ready", "ready", "unavailable"]
     evidence_available: bool
     ranking: AgentRankingSnapshotResponse | None = None
     candidates: list[AgentCandidateFactResponse] | None = None
+    hidden_city_candidates: list[AgentHiddenCityCandidateResponse] | None = None
     error_code: Literal["agent_results_unavailable"] | None = None
 
     @classmethod
@@ -624,6 +653,39 @@ class AgentRunResultsResponse(BaseModel):
                         ),
                     )
                     for candidate in report.candidates
+                ]
+            ),
+            hidden_city_candidates=(
+                None
+                if not view.hidden_city_candidates
+                else [
+                    AgentHiddenCityCandidateResponse(
+                        evidence_id=candidate.source_evidence.id,
+                        desired_airport=candidate.desired_airport,
+                        ticketed_destination=candidate.ticketed_destination,
+                        actionability=candidate.actionability.value,
+                        total_amount=AgentMoneyResponse(
+                            minor_units=candidate.source_evidence.total_amount.minor_units,
+                            currency=candidate.source_evidence.total_amount.currency,
+                        ),
+                        passengers=candidate.source_evidence.passengers,
+                        source_id=candidate.source_evidence.provider_id,
+                        freshness="live",
+                        observed_at=candidate.source_evidence.observed_at,
+                        flown_segments=[
+                            AgentSegmentResponse.model_validate(segment)
+                            for segment in candidate.flown_segments
+                        ],
+                        skipped_segments=[
+                            AgentSegmentResponse.model_validate(segment)
+                            for segment in candidate.skipped_segments
+                        ],
+                        warning_version="hidden-city-v1",
+                        warnings=[warning.code for warning in candidate.warnings],
+                        booking_action_available=False,
+                        watch_available=False,
+                    )
+                    for candidate in view.hidden_city_candidates
                 ]
             ),
             error_code=view.error_code,

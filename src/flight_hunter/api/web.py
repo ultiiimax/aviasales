@@ -352,6 +352,43 @@ def render_index_html() -> str:
       min-width: 0;
     }
 
+    .agent-hidden-city-warning {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid rgba(160, 74, 45, 0.35);
+      border-radius: 12px;
+      background: rgba(255, 238, 226, 0.8);
+    }
+
+    .agent-hidden-city-warning[hidden] {
+      display: none;
+    }
+
+    .agent-hidden-city-warning ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    .agent-hidden-city-result-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .agent-hidden-city-result {
+      display: grid;
+      gap: 7px;
+      padding: 11px;
+      border: 1px solid rgba(160, 74, 45, 0.28);
+      border-radius: 12px;
+      background: rgba(255, 247, 240, 0.88);
+    }
+
+    .agent-hidden-city-result ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+
     .agent-plan-grid dt {
       color: var(--muted);
       font-size: 11px;
@@ -778,6 +815,14 @@ def render_index_html() -> str:
               <div><dt>Источник</dt><dd id="agent-plan-source">Неизвестно</dd></div>
               <div><dt>Истекает</dt><dd id="agent-plan-expiry">Неизвестно</dd></div>
             </dl>
+            <section class="agent-hidden-city-warning" id="agent-hidden-city-warning" hidden>
+              <strong>Отдельное подтверждение hidden-city</strong>
+              <ul id="agent-hidden-city-warning-list"></ul>
+              <label>
+                <input type="checkbox" id="agent-hidden-city-ack">
+                Я прочитал риски багажа, отмены следующих сегментов и правил перевозчика.
+              </label>
+            </section>
             <div class="quick-actions" aria-label="Действия с планом">
               <button class="secondary" type="button" id="agent-plan-edit">Изменить план</button>
               <button class="secondary" type="button" id="agent-plan-full">Проверить всю область</button>
@@ -786,7 +831,7 @@ def render_index_html() -> str:
             <div class="agent-plan-region" id="agent-run-progress" role="status" aria-live="polite">Запуск ещё не создан.</div>
             <button class="secondary" type="button" id="agent-run-cancel" disabled>Отменить запуск</button>
             <section class="agent-plan-region" id="agent-risky-results" aria-labelledby="agent-risky-results-heading" hidden>
-              <h4 id="agent-risky-results-heading">Рискованные варианты</h4>
+              <h4 id="agent-risky-results-heading">Hidden-city исследования</h4>
               <div id="agent-risky-results-list">Нет подтверждённых рискованных вариантов.</div>
             </section>
             <div class="agent-plan-region" id="agent-partial-errors" role="alert" hidden></div>
@@ -1057,6 +1102,9 @@ def render_index_html() -> str:
         document.getElementById(id).textContent = "";
       });
       document.getElementById("agent-plan-execute").disabled = true;
+      document.getElementById("agent-hidden-city-warning").hidden = true;
+      document.getElementById("agent-hidden-city-warning-list").replaceChildren();
+      document.getElementById("agent-hidden-city-ack").checked = false;
       document.getElementById("agent-plan-full").disabled = true;
       document.getElementById("agent-plan-edit").disabled = true;
       document.getElementById("agent-run-cancel").disabled = true;
@@ -2489,9 +2537,9 @@ def render_index_html() -> str:
       const passengers = summary.passengers || {};
       const provider = summary.provider || {};
       const hiddenCityEnabled = summary.hidden_city_enabled === true;
+      const hiddenCityWarnings = summary.hidden_city_warnings || [];
       const executeReady = plan.state === "awaiting_approval"
-        && plan.executable === true
-        && !hiddenCityEnabled;
+        && plan.executable === true;
       const cloneReady = ["consumed", "expired", "superseded"].includes(plan.state)
         && plan.coverage === "quick";
       const editReady = ["draft", "awaiting_approval"].includes(plan.state);
@@ -2525,9 +2573,21 @@ def render_index_html() -> str:
         : "Неизвестно";
       document.getElementById("agent-plan-expiry").textContent = plan.expires_at || "Неизвестно";
 
+      const warningRegion = document.getElementById("agent-hidden-city-warning");
+      const warningList = document.getElementById("agent-hidden-city-warning-list");
+      const warningAck = document.getElementById("agent-hidden-city-ack");
+      warningRegion.hidden = !hiddenCityEnabled;
+      warningAck.checked = false;
+      warningList.replaceChildren();
+      hiddenCityWarnings.forEach((warning) => {
+        const item = document.createElement("li");
+        item.textContent = warning.message_ru;
+        warningList.append(item);
+      });
+
       const executeButton = document.getElementById("agent-plan-execute");
-      executeButton.disabled = !executeReady;
-      executeButton.title = executeReady
+      executeButton.disabled = !executeReady || (hiddenCityEnabled && !warningAck.checked);
+      executeButton.title = executeReady && !hiddenCityEnabled
         ? "Запустить ровно эту замороженную ревизию"
         : hiddenCityEnabled
           ? "Для hidden-city нужно отдельное подтверждение риска"
@@ -2672,6 +2732,90 @@ def render_index_html() -> str:
         : agentRunErrorMessage(run.error_code, run.public_message || `Состояние: ${run.status}`);
     }
 
+    function renderAgentRunResults(results) {
+      const region = document.getElementById("agent-risky-results");
+      const list = document.getElementById("agent-risky-results-list");
+      const candidates = results.hidden_city_candidates || [];
+      list.replaceChildren();
+      if (results.state !== "ready" || candidates.length === 0) {
+        region.hidden = !(currentAgentPlan?.summary?.hidden_city_enabled === true);
+        list.textContent = results.state === "unavailable"
+          ? "Hidden-city результаты недоступны: сохранённые evidence не прошли проверку."
+          : "Подтверждённых hidden-city вариантов нет.";
+        return;
+      }
+      region.hidden = false;
+      list.className = "agent-hidden-city-result-list";
+      const warningLabels = {
+        checked_baggage_continues: "Сданный багаж может улететь до конечного аэропорта билета.",
+        later_segments_may_be_cancelled: "Пропуск сегмента может отменить следующие сегменты.",
+        carrier_contract_risk: "Маршрут может конфликтовать с правилами тарифа или перевозчика."
+      };
+      candidates.forEach((candidate) => {
+        const card = document.createElement("article");
+        card.className = "agent-hidden-city-result";
+        const title = document.createElement("strong");
+        title.textContent =
+          `Выйти в ${candidate.desired_airport}; билет оформлен до `
+          + `${candidate.ticketed_destination}`;
+        const facts = document.createElement("div");
+        facts.className = "small";
+        const amount = candidate.total_amount || {};
+        const actionability = candidate.actionability === "eligible"
+          ? "условно применим без регистрируемого багажа"
+          : "только исследование: багаж не подтверждён";
+        facts.textContent =
+          `${formatMinorAmount(amount.minor_units, amount.currency)} · `
+          + `${candidate.passengers} пасс. · LIVE · ${candidate.source_id} · `
+          + `наблюдалось ${candidate.observed_at} · ${actionability}`;
+        const route = document.createElement("div");
+        route.className = "small";
+        const flown = (candidate.flown_segments || [])
+          .map((segment) => `${segment.origin}→${segment.destination}`)
+          .join(" · ");
+        const skipped = (candidate.skipped_segments || [])
+          .map((segment) => `${segment.origin}→${segment.destination}`)
+          .join(" · ");
+        route.textContent = `Летим: ${flown || "неизвестно"} · пропускаем: ${skipped || "неизвестно"}`;
+        const warnings = document.createElement("ul");
+        (candidate.warnings || []).forEach((code) => {
+          const item = document.createElement("li");
+          item.textContent = warningLabels[code] || code;
+          warnings.append(item);
+        });
+        const actionsDisabled = candidate.booking_action_available === false
+          && candidate.watch_available === false;
+        const actions = document.createElement("div");
+        actions.className = "small";
+        actions.textContent = actionsDisabled
+          ? "Покупка и отслеживание отключены для hidden-city результата."
+          : "Действия заблокированы: некорректный контракт результата.";
+        card.append(title, facts, route, warnings, actions);
+        list.append(card);
+      });
+    }
+
+    async function loadAgentRunResults(
+      planId,
+      runId,
+      sessionGeneration = agentSessionGeneration
+    ) {
+      const response = await agentSessionFetch(
+        `${agentPlanUrl(planId)}/runs/${encodeURIComponent(runId)}/results`,
+        {headers: authHeaders()},
+        sessionGeneration
+      );
+      if (!response) return;
+      if (!response.ok) {
+        const message = await codedMessage(response);
+        if (!agentSessionIsCurrent(sessionGeneration)) return;
+        throw new Error(message);
+      }
+      const results = await response.json();
+      if (!agentSessionIsCurrent(sessionGeneration)) return;
+      renderAgentRunResults(results);
+    }
+
     function agentSessionIsCurrent(sessionGeneration) {
       return sessionGeneration === agentSessionGeneration && Boolean(sessionToken());
     }
@@ -2761,11 +2905,14 @@ def render_index_html() -> str:
     }
 
     async function executeAgentPlan() {
+      const summary = currentAgentPlan ? currentAgentPlan.summary || {} : {};
+      const hiddenCityEnabled = summary.hidden_city_enabled === true;
+      const hiddenCityAcknowledged = document.getElementById("agent-hidden-city-ack").checked;
       if (
         !currentAgentPlan
         || currentAgentPlan.state !== "awaiting_approval"
         || !currentAgentPlan.executable
-        || currentAgentPlan.summary.hidden_city_enabled === true
+        || (hiddenCityEnabled && !hiddenCityAcknowledged)
       ) return;
       const sessionGeneration = agentSessionGeneration;
       const plan = currentAgentPlan;
@@ -2780,7 +2927,10 @@ def render_index_html() -> str:
           body: JSON.stringify({
             revision_id: plan.revision_id,
             expected_revision: plan.revision,
-            content_hash: plan.content_hash
+            content_hash: plan.content_hash,
+            hidden_city_warning_version: hiddenCityEnabled
+              ? summary.hidden_city_warning_version
+              : null
           })
         },
         sessionGeneration
@@ -2880,6 +3030,8 @@ def render_index_html() -> str:
       renderAgentRun(run);
       if (["queued", "running", "cancel_requested"].includes(run.status)) {
         window.setTimeout(() => pollAgentRun(run, 1000, sessionGeneration), 1000);
+      } else {
+        await loadAgentRunResults(storedPlanId, run.run_id, sessionGeneration);
       }
     }
 
@@ -2930,6 +3082,11 @@ def render_index_html() -> str:
           if (!agentSessionIsCurrent(sessionGeneration)) return;
           renderAgentPlan(plan);
         }
+        await loadAgentRunResults(
+          currentAgentPlan.plan_id,
+          latest.run_id,
+          sessionGeneration
+        );
       }
     }
 
@@ -3256,6 +3413,14 @@ def render_index_html() -> str:
 
     document.querySelector("#search-form").addEventListener("submit", runSearch);
     document.getElementById("agent-plan-execute").addEventListener("click", executeAgentPlan);
+    document.getElementById("agent-hidden-city-ack").addEventListener("change", (event) => {
+      if (!currentAgentPlan) return;
+      const hiddenCityEnabled = currentAgentPlan.summary.hidden_city_enabled === true;
+      const executeReady = currentAgentPlan.state === "awaiting_approval"
+        && currentAgentPlan.executable === true;
+      document.getElementById("agent-plan-execute").disabled =
+        !executeReady || (hiddenCityEnabled && !event.target.checked);
+    });
     document.getElementById("agent-plan-full").addEventListener("click", cloneAgentPlanAsFull);
     document.getElementById("agent-run-cancel").addEventListener("click", cancelAgentRun);
     document.getElementById("agent-plan-edit").addEventListener("click", beginAgentPlanEdit);

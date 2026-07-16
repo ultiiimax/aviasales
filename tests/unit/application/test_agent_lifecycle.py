@@ -57,6 +57,7 @@ class StaticAirportCatalog:
             (
                 _airport("LED", "RU", "Saint Petersburg"),
                 _airport("CDG", "FR", "Paris"),
+                _airport("FCO", "IT", "Rome"),
             )
         )
 
@@ -126,7 +127,7 @@ async def test_complete_create_persists_executable_revision_without_provider_cal
     assert view.content_hash.startswith("sha256:")
     assert stored is not None
     assert stored.parser_version == "intent-parser-v2"
-    assert stored.planner_version == "agent-plan-builder-v4"
+    assert stored.planner_version == "agent-plan-builder-v5"
     assert provider.calls == 0
     await engine.dispose()
 
@@ -360,6 +361,37 @@ async def test_explicit_zero_disables_nearby_preset_across_edit_and_clone() -> N
 async def test_execute_persists_exact_budget_strategy_session_and_warning_snapshot() -> None:
     async with _lifecycle_harness() as harness:
         hidden = await _create(harness.service, strategies=("hidden_city",))
+        stored_revision = await AgentPlanRepository(harness.session).get_revision(
+            HOUSEHOLD_ID,
+            hidden.revision_id,
+        )
+        assert stored_revision is not None
+        stored_plan = json.loads(stored_revision.plan_json)
+        stored_scope = json.loads(stored_revision.scope_snapshot_json)
+        hidden_rule = stored_plan["hidden_city"]
+        assert hidden_rule["version"] == "hidden-city-search-v1"
+        assert hidden_rule["plan_leg_index"] == 0
+        assert hidden_rule["desired_airports"] == ["CDG"]
+        discovery = hidden_rule["discovery"]
+        assert discovery["origin_airports"] == ["LED"]
+        assert discovery["date_start"] == "2026-09-10"
+        assert discovery["date_end"] == "2026-09-10"
+        assert discovery["discovery_source_ids"] == ["aviasales_hot_offers"]
+        assert discovery["max_destination_seeds"] == 4
+        assert discovery["exact_verification_limit"] == 2
+        assert discovery["eligible_destination_countries"] == [
+            {"code": "FCO", "country_code": "IT"},
+        ]
+        assert (
+            discovery["catalog_checksum"] == (stored_scope["legs"][0]["origin"]["catalog_checksum"])
+        )
+        assert hidden.summary.hidden_city_warning_version == HIDDEN_CITY_WARNING_VERSION
+        assert {warning.code for warning in hidden.summary.hidden_city_warnings} == {
+            "checked_baggage_continues",
+            "later_segments_may_be_cancelled",
+            "carrier_contract_risk",
+        }
+        await harness.session.rollback()
         run = await _execute(
             harness.service,
             hidden,
@@ -375,14 +407,47 @@ async def test_execute_persists_exact_budget_strategy_session_and_warning_snapsh
     assert approval.snapshot.approved_by_session_id == SESSION_ID
     assert approval.snapshot.revision_content_hash == hidden.content_hash
     assert approval.snapshot.approved_budget == {
-        "calendar_searches": 0,
-        "exact_searches": 1,
-        "logical_operations": 1,
-        "http_attempts": 27,
+        "calendar_searches": 4,
+        "exact_searches": 3,
+        "logical_operations": 7,
+        "http_attempts": 93,
         "deadline_seconds": 600,
     }
     assert approval.snapshot.approved_strategies == ("hidden_city",)
     assert approval.snapshot.risk_warning_versions == {"hidden_city": HIDDEN_CITY_WARNING_VERSION}
+
+
+@pytest.mark.anyio
+async def test_hidden_city_acknowledgement_is_bound_to_the_exact_successor_revision() -> None:
+    async with _lifecycle_harness() as harness:
+        original = await _create(harness.service, strategies=("hidden_city",))
+        successor = await harness.service.edit_plan(
+            EditAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                plan_id=original.plan_id,
+                source_revision_id=original.revision_id,
+                expected_revision=original.revision,
+                selections={"requested_strategies": ["hidden_city"]},
+            )
+        )
+
+        with pytest.raises(AgentLifecycleError) as stale:
+            await _execute(
+                harness.service,
+                original,
+                "hidden-old-revision",
+                hidden_city_warning_version=HIDDEN_CITY_WARNING_VERSION,
+            )
+        accepted = await _execute(
+            harness.service,
+            successor,
+            "hidden-successor-run",
+            hidden_city_warning_version=HIDDEN_CITY_WARNING_VERSION,
+        )
+
+    assert stale.value.code == "agent_plan_stale"
+    assert accepted.revision_id == successor.revision_id
 
 
 @pytest.mark.anyio

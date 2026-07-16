@@ -815,20 +815,22 @@ agent_run_operations_table = Table(
     ),
     CheckConstraint(
         "operation_kind IN ('scope_freeze', 'calendar_search', 'exact_start', "
-        "'exact_poll', 'suggest_discovery', 'comparison', 'composition', "
+        "'exact_poll', 'suggest_discovery', 'hidden_city_discovery', "
+        "'comparison', 'composition', "
         "'ranking', 'analysis')",
         name="ck_agent_run_operation_kind",
     ),
     CheckConstraint(
         "(operation_kind IN ('calendar_search', 'exact_start', 'exact_poll', "
-        "'suggest_discovery') "
+        "'suggest_discovery', 'hidden_city_discovery') "
         "AND provider_id IS NOT NULL) OR "
         "(operation_kind IN ('scope_freeze', 'comparison', 'composition', "
         "'ranking', 'analysis') AND provider_id IS NULL)",
         name="ck_agent_run_operation_provider",
     ),
     CheckConstraint(
-        "(operation_kind IN ('calendar_search', 'exact_start', 'suggest_discovery') "
+        "(operation_kind IN ('calendar_search', 'exact_start', 'suggest_discovery', "
+        "'hidden_city_discovery') "
         "AND consumes_logical_unit IS TRUE AND logical_root_operation_id IS NULL) OR "
         "(operation_kind = 'exact_poll' AND consumes_logical_unit IS FALSE "
         "AND logical_root_operation_id IS NOT NULL) OR "

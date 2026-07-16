@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from flight_hunter.domain.agent_search import TripShape
+from flight_hunter.domain.agent_search import TicketShape, TripShape
 from flight_hunter.domain.money import Money
 from flight_hunter.domain.offers import (
     FlightSegmentSummary,
@@ -45,6 +45,12 @@ class PriceComparisonStatus(StrEnum):
 class UnknownCostKind(StrEnum):
     GROUND_TRANSFER = "ground_transfer"
     CURRENCY_CONVERSION = "currency_conversion"
+
+
+class CheckedBaggageState(StrEnum):
+    INCLUDED = "included"
+    NOT_INCLUDED = "not_included"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +203,8 @@ class ConfirmedOfferEvidence:
     baggage_summary: str | None = None
     passenger_mix: PassengerMix | None = None
     price_basis: PriceBasis = PriceBasis.TOTAL_FOR_PASSENGERS
+    ticket_shape: TicketShape | None = None
+    checked_baggage: CheckedBaggageState | None = None
 
     def __post_init__(self) -> None:
         _require_evidence_identity(self.id, self.provider_id)
@@ -219,12 +227,30 @@ class ConfirmedOfferEvidence:
         price_basis = PriceBasis(self.price_basis)
         if price_basis is PriceBasis.PROVIDER_SINGLE_ADULT_TICKET and self.passengers != 1:
             raise ValueError("single-adult ticket prices require passengers=1")
+        ticket_shape = (
+            TicketShape.ROUND_TRIP
+            if self.ticket_shape is None and self.return_date is not None
+            else TicketShape.ONE_WAY
+            if self.ticket_shape is None
+            else TicketShape(self.ticket_shape)
+        )
+        if ticket_shape is TicketShape.ONE_WAY and self.return_date is not None:
+            raise ValueError("one-way ticket evidence cannot contain a return date")
+        if ticket_shape is TicketShape.ROUND_TRIP and self.return_date is None:
+            raise ValueError("round-trip ticket evidence requires a return date")
+        checked_baggage = (
+            _inferred_checked_baggage(self.baggage_summary)
+            if self.checked_baggage is None
+            else CheckedBaggageState(self.checked_baggage)
+        )
         object.__setattr__(self, "origin", origin)
         object.__setattr__(self, "destination", destination)
         object.__setattr__(self, "segment_ids", segment_ids)
         object.__setattr__(self, "segments", segments)
         object.__setattr__(self, "passenger_mix", passenger_mix)
         object.__setattr__(self, "price_basis", price_basis)
+        object.__setattr__(self, "ticket_shape", ticket_shape)
+        object.__setattr__(self, "checked_baggage", checked_baggage)
         object.__setattr__(
             self,
             "protection_status",
@@ -481,6 +507,12 @@ def _require_money(value: Money, field_name: str) -> None:
         raise TypeError(f"{field_name} must be Money")
     if value.minor_units < 0:
         raise ValueError(f"{field_name} cannot be negative")
+
+
+def _inferred_checked_baggage(summary: str | None) -> CheckedBaggageState:
+    if summary is not None and re.search(r"(?:^|,\s*)baggage:[1-9][0-9]*", summary):
+        return CheckedBaggageState.INCLUDED
+    return CheckedBaggageState.UNKNOWN
 
 
 def _require_passengers(passengers: int) -> None:

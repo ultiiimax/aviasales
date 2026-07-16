@@ -7,6 +7,7 @@ from datetime import date, datetime
 from uuid import UUID, uuid5
 
 from flight_hunter.domain.agent_evidence import (
+    CheckedBaggageState,
     ConfirmedOfferEvidence,
     DiscoverySignal,
     DiscoverySource,
@@ -103,6 +104,7 @@ def map_parsed_ticket_to_evidence(
         protection_status=ProtectionStatus.UNKNOWN,
         seller_name=ticket.best_proposal.gate_name or None,
         baggage_summary=_baggage_summary(ticket),
+        checked_baggage=_checked_baggage(ticket),
     )
 
 
@@ -273,6 +275,17 @@ def _baggage_summary(ticket: ParsedTicket) -> str | None:
     if handbag:
         parts.append(f"handbag:{handbag}")
     return ", ".join(parts) if parts else None
+
+
+def _checked_baggage(ticket: ParsedTicket) -> CheckedBaggageState:
+    count = ticket.best_proposal.baggage_count
+    if count is None:
+        return CheckedBaggageState.UNKNOWN
+    if count > 0:
+        return CheckedBaggageState.INCLUDED
+    if count == 0:
+        return CheckedBaggageState.NOT_INCLUDED
+    return CheckedBaggageState.UNKNOWN
 
 
 def _segment_summaries(ticket: ParsedTicket) -> tuple[FlightSegmentSummary, ...]:

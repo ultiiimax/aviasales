@@ -51,6 +51,12 @@ class RouteStrategy(StrEnum):
     HIDDEN_CITY = "hidden_city"
 
 
+class TicketShape(StrEnum):
+    ONE_WAY = "one_way"
+    ROUND_TRIP = "round_trip"
+    NATIVE_MULTI = "native_multi"
+
+
 class CapabilityState(StrEnum):
     SUPPORTED = "supported"
     UNSUPPORTED = "unsupported"

@@ -323,6 +323,7 @@ class AgentOperationKind(StrEnum):
     EXACT_START = "exact_start"
     EXACT_POLL = "exact_poll"
     SUGGEST_DISCOVERY = "suggest_discovery"
+    HIDDEN_CITY_DISCOVERY = "hidden_city_discovery"
     COMPARISON = "comparison"
     COMPOSITION = "composition"
     RANKING = "ranking"
@@ -2518,10 +2519,10 @@ class AgentOperationRepository:
         if row is None:
             raise AgentOperationConflict("agent_operation_not_found")
         inactive_error = _inactive_run_error(row, normalized_now)
-        empty_discovery = (
-            error_code == "agent_no_discovery_results"
-            and row["operation_kind"] == AgentOperationKind.SUGGEST_DISCOVERY.value
-        )
+        empty_discovery = error_code == "agent_no_discovery_results" and row["operation_kind"] in {
+            AgentOperationKind.SUGGEST_DISCOVERY.value,
+            AgentOperationKind.HIDDEN_CITY_DISCOVERY.value,
+        }
         if inactive_error is None and not empty_discovery:
             raise AgentOperationConflict("agent_operation_skip_reason_invalid")
         effective_error = inactive_error or error_code
@@ -3735,6 +3736,7 @@ class AgentOperationRepository:
             in {
                 AgentOperationKind.CALENDAR_SEARCH,
                 AgentOperationKind.SUGGEST_DISCOVERY,
+                AgentOperationKind.HIDDEN_CITY_DISCOVERY,
             }
             and result_type is AgentOperationResultType.DISCOVERY_SIGNAL
         ) or (
@@ -5126,6 +5128,7 @@ _PROVIDER_BOUND_OPERATION_KINDS = frozenset(
         AgentOperationKind.EXACT_START,
         AgentOperationKind.EXACT_POLL,
         AgentOperationKind.SUGGEST_DISCOVERY,
+        AgentOperationKind.HIDDEN_CITY_DISCOVERY,
     }
 )
 _INDEPENDENT_OPERATION_KINDS = frozenset(
@@ -5142,6 +5145,7 @@ _LOGICAL_ROOT_OPERATION_KINDS = frozenset(
         AgentOperationKind.CALENDAR_SEARCH,
         AgentOperationKind.EXACT_START,
         AgentOperationKind.SUGGEST_DISCOVERY,
+        AgentOperationKind.HIDDEN_CITY_DISCOVERY,
     }
 )
 _NETWORK_OPERATION_KINDS = frozenset(
@@ -5150,6 +5154,7 @@ _NETWORK_OPERATION_KINDS = frozenset(
         AgentOperationKind.EXACT_START,
         AgentOperationKind.EXACT_POLL,
         AgentOperationKind.SUGGEST_DISCOVERY,
+        AgentOperationKind.HIDDEN_CITY_DISCOVERY,
     }
 )
 _OPERATION_RESULT_MATRIX: dict[AgentOperationKind, frozenset[AgentOperationResultType]] = {
@@ -5160,6 +5165,9 @@ _OPERATION_RESULT_MATRIX: dict[AgentOperationKind, frozenset[AgentOperationResul
         {AgentOperationResultType.OPERATION, AgentOperationResultType.CONFIRMED_OFFER}
     ),
     AgentOperationKind.SUGGEST_DISCOVERY: frozenset({AgentOperationResultType.DISCOVERY_SIGNAL}),
+    AgentOperationKind.HIDDEN_CITY_DISCOVERY: frozenset(
+        {AgentOperationResultType.DISCOVERY_SIGNAL}
+    ),
     AgentOperationKind.COMPARISON: frozenset(),
     AgentOperationKind.COMPOSITION: frozenset({AgentOperationResultType.COMPOSED_CANDIDATE}),
     AgentOperationKind.RANKING: frozenset({AgentOperationResultType.RANKING_SNAPSHOT}),
@@ -5252,6 +5260,7 @@ _DISCOVERY_EVIDENCE_KEYS = frozenset(
         "source_id",
         "source_version",
         "leg_ordinal",
+        "search_role",
     }
 )
 _CONFIRMED_ITINERARY_KEYS = frozenset(
@@ -5283,6 +5292,15 @@ _CONFIRMED_ITINERARY_KEYS = frozenset(
         "ticket_structure",
         "seller",
         "fare_family",
+        "ticket_shape",
+        "checked_baggage",
+        "baggage_summary",
+        "hidden_city_desired_airport",
+        "hidden_city_ticketed_destination",
+        "hidden_city_actionability",
+        "hidden_city_warning_version",
+        "booking_action_available",
+        "watch_available",
     }
 )
 _COMPOSED_ITINERARY_KEYS = frozenset(
@@ -5595,6 +5613,7 @@ def _expected_attempt_kind(operation: Mapping[Any, Any]) -> AttemptKind:
         AgentOperationKind.CALENDAR_SEARCH,
         AgentOperationKind.EXACT_START,
         AgentOperationKind.SUGGEST_DISCOVERY,
+        AgentOperationKind.HIDDEN_CITY_DISCOVERY,
     }:
         return AttemptKind.START
     raise AgentOperationConflict("agent_operation_not_networked")
@@ -5693,10 +5712,14 @@ def _validate_new_operation(operation: NewAgentRunOperation) -> tuple[str, str |
     )
     _require_aware(operation.created_at, "created_at")
     if (
-        kind is AgentOperationKind.SUGGEST_DISCOVERY
+        kind
+        in {
+            AgentOperationKind.SUGGEST_DISCOVERY,
+            AgentOperationKind.HIDDEN_CITY_DISCOVERY,
+        }
         and "seed_limit" not in operation.immutable_input
     ):
-        raise ValueError("suggest discovery operation requires seed_limit")
+        raise ValueError("discovery operation requires seed_limit")
     immutable_input_json = canonical_operation_input_json(operation.immutable_input)
     private_continuation_json = (
         _canonical_private_continuation_json(operation.private_continuation)

@@ -522,7 +522,10 @@ Canonical fingerprint строится из:
 - self-transfer;
 - positioning flight;
 - airport change;
-- hidden-city research — отдельный experimental режим.
+- hidden-city research — отдельный approval-gated режим только для финального
+  one-way leg. Он использует bounded onward discovery, повторную exact-проверку
+  и typed baggage/ticket-shape eligibility; результат не попадает в обычный
+  ranking и не получает booking/watch actions.
 
 ### 7.2. Графовая модель
 
@@ -619,9 +622,10 @@ Current priced offers expose a deterministic `risk` object from
   `provider_single_adult_ticket` or `unknown_freshness`;
 - `explanations`: deterministic text derived from domain fields, never provider free text.
 
-This contract covers existing direct priced offers only. It does not create split-ticket,
-self-transfer or hidden-city candidates. Future itinerary composition can add more flags while
-keeping the same API shape.
+This contract covers existing direct priced offers only. Split/self-transfer ranking uses the
+agent composition contract. Hidden-city evidence is classified separately, stored with
+`search_role=hidden_city`, and serialized in its own research-only result section with the
+current warning version and actions forced off.
 
 ### 8.3. Total trip cost
 

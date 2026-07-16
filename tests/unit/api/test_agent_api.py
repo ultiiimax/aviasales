@@ -347,6 +347,8 @@ async def test_bounded_plan_exposes_sanitized_frozen_plan_card_summary(
             "requests_per_minute": 20,
         },
         "hidden_city_enabled": False,
+        "hidden_city_warning_version": None,
+        "hidden_city_warnings": [],
     }
     assert plan["estimate"] == {
         "calendar_searches": 7,

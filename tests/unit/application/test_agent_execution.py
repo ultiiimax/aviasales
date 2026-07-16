@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from flight_hunter.application.agent_hidden_city import HIDDEN_CITY_WARNING_VERSION
 from flight_hunter.application.agent_intent import IntentParser
 from flight_hunter.application.agent_lifecycle import (
     AgentLifecycleService,
@@ -143,6 +144,18 @@ class _ProductionShapeAirportCatalog:
                     scheduled_service=True,
                     commercial_provenance="task9.test_catalog",
                 ),
+                Airport(
+                    iata_code="FCO",
+                    name="Fiumicino",
+                    municipality="Rome",
+                    country_code="IT",
+                    latitude=41.8003,
+                    longitude=12.2389,
+                    airport_type=AirportType.LARGE_AIRPORT,
+                    active=True,
+                    scheduled_service=True,
+                    commercial_provenance="task12.test_catalog",
+                ),
             )
         )
 
@@ -214,6 +227,7 @@ class ResumableFakeGateway:
     private_booking_results_url: str | None = None
     preserve_calendar_ids: bool = False
     evidence_observed_at: datetime | None = None
+    connection_airport: str = "AMS"
 
     @property
     def provider_calls(self) -> int:
@@ -343,10 +357,11 @@ class ResumableFakeGateway:
 
     def evidence_for(self, continuation: ExactSearchContinuation) -> ConfirmedOfferEvidence:
         amount = self.exact_amounts.get(continuation.expected_departure_date, 20_000)
+        connection_airport = self.connection_airport
         if (
             self.connecting_evidence
-            and continuation.expected_origin != "AMS"
-            and continuation.expected_destination != "AMS"
+            and continuation.expected_origin != connection_airport
+            and continuation.expected_destination != connection_airport
         ):
             segments = (
                 FlightSegmentSummary(
@@ -354,7 +369,7 @@ class ResumableFakeGateway:
                     airline_name="Fixture Air",
                     flight_number="FV100",
                     origin=continuation.expected_origin,
-                    destination="AMS",
+                    destination=connection_airport,
                     depart_at=f"{continuation.expected_departure_date.isoformat()} 08:00",
                     arrive_at=f"{continuation.expected_departure_date.isoformat()} 10:00",
                     depart_at_utc=datetime(
@@ -376,7 +391,7 @@ class ResumableFakeGateway:
                     airline_code="FV",
                     airline_name="Fixture Air",
                     flight_number="FV101",
-                    origin="AMS",
+                    origin=connection_airport,
                     destination=continuation.expected_destination,
                     depart_at=f"{continuation.expected_departure_date.isoformat()} 11:00",
                     arrive_at=f"{continuation.expected_departure_date.isoformat()} 13:00",
@@ -399,9 +414,9 @@ class ResumableFakeGateway:
         else:
             depart_hour = (
                 8
-                if continuation.expected_destination == "AMS"
+                if continuation.expected_destination == connection_airport
                 else 13
-                if continuation.expected_origin == "AMS"
+                if continuation.expected_origin == connection_airport
                 else 10
             )
             arrive_hour = depart_hour + 2
@@ -442,7 +457,7 @@ class ResumableFakeGateway:
                         airline_name="Fixture Air",
                         flight_number="FV102",
                         origin=continuation.expected_destination,
-                        destination="AMS",
+                        destination=connection_airport,
                         depart_at=f"{continuation.expected_return_date.isoformat()} 08:00",
                         arrive_at=f"{continuation.expected_return_date.isoformat()} 10:00",
                         depart_at_utc=datetime(
@@ -464,7 +479,7 @@ class ResumableFakeGateway:
                         airline_code="FV",
                         airline_name="Fixture Air",
                         flight_number="FV103",
-                        origin="AMS",
+                        origin=connection_airport,
                         destination=continuation.expected_origin,
                         depart_at=f"{continuation.expected_return_date.isoformat()} 11:00",
                         arrive_at=f"{continuation.expected_return_date.isoformat()} 13:00",
@@ -2992,12 +3007,9 @@ async def test_terminal_coverage_marks_started_but_unfinished_pair_incomplete(
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("requested_strategies", "approved_strategies"),
-    (
-        (("hidden_city",), ("hidden_city",)),
-        (("direct",), ("through_ticket",)),
-    ),
+    ((("direct",), ("through_ticket",)),),
 )
-async def test_task9_fails_closed_for_unsupported_or_mismatched_approved_strategies(
+async def test_task9_fails_closed_for_mismatched_approved_strategies(
     tmp_path: Path,
     execution_module: ModuleType,
     requested_strategies: tuple[str, ...],
@@ -3038,6 +3050,201 @@ async def test_task9_fails_closed_for_unsupported_or_mismatched_approved_strateg
     assert terminal.http_attempts_consumed == 0
     assert operations == ()
     assert circuit_rows == reservations == gateway.provider_calls == 0
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_hidden_city_uses_distinct_research_operation_and_stays_out_of_ranking_actions(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "hidden-city-isolated.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        requested_strategies=("direct", "hidden_city"),
+        calendar_searches=4,
+        exact_searches=3,
+        logical_budget=7,
+    )
+    clock = MutableClock()
+    onward = DiscoverySignal(
+        id=uuid4(),
+        provider_id="aviasales_search",
+        origin="LED",
+        destination="FCO",
+        departure_date=date(2026, 9, 10),
+        return_date=None,
+        observed_amount=Money(15_000, "RUB"),
+        observed_at=clock(),
+        source_kind=DiscoverySource.HOT_OFFER,
+        passengers=1,
+    )
+    gateway = ResumableFakeGateway(
+        clock,
+        anywhere_results=[(onward,)],
+        connecting_evidence=True,
+        connection_airport="CDG",
+        private_booking_descriptor=True,
+    )
+
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            limit=24,
+        )
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        evidence = await AgentEvidenceRepository(session).list_confirmed_evidence(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        descriptors = await AgentEvidenceRepository(session).list_booking_action_descriptors(
+            HOUSEHOLD_ID,
+            RUN_ID,
+            active_at=clock(),
+        )
+        ranking_operation = next(
+            operation for operation in operations if operation.kind is AgentOperationKind.RANKING
+        )
+        assert ranking_operation.result_id is not None
+        ranking = await AgentEvidenceRepository(session).get_ranking_snapshot(
+            HOUSEHOLD_ID,
+            ranking_operation.result_id,
+        )
+        await session.rollback()
+        results = await AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(clock=clock),
+        ).get_run_results(
+            HOUSEHOLD_ID,
+            PLAN_ID,
+            RUN_ID,
+        )
+
+    assert terminal.status == "completed"
+    assert any(
+        operation.kind is AgentOperationKind.HIDDEN_CITY_DISCOVERY for operation in operations
+    )
+    hidden_records = tuple(
+        record
+        for record in evidence
+        if record.itinerary_evidence.get("search_role") == "hidden_city"
+    )
+    base_records = tuple(
+        record
+        for record in evidence
+        if record.itinerary_evidence.get("search_role", "base") == "base"
+    )
+    assert len(hidden_records) == len(base_records) == 1
+    assert hidden_records[0].itinerary_evidence["hidden_city_desired_airport"] == "CDG"
+    assert (
+        hidden_records[0].itinerary_evidence["hidden_city_actionability"]
+        == "research_only_not_actionable"
+    )
+    assert ranking is not None
+    assert ranking.confirmed_evidence_ids == (base_records[0].id,)
+    assert tuple(item.confirmed_evidence_id for item in descriptors) == (base_records[0].id,)
+    assert results.state == "ready"
+    assert results.report is not None
+    assert len(results.hidden_city_candidates) == 1
+    assert results.hidden_city_candidates[0].source_evidence.id == hidden_records[0].id
+    assert results.hidden_city_candidates[0].booking_action_available is False
+    assert results.hidden_city_candidates[0].watch_available is False
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_production_plan_snapshot_executes_hidden_city_research_end_to_end(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "hidden-city-production-chain.db")
+    clock = MutableClock()
+    onward = DiscoverySignal(
+        id=uuid4(),
+        provider_id="aviasales_search",
+        origin="LED",
+        destination="FCO",
+        departure_date=date(2026, 9, 10),
+        return_date=None,
+        observed_amount=Money(15_000, "RUB"),
+        observed_at=clock(),
+        source_kind=DiscoverySource.HOT_OFFER,
+        passengers=1,
+    )
+    gateway = ResumableFakeGateway(
+        clock,
+        anywhere_results=[(onward,)],
+        connecting_evidence=True,
+        connection_airport="CDG",
+    )
+
+    async with sessions() as session:
+        lifecycle = AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(
+                clock=clock,
+                scope_resolver=ScopeResolver(repository=_ProductionShapeAirportCatalog()),
+            ),
+            clock=clock,
+            provider_gateway=gateway,
+        )
+        plan = await lifecycle.create_plan(
+            CreateAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                text="LED → CDG",
+                selections={
+                    "departure_date": "2026-09-10",
+                    "requested_strategies": ["direct", "hidden_city"],
+                },
+                coverage=CoverageMode.QUICK,
+            )
+        )
+        assert plan.estimate is not None
+        assert plan.estimate.calendar_searches == 4
+        assert plan.estimate.exact_searches == 3
+        run_view = await lifecycle.execute_plan(
+            ExecuteAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                approved_by_session_id=SESSION_ID,
+                plan_id=plan.plan_id,
+                revision_id=plan.revision_id,
+                expected_revision=plan.revision,
+                content_hash=plan.content_hash,
+                idempotency_key="production-hidden-city",
+                hidden_city_warning_version=HIDDEN_CITY_WARNING_VERSION,
+            )
+        )
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            run_id=run_view.run_id,
+            limit=24,
+        )
+        await session.rollback()
+        results = await lifecycle.get_run_results(
+            HOUSEHOLD_ID,
+            plan.plan_id,
+            run_view.run_id,
+        )
+
+    assert terminal.status == "completed"
+    assert results.state == "ready"
+    assert results.report is not None
+    assert len(results.hidden_city_candidates) == 1
+    hidden = results.hidden_city_candidates[0]
+    assert hidden.desired_airport == "CDG"
+    assert hidden.ticketed_destination == "FCO"
+    assert hidden.booking_action_available is False
+    assert hidden.watch_available is False
     await engine.dispose()
 
 
@@ -6593,6 +6800,27 @@ async def _seed_run(
             "version": "confirmed-hubs-v1",
             "max_hubs_per_leg": 2,
             "source": "confirmed_connection_airports",
+        }
+    if "hidden_city" in requested_strategies:
+        plan["hidden_city"] = {
+            "version": "hidden-city-search-v1",
+            "plan_leg_index": 0,
+            "desired_airports": ["CDG"],
+            "discovery": {
+                "origin_airports": ["LED"],
+                "date_start": "2026-09-10",
+                "date_end": end_date or "2026-09-10",
+                "allowed_country_codes": [],
+                "excluded_country_codes": [],
+                "discovery_source_ids": ["aviasales_hot_offers"],
+                "max_destination_seeds": 4,
+                "exact_verification_limit": 2,
+                "catalog_checksum": "sha256:" + "a" * 64,
+                "taxonomy_version": "v1",
+                "eligible_destination_countries": [
+                    {"code": "FCO", "country_code": "IT"},
+                ],
+            },
         }
     scope = {
         "coverage": coverage,

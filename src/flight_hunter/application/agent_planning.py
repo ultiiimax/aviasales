@@ -1,7 +1,8 @@
+# ruff: noqa: RUF001
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 
@@ -163,6 +164,42 @@ class FrozenCompositionRule:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenHiddenCityRule:
+    version: str
+    plan_leg_index: int
+    desired_airports: tuple[str, ...]
+    discovery_rule: AnywhereDiscoveryRule
+
+    def __post_init__(self) -> None:
+        if self.version != "hidden-city-search-v1":
+            raise ValueError("unsupported hidden-city search rule version")
+        if type(self.plan_leg_index) is not int or self.plan_leg_index < 0:
+            raise ValueError("plan_leg_index must be a non-negative integer")
+        desired_airports = tuple(self.desired_airports)
+        if (
+            not desired_airports
+            or len(set(desired_airports)) != len(desired_airports)
+            or any(
+                not isinstance(code, str)
+                or len(code) != 3
+                or not code.isascii()
+                or not code.isalpha()
+                or code != code.upper()
+                for code in desired_airports
+            )
+        ):
+            raise ValueError("desired_airports must contain unique uppercase IATA codes")
+        if not isinstance(self.discovery_rule, AnywhereDiscoveryRule):
+            raise TypeError("discovery_rule must be AnywhereDiscoveryRule")
+        eligible_airports = {
+            airport for airport, _country in self.discovery_rule.eligible_destination_countries
+        }
+        if eligible_airports.intersection(desired_airports):
+            raise ValueError("desired airports cannot be hidden-city final destinations")
+        object.__setattr__(self, "desired_airports", desired_airports)
+
+
+@dataclass(frozen=True, slots=True)
 class ProposedPlanRevision:
     status: PlanRevisionStatus
     parsed_intent: ParsedIntent
@@ -175,7 +212,8 @@ class ProposedPlanRevision:
     created_at: datetime
     expires_at: datetime
     composition_rule: FrozenCompositionRule | None = None
-    builder_version: str = "agent-plan-builder-v4"
+    hidden_city_rule: FrozenHiddenCityRule | None = None
+    builder_version: str = "agent-plan-builder-v5"
 
 
 class PlanEstimator:
@@ -335,6 +373,20 @@ class AgentPlanBuilder:
                 expires_at=expires_at,
             )
 
+        if (
+            RouteStrategy.HIDDEN_CITY in travel_intent.requested_strategies
+            and travel_intent.trip_shape is not TripShape.ONE_WAY
+        ):
+            return _draft_revision(
+                parsed=parsed,
+                travel_intent=travel_intent,
+                coverage=normalized_coverage,
+                snapshot=snapshot,
+                clarifications=(_hidden_city_one_way_required_clarification(),),
+                created_at=created_at,
+                expires_at=expires_at,
+            )
+
         if self._scope_resolver is None:
             return _draft_revision(
                 parsed=parsed,
@@ -377,6 +429,24 @@ class AgentPlanBuilder:
                 created_at=created_at,
                 expires_at=expires_at,
             )
+
+        hidden_city_rule: FrozenHiddenCityRule | None = None
+        if RouteStrategy.HIDDEN_CITY in travel_intent.requested_strategies:
+            hidden_city_rule, hidden_city_clarification = self._hidden_city_rule(
+                frozen_legs,
+                normalized_coverage,
+            )
+            if hidden_city_clarification is not None:
+                return _draft_revision(
+                    parsed=parsed,
+                    travel_intent=travel_intent,
+                    coverage=normalized_coverage,
+                    snapshot=snapshot,
+                    frozen_legs=frozen_legs,
+                    clarifications=(hidden_city_clarification,),
+                    created_at=created_at,
+                    expires_at=expires_at,
+                )
         surface = _surface_for_frozen_legs(
             frozen_legs,
             normalized_coverage,
@@ -389,6 +459,8 @@ class AgentPlanBuilder:
                 frozen_legs,
                 composition_rule,
             )
+        if hidden_city_rule is not None:
+            surface = _surface_with_hidden_city_budget(surface, hidden_city_rule)
         try:
             estimate = self._estimator.estimate(surface, snapshot.cost_model)
         except PlanBudgetExceededError as error:
@@ -404,6 +476,7 @@ class AgentPlanBuilder:
                 snapshot=snapshot,
                 frozen_legs=frozen_legs,
                 composition_rule=composition_rule,
+                hidden_city_rule=hidden_city_rule,
                 clarifications=(
                     _quick_budget_clarification(
                         surface,
@@ -422,6 +495,7 @@ class AgentPlanBuilder:
                 estimate=estimate,
                 frozen_legs=frozen_legs,
                 composition_rule=composition_rule,
+                hidden_city_rule=hidden_city_rule,
                 clarifications=(
                     _budget_revision_clarification(
                         estimate,
@@ -443,6 +517,74 @@ class AgentPlanBuilder:
             created_at=created_at,
             expires_at=expires_at,
             composition_rule=composition_rule,
+            hidden_city_rule=hidden_city_rule,
+        )
+
+    def _hidden_city_rule(
+        self,
+        frozen_legs: tuple[FrozenPlanLeg, ...],
+        coverage: CoverageMode,
+    ) -> tuple[FrozenHiddenCityRule | None, IntentClarification | None]:
+        assert self._scope_resolver is not None
+        if not frozen_legs:
+            return None, _hidden_city_finite_route_required_clarification()
+        plan_leg_index = len(frozen_legs) - 1
+        final_leg = frozen_legs[plan_leg_index]
+        if (
+            final_leg.reciprocal_anywhere_return
+            or final_leg.origin_scope is None
+            or final_leg.destination_scope is None
+            or final_leg.anywhere_rule is not None
+        ):
+            return None, _hidden_city_finite_route_required_clarification()
+
+        if coverage is CoverageMode.QUICK:
+            max_destination_seeds = min(
+                4,
+                self._settings.agent_quick_calendar_limit,
+            )
+            exact_verification_limit = min(
+                2,
+                self._settings.agent_quick_exact_limit,
+                max_destination_seeds,
+            )
+        else:
+            max_destination_seeds = min(
+                12,
+                max(1, self._settings.agent_full_logical_limit * 2 // 3),
+            )
+            exact_verification_limit = min(
+                6,
+                max(1, self._settings.agent_full_logical_limit - max_destination_seeds),
+                max_destination_seeds,
+            )
+        date_start, date_end = _date_bounds(final_leg.date_constraint)
+        discovery_rule = self._scope_resolver.build_anywhere_rule(
+            frozen_origins=final_leg.origin_scope,
+            date_start=date_start,
+            date_end=date_end,
+            max_destination_seeds=max_destination_seeds,
+            exact_verification_limit=exact_verification_limit,
+        )
+        desired_airports = final_leg.destination_scope.airport_codes
+        eligible_destination_countries = tuple(
+            item
+            for item in discovery_rule.eligible_destination_countries
+            if item[0] not in set(desired_airports)
+        )
+        if not eligible_destination_countries:
+            return None, _hidden_city_no_onward_destinations_clarification()
+        return (
+            FrozenHiddenCityRule(
+                version="hidden-city-search-v1",
+                plan_leg_index=plan_leg_index,
+                desired_airports=desired_airports,
+                discovery_rule=replace(
+                    discovery_rule,
+                    eligible_destination_countries=eligible_destination_countries,
+                ),
+            ),
+            None,
         )
 
     async def _freeze_legs(
@@ -680,6 +822,17 @@ def _surface_with_composition_budget(
     )
 
 
+def _surface_with_hidden_city_budget(
+    surface: SearchSurface,
+    rule: FrozenHiddenCityRule,
+) -> SearchSurface:
+    return SearchSurface(
+        coverage=surface.coverage,
+        calendar_searches=(surface.calendar_searches + rule.discovery_rule.max_destination_seeds),
+        exact_searches=(surface.exact_searches + rule.discovery_rule.exact_verification_limit),
+    )
+
+
 def _native_round_trip_outbound(
     frozen_legs: tuple[FrozenPlanLeg, ...],
     trip_shape: TripShape,
@@ -746,6 +899,7 @@ def _draft_revision(
     estimate: PlanEstimate | None = None,
     frozen_legs: tuple[FrozenPlanLeg, ...] = (),
     composition_rule: FrozenCompositionRule | None = None,
+    hidden_city_rule: FrozenHiddenCityRule | None = None,
 ) -> ProposedPlanRevision:
     return ProposedPlanRevision(
         status=PlanRevisionStatus.DRAFT,
@@ -759,6 +913,7 @@ def _draft_revision(
         created_at=created_at,
         expires_at=expires_at,
         composition_rule=composition_rule,
+        hidden_city_rule=hidden_city_rule,
     )
 
 
@@ -817,6 +972,35 @@ def _split_anywhere_unsupported_clarification() -> IntentClarification:
             "Сначала ограничьте направление: split/self-transfer требует "
             "замороженного конечного маршрута и бюджета узлов пересадки."
         ),
+    )
+
+
+def _hidden_city_one_way_required_clarification() -> IntentClarification:
+    return IntentClarification(
+        field="trip_shape",
+        code="hidden_city_one_way_required",
+        message_ru=(
+            "Исследование скрытого города доступно только для отдельного билета в одну сторону."
+        ),
+    )
+
+
+def _hidden_city_finite_route_required_clarification() -> IntentClarification:
+    return IntentClarification(
+        field="requested_strategies",
+        code="hidden_city_finite_route_required",
+        message_ru=(
+            "Для скрытого города нужен конечный маршрут с известными аэропортами "
+            "отправления и желаемой пересадки."
+        ),
+    )
+
+
+def _hidden_city_no_onward_destinations_clarification() -> IntentClarification:
+    return IntentClarification(
+        field="requested_strategies",
+        code="hidden_city_no_onward_destinations",
+        message_ru=("В текущем каталоге нет конечных аэропортов для исследования скрытого города."),
     )
 
 

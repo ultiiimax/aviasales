@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from uuid import UUID, uuid5
 
 from flight_hunter.domain.agent_evidence import (
+    CheckedBaggageState,
     ComposedRouteCandidate,
     ComposedRouteLeg,
     ConfirmedOfferEvidence,
@@ -15,7 +16,7 @@ from flight_hunter.domain.agent_evidence import (
     UnknownCost,
     UnknownCostKind,
 )
-from flight_hunter.domain.agent_search import TripShape
+from flight_hunter.domain.agent_search import TicketShape, TripShape
 from flight_hunter.domain.money import Money
 from flight_hunter.domain.offers import FlightSegmentSummary, PassengerMix, PriceBasis
 from flight_hunter.persistence.agent_repositories import (
@@ -87,6 +88,21 @@ def confirmed_record_to_evidence(
     )
     if record.amount_minor is None or record.currency is None:
         raise StoredAgentEvidenceError("confirmed evidence has no typed total")
+    stored_checked_baggage = _optional_text(itinerary.get("checked_baggage"))
+    checked_baggage = (
+        CheckedBaggageState.UNKNOWN
+        if record.baggage_status is None
+        else CheckedBaggageState(record.baggage_status.value)
+    )
+    if (
+        stored_checked_baggage is not None
+        and CheckedBaggageState(stored_checked_baggage) is not checked_baggage
+    ):
+        raise StoredAgentEvidenceError("stored baggage facts are inconsistent")
+    ticket_shape = TicketShape(
+        _optional_text(itinerary.get("ticket_shape"))
+        or (TicketShape.ROUND_TRIP.value if return_date is not None else TicketShape.ONE_WAY.value)
+    )
     return ConfirmedOfferEvidence(
         id=record.id,
         provider_id=record.provider_id,
@@ -102,9 +118,11 @@ def confirmed_record_to_evidence(
         segments=tuple(segments),
         protection_status=record.protection_status,
         seller_name=_optional_text(itinerary.get("seller")),
-        baggage_summary=None,
+        baggage_summary=_optional_text(itinerary.get("baggage_summary")),
         passenger_mix=passenger_mix,
         price_basis=price_basis,
+        ticket_shape=ticket_shape,
+        checked_baggage=checked_baggage,
     )
 
 

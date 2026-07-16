@@ -169,6 +169,56 @@ async def test_split_strategy_reserves_versioned_per_leg_hub_search_budget_befor
 
 
 @pytest.mark.anyio
+async def test_hidden_city_freezes_bounded_onward_research_for_the_final_leg() -> None:
+    parsed = IntentParser().parse(
+        "LED → CDG",
+        preset=None,
+        selections={
+            "departure_date": "2026-09-10",
+            "requested_strategies": ["hidden_city"],
+        },
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.QUICK)
+
+    assert revision.status is PlanRevisionStatus.AWAITING_APPROVAL
+    assert revision.hidden_city_rule is not None
+    assert revision.hidden_city_rule.version == "hidden-city-search-v1"
+    assert revision.hidden_city_rule.plan_leg_index == 0
+    assert revision.hidden_city_rule.desired_airports == ("CDG",)
+    assert revision.hidden_city_rule.discovery_rule.origin_airports == ("LED",)
+    assert revision.hidden_city_rule.discovery_rule.max_destination_seeds == 4
+    assert revision.hidden_city_rule.discovery_rule.exact_verification_limit == 2
+    assert "CDG" not in dict(
+        revision.hidden_city_rule.discovery_rule.eligible_destination_countries
+    )
+    assert revision.estimate is not None
+    assert revision.estimate.calendar_searches == 4
+    assert revision.estimate.exact_searches == 3
+    assert revision.estimate.logical_operations == 7
+
+
+@pytest.mark.anyio
+async def test_hidden_city_round_trip_stays_draft_before_provider_work() -> None:
+    parsed = IntentParser().parse(
+        "LED → CDG",
+        preset=None,
+        selections={
+            "departure_date": "2026-09-10",
+            "return_date": "2026-09-20",
+            "requested_strategies": ["hidden_city"],
+        },
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.QUICK)
+
+    assert revision.status is PlanRevisionStatus.DRAFT
+    assert revision.hidden_city_rule is None
+    assert revision.estimate is None
+    assert tuple(item.code for item in revision.clarifications) == ("hidden_city_one_way_required",)
+
+
+@pytest.mark.anyio
 async def test_split_anywhere_stays_draft_instead_of_reserving_unbounded_hubs() -> None:
     parsed = IntentParser().parse(
         "LED → anywhere",

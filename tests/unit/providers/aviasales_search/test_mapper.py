@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 
 from flight_hunter.domain.agent_evidence import (
+    CheckedBaggageState,
     ConfirmationState,
     DiscoverySource,
     ProtectionStatus,
@@ -15,7 +16,11 @@ from flight_hunter.domain.agent_evidence import (
 from flight_hunter.domain.money import Money
 from flight_hunter.domain.offers import Freshness, PriceBasis
 from flight_hunter.providers.aviasales_search.client import CalendarPrice, HotOffer
-from flight_hunter.providers.aviasales_search.mapper import map_parsed_ticket, stable_ticket_id
+from flight_hunter.providers.aviasales_search.mapper import (
+    map_parsed_ticket,
+    map_parsed_ticket_to_evidence,
+    stable_ticket_id,
+)
 from flight_hunter.providers.aviasales_search.schemas import (
     ParsedProposal,
     ParsedSegment,
@@ -146,6 +151,7 @@ def test_map_parsed_ticket_to_confirmed_evidence_is_sanitized_and_deterministic(
     assert evidence.observed_at == observed_at
     assert evidence.seller_name == "Trip.com"
     assert evidence.baggage_summary is None
+    assert evidence.checked_baggage is CheckedBaggageState.NOT_INCLUDED
     assert evidence.protection_status is ProtectionStatus.UNKNOWN
     assert evidence.confirmation_state is ConfirmationState.CONFIRMED
     assert len(evidence.segment_ids) == len(evidence.segments) == 1
@@ -154,6 +160,29 @@ def test_map_parsed_ticket_to_confirmed_evidence_is_sanitized_and_deterministic(
     assert not hasattr(evidence, "booking_action_ref")
     assert not hasattr(evidence, "search_id")
     assert not hasattr(evidence, "results_url")
+
+
+@pytest.mark.parametrize(
+    ("baggage_count", "expected"),
+    (
+        (1, CheckedBaggageState.INCLUDED),
+        (0, CheckedBaggageState.NOT_INCLUDED),
+        (None, CheckedBaggageState.UNKNOWN),
+        (-1, CheckedBaggageState.UNKNOWN),
+    ),
+)
+def test_confirmed_evidence_preserves_checked_baggage_tristate(
+    baggage_count: int | None,
+    expected: CheckedBaggageState,
+) -> None:
+    evidence = map_parsed_ticket_to_evidence(
+        _ticket(baggage_count=baggage_count, handbag=None),
+        observed_at=datetime(2026, 7, 14, 21, 0, tzinfo=UTC),
+        passengers=1,
+        evidence_namespace=EVIDENCE_NAMESPACE,
+    )
+
+    assert evidence.checked_baggage is expected
 
 
 def test_calendar_discovery_uuid_is_idempotent_only_within_operation_namespace() -> None:
