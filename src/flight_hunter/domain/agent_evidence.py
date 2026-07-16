@@ -101,8 +101,8 @@ class StayWindow:
             raise ValueError("minimum_nights must be a non-negative integer")
         if type(self.maximum_nights) is not int or self.maximum_nights < self.minimum_nights:
             raise ValueError("maximum_nights must be at least minimum_nights")
-        if self.maximum_nights - self.minimum_nights > 2:
-            raise ValueError("stay window cannot exceed an approved +/-1 night band")
+        if self.maximum_nights - self.minimum_nights not in {0, 2}:
+            raise ValueError("stay window must be exact or a symmetric approved +/-1 night band")
 
 
 @dataclass(frozen=True, slots=True)

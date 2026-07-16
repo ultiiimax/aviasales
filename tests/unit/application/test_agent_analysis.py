@@ -138,6 +138,25 @@ def test_history_aggregation_modes_never_mix_product_keys() -> None:
         )
 
 
+def test_stay_window_is_exact_or_symmetric_plus_minus_one_only() -> None:
+    assert StayWindow(minimum_nights=7, maximum_nights=7) == StayWindow(7, 7)
+    assert StayWindow(minimum_nights=6, maximum_nights=8) == StayWindow(6, 8)
+
+    with pytest.raises(ValueError, match="exact or a symmetric approved"):
+        StayWindow(minimum_nights=6, maximum_nights=7)
+
+
+def test_history_observation_supports_real_iana_timezone_on_windows() -> None:
+    observation = _observation(
+        10_000,
+        datetime(2026, 7, 16, 9, tzinfo=UTC),
+        timezone="Europe/Moscow",
+    )
+
+    assert observation.local_observed_at.hour == 12
+    assert observation.timezone == "Europe/Moscow"
+
+
 @pytest.mark.parametrize(
     "history",
     (
@@ -258,6 +277,18 @@ def test_buy_timing_rejects_mixed_history_series() -> None:
             tuple(history),
             _observation(9_000, datetime(2026, 11, 2, 10, tzinfo=UTC)),
         )
+
+
+def test_buy_timing_rejects_future_history_observations() -> None:
+    history = list(_spread_history(40))
+    current = _observation(9_000, datetime(2026, 11, 2, 10, tzinfo=UTC))
+    history[-1] = replace(
+        history[-1],
+        observed_at=current.observed_at + timedelta(seconds=1),
+    )
+
+    with pytest.raises(ValueError, match="history observations cannot be newer than current"):
+        assess_buy_timing(tuple(history), current)
 
 
 def test_anomaly_requires_twenty_observations_and_seven_dates() -> None:
@@ -479,6 +510,35 @@ def test_missing_fee_provenance_is_not_comparable() -> None:
 
     assert comparison.status is CurrencyComparisonStatus.NOT_COMPARABLE
     assert comparison.reason_code == "fee_assumption_missing"
+    assert comparison.savings_minor_units is None
+
+
+def test_unknown_baggage_cannot_support_currency_savings_claim() -> None:
+    unknown_baggage = BaggageKey(
+        state=CheckedBaggageState.UNKNOWN,
+        pieces=None,
+        weight_kg=None,
+    )
+    reference = replace(
+        _currency_offer(amount=10_000, currency="RUB", market="RU"),
+        baggage_key=unknown_baggage,
+    )
+    candidate = replace(
+        _currency_offer(amount=90, currency="EUR", market="TR"),
+        baggage_key=unknown_baggage,
+    )
+
+    comparison = compare_currency_offers(
+        reference,
+        candidate,
+        fx_rate=_fx(),
+        reference_fee=_fee(),
+        candidate_fee=_fee(),
+        assessed_at=datetime(2026, 7, 16, 12, tzinfo=UTC),
+    )
+
+    assert comparison.status is CurrencyComparisonStatus.NOT_COMPARABLE
+    assert comparison.reason_code == "material_facts_unknown"
     assert comparison.savings_minor_units is None
 
 

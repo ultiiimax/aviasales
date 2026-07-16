@@ -11,6 +11,7 @@ from enum import StrEnum
 
 from flight_hunter.domain.agent_evidence import (
     CardFeeAssumption,
+    CheckedBaggageState,
     CurrencyOfferFacts,
     FxRateObservation,
     HistoryObservation,
@@ -516,6 +517,8 @@ def _validated_history(
         for observation in observations
     ):
         raise ValueError("history observations must share one series, currency and timezone")
+    if any(observation.observed_at > current.observed_at for observation in observations):
+        raise ValueError("history observations cannot be newer than current")
     return observations
 
 
@@ -598,11 +601,19 @@ def _days_to_departure_band(days: int) -> str:
 
 
 def _material_currency_facts(offer: CurrencyOfferFacts) -> tuple[object, ...] | None:
+    baggage = offer.baggage_key
+    if (
+        baggage is None
+        or baggage.state is CheckedBaggageState.UNKNOWN
+        or baggage.pieces is None
+        or baggage.weight_kg is None
+    ):
+        return None
     facts = (
         offer.seller_or_gate,
         offer.fare_code,
         offer.fare_family,
-        offer.baggage_key,
+        baggage,
         offer.ticket_structure,
         offer.refund_rule,
         offer.change_rule,
