@@ -29,11 +29,16 @@ This file is maintained by coding agents. Mark a slice done only after implement
 - Progress:
   - [x] Generate and compare six distinct UI concepts.
   - [x] Select the search-first direction independently as requested.
-  - [ ] Lock the new hierarchy in HTML/browser tests.
-  - [ ] Implement the responsive shell and progressive disclosure.
-  - [ ] Translate remaining mixed-language and mojibake copy.
-  - [ ] Run focused unit, Chromium, lint and type gates.
-  - [ ] Restart the local release with the redesigned UI.
+  - [x] Lock the new hierarchy in HTML/browser tests.
+  - [x] Implement the responsive shell and progressive disclosure.
+  - [x] Translate remaining mixed-language and mojibake copy.
+  - [x] Run focused unit, Chromium, lint and type gates.
+  - [x] Restart the local release with the redesigned UI.
+- Verification: 17 focused UI unit tests and 10 Chromium E2E tests pass;
+  Ruff format/check passes for the changed files; mypy passes all 123 source
+  files; `git diff --check` is clean. Live desktop and 390 px mobile checks
+  confirm no page-level horizontal overflow; `/healthz` is `ok`, `/readyz` is
+  `ready` with database `ok`, and the local worker heartbeat is healthy.
 
 ## Previous Slice: Agent Route Orchestrator
 

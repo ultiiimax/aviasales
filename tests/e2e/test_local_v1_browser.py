@@ -26,7 +26,7 @@ def test_root_ui_is_readable_and_has_no_mojibake(page: Page, local_server: Local
 
     assert page.url == f"{local_server.url}/"
     assert page.title() == "Flight Hunter"
-    expect(page.get_by_role("button", name="Найти билеты")).to_be_visible()
+    expect(page.get_by_role("button", name="Собрать план")).to_be_visible()
     expect(page.get_by_role("heading", name="Отслеживания")).to_be_visible()
     content = page.content()
     assert not any(
@@ -83,6 +83,7 @@ def test_fake_exact_search_renders_source_freshness_and_passengers(
         else None,
     )
     page.goto(local_server.url, wait_until="networkidle")
+    page.locator(".exact-search > summary").click()
     page.locator('input[name="origin"]').fill("MOW")
     page.locator('input[name="destination"]').fill("LED")
     page.locator('input[name="departure_date"]').fill("2026-09-15")

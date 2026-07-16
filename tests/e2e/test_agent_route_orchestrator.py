@@ -19,7 +19,7 @@ def test_missing_date_offers_rolling_window_without_provider_calls(
 
     prompt = agent_page.locator("#assistant-form textarea")
     prompt.fill("Хочу самый дешёвый вариант полететь из СПб во Францию")
-    agent_page.get_by_role("button", name="Спросить агента").click()
+    agent_page.get_by_role("button", name="Собрать план").click()
 
     expect(agent_page.locator("#agent-plan-card")).to_be_visible()
     expect(agent_page.locator("#agent-plan-status")).to_contain_text(
@@ -246,6 +246,6 @@ def _open_authenticated_agent(
         [session_token, plan_id],
     )
     page.reload(wait_until="networkidle")
-    expect(page.locator("#auth-state")).to_contain_text("Session:")
+    expect(page.locator("#auth-state")).to_contain_text("Вход выполнен")
     if plan_id is not None:
         expect(page.locator("#agent-plan-card")).to_be_visible()

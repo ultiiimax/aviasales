@@ -7,6 +7,27 @@ from fastapi.testclient import TestClient
 from flight_hunter.api.app import create_app
 
 
+def test_web_ui_uses_search_first_russian_hierarchy() -> None:
+    html = TestClient(create_app()).get("/").text
+
+    for class_name in (
+        "hero-search",
+        "account-menu",
+        "exact-search",
+        "technical-details",
+    ):
+        assert re.search(rf'class="[^"]*\b{class_name}\b[^"]*"', html)
+    for text in (
+        "Куда летим?",
+        "Собрать план",
+        "Задать точный маршрут",
+        "Как работает поиск",
+    ):
+        assert text in html
+    for old_heading in (">Agent cockpit<", ">Session<"):
+        assert old_heading not in html
+
+
 def test_web_ui_contains_readable_russian_without_mojibake() -> None:
     response = TestClient(create_app()).get("/")
 
@@ -33,7 +54,7 @@ def test_root_serves_search_screen_without_cached_radar_or_secrets() -> None:
     assert "text/html" in response.headers["content-type"]
     assert "Flight Hunter" in response.text
     assert '<link rel="manifest" href="/manifest.webmanifest">' in response.text
-    assert '<meta name="theme-color" content="#126d7a">' in response.text
+    assert '<meta name="theme-color" content="#155eef">' in response.text
     assert 'navigator.serviceWorker.register("/service-worker.js")' in response.text
     assert 'id="search-form"' in response.text
     assert "/api/v1/providers" in response.text
@@ -117,7 +138,7 @@ def test_pwa_manifest_and_service_worker_do_not_cache_api_prices() -> None:
     assert manifest["name"] == "Flight Hunter"
     assert manifest["start_url"] == "/"
     assert manifest["display"] == "standalone"
-    assert manifest["theme_color"] == "#126d7a"
+    assert manifest["theme_color"] == "#155eef"
     assert manifest["icons"][0]["src"] == "/pwa-icon.svg"
     assert icon_response.status_code == 200
     assert "image/svg+xml" in icon_response.headers["content-type"]
@@ -424,7 +445,7 @@ def test_web_auth_refresh_clears_missing_or_current_session_only_once() -> None:
     assert (
         "if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;\n"
         "        clearSession();\n"
-        '        statusLine.textContent = "session expired";'
+        '        statusLine.textContent = "сессия истекла · войдите снова";'
     ) in refresh
 
 

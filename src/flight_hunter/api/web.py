@@ -10,34 +10,36 @@ def render_index_html() -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Flight Hunter</title>
-  <meta name="theme-color" content="#126d7a">
+  <meta name="theme-color" content="#155eef">
   <link rel="manifest" href="/manifest.webmanifest">
   <meta name="description" content="Flight Hunter: семейный поиск авиабилетов с честной свежестью цен.">
   <link rel="icon" href='data:image/svg+xml,
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-      <rect width="64" height="64" rx="12" fill="%2314242c"/>
+      <rect width="64" height="64" rx="12" fill="%230b1f3a"/>
       <path d="M13 34h31M32 16l15 18-15 14" fill="none" stroke="%23ffffff"
         stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>'>
   <style>
     :root {
       color-scheme: light;
-      --bg: #edf1f4;
-      --ink: #131a22;
-      --muted: #66717c;
+      --bg: #f3f5f8;
+      --ink: #0b1f3a;
+      --muted: #64748b;
       --surface: #ffffff;
-      --surface-soft: #f4f7f9;
-      --line: #d7dee5;
-      --accent: #126d7a;
-      --accent-strong: #0b5660;
-      --accent-soft: #e1f2f4;
-      --warning: #9a5b16;
-      --warning-soft: #f7ead5;
-      --danger: #a33a2a;
-      --danger-soft: #f7deda;
-      --ok: #247044;
-      --ok-soft: #ddefe4;
-      --shadow: 0 18px 44px rgba(25, 40, 54, 0.10);
+      --surface-soft: #f7f9fc;
+      --line: #dbe3ee;
+      --line-strong: #c4d0df;
+      --accent: #155eef;
+      --accent-strong: #0f49bd;
+      --accent-soft: #edf4ff;
+      --coral: #ff5d3d;
+      --warning: #a35d00;
+      --warning-soft: #fff4dc;
+      --danger: #b42318;
+      --danger-soft: #feeceb;
+      --ok: #16803c;
+      --ok-soft: #eaf8ef;
+      --shadow: 0 24px 68px rgba(26, 54, 93, 0.10);
       font-family:
         Aptos, "Segoe UI Variable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
     }
@@ -50,9 +52,8 @@ def render_index_html() -> str:
       margin: 0;
       min-height: 100dvh;
       background:
-        linear-gradient(90deg, rgba(18, 109, 122, 0.08) 1px, transparent 1px),
-        linear-gradient(180deg, #f8fafb 0%, var(--bg) 52%, #e8edf1 100%);
-      background-size: 44px 44px, auto;
+        radial-gradient(circle at 50% -12%, rgba(21, 94, 239, 0.10), transparent 34rem),
+        linear-gradient(180deg, #fbfcfe 0%, var(--bg) 58%, #eef1f5 100%);
       color: var(--ink);
     }
 
@@ -73,8 +74,10 @@ def render_index_html() -> str:
 
     button:focus-visible,
     input:focus-visible,
-    textarea:focus-visible {
-      outline: 3px solid rgba(15, 118, 110, 0.18);
+    textarea:focus-visible,
+    summary:focus-visible,
+    a:focus-visible {
+      outline: 3px solid rgba(21, 94, 239, 0.22);
       outline-offset: 2px;
     }
 
@@ -710,9 +713,948 @@ def render_index_html() -> str:
         grid-template-columns: 1fr;
       }
     }
+
+    /* Search-first v1 shell. Existing result/agent class names stay stable for JS. */
+    body {
+      overflow-x: hidden;
+    }
+
+    ::selection {
+      background: rgba(21, 94, 239, 0.18);
+    }
+
+    .skip-link {
+      position: fixed;
+      top: 8px;
+      left: 8px;
+      z-index: 60;
+      transform: translateY(-140%);
+      border-radius: 10px;
+      background: var(--ink);
+      color: white;
+      padding: 10px 14px;
+      text-decoration: none;
+      transition: transform 180ms ease;
+    }
+
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+
+    .shell {
+      width: min(1360px, calc(100% - 40px));
+      padding: 0 0 64px;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      min-height: 68px;
+      margin: 0 -20px;
+      padding: 12px 20px;
+      border-bottom: 1px solid rgba(196, 208, 223, 0.72);
+      background: rgba(251, 252, 254, 0.90);
+      box-shadow: 0 10px 32px rgba(26, 54, 93, 0.05);
+      backdrop-filter: blur(18px) saturate(135%);
+    }
+
+    .brand {
+      flex: 0 1 auto;
+    }
+
+    .mark {
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      background: var(--ink);
+      box-shadow: 0 12px 28px rgba(11, 31, 58, 0.18);
+    }
+
+    .brand-title strong {
+      font-family: Bahnschrift, "Aptos Display", Aptos, sans-serif;
+      font-size: 21px;
+      font-weight: 690;
+      letter-spacing: -0.035em;
+    }
+
+    .brand-title span {
+      font-size: 12px;
+    }
+
+    .topnav {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+    }
+
+    .topnav a {
+      border-radius: 10px;
+      color: #53657c;
+      font-size: 13px;
+      font-weight: 680;
+      padding: 9px 11px;
+      text-decoration: none;
+      transition: background 180ms ease, color 180ms ease;
+    }
+
+    .topnav a:hover,
+    .topnav a:focus-visible {
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+      outline: none;
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .status-line {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      max-width: 260px;
+      color: #53657c;
+      font-size: 12px;
+      text-align: left;
+    }
+
+    .status-line::before {
+      content: "";
+      flex: 0 0 auto;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #22a55b;
+      box-shadow: 0 0 0 4px rgba(34, 165, 91, 0.10);
+    }
+
+    .account-menu {
+      position: relative;
+      flex: 0 0 auto;
+    }
+
+    .account-menu > summary {
+      min-height: 42px;
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.92);
+      color: var(--ink);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 720;
+      list-style: none;
+      padding: 0 12px;
+      transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+    }
+
+    .account-menu > summary::-webkit-details-marker,
+    .technical-details > summary::-webkit-details-marker,
+    .exact-search > summary::-webkit-details-marker,
+    .utility-panel > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .account-menu > summary:hover {
+      border-color: #92ace0;
+      box-shadow: 0 8px 24px rgba(26, 54, 93, 0.08);
+    }
+
+    .account-menu[open] > summary {
+      border-color: var(--accent);
+    }
+
+    .account-icon {
+      width: 26px;
+      height: 26px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .account-chevron {
+      color: var(--muted);
+      transition: transform 180ms ease;
+    }
+
+    .account-menu[open] .account-chevron {
+      transform: rotate(180deg);
+    }
+
+    .account-popover {
+      position: absolute;
+      top: calc(100% + 10px);
+      right: 0;
+      width: min(430px, calc(100vw - 28px));
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.98);
+      box-shadow: 0 28px 80px rgba(18, 43, 78, 0.20);
+      overflow: hidden;
+    }
+
+    .account-copy {
+      padding: 18px 18px 0;
+    }
+
+    .account-copy h2 {
+      margin: 0;
+      font-family: Bahnschrift, "Aptos Display", Aptos, sans-serif;
+      font-size: 19px;
+      letter-spacing: -0.02em;
+    }
+
+    .account-copy p {
+      max-width: 42ch;
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .auth-form {
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      padding: 16px 18px 18px;
+    }
+
+    .auth-form .primary,
+    .auth-form .secondary {
+      width: 100%;
+    }
+
+    .auth-state {
+      grid-column: 1 / -1;
+      min-height: 20px;
+      order: -1;
+      border-radius: 10px;
+      background: var(--surface-soft);
+      padding: 8px 10px;
+    }
+
+    .hero-search {
+      width: min(1080px, 100%);
+      margin: 72px auto 22px;
+      scroll-margin-top: 90px;
+    }
+
+    .hero-copy {
+      margin: 0 auto 24px;
+      text-align: center;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 10px;
+      color: var(--accent-strong);
+      font-size: 12px;
+      font-weight: 780;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 22px;
+      height: 2px;
+      border-radius: 2px;
+      background: var(--coral);
+    }
+
+    .hero-copy h1 {
+      max-width: 820px;
+      margin: 0 auto;
+      font-family: Bahnschrift, "Aptos Display", Aptos, sans-serif;
+      font-size: clamp(42px, 6vw, 72px);
+      line-height: 0.98;
+      letter-spacing: -0.055em;
+      text-wrap: balance;
+    }
+
+    .hero-copy p:last-child {
+      max-width: 650px;
+      margin: 16px auto 0;
+      color: #53657c;
+      font-size: 16px;
+      line-height: 1.55;
+      text-wrap: balance;
+    }
+
+    .hero-card {
+      position: relative;
+      border: 1px solid rgba(196, 208, 223, 0.88);
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .hero-card::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent), #65a7ff 72%, var(--coral));
+    }
+
+    .assistant-body {
+      gap: 16px;
+      padding: 22px;
+    }
+
+    #preset-list { order: 1; }
+    #chat-log { order: 2; }
+    #assistant-form { order: 3; }
+    #decision-rail { order: 4; }
+    #agent-plan-card { order: 5; }
+    .technical-details { order: 6; }
+
+    .hero-card .quick-actions {
+      justify-content: center;
+    }
+
+    .hero-card #preset-list {
+      display: grid;
+      grid-template-columns: repeat(4, auto);
+      justify-content: center;
+    }
+
+    .hero-card .chip {
+      min-height: 42px;
+      border-color: var(--line-strong);
+      border-radius: 12px;
+      color: #31445c;
+      font-size: 13px;
+      font-weight: 680;
+      padding: 0 15px;
+    }
+
+    .hero-card .chip:hover {
+      border-color: #91addf;
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+      transform: translateY(-1px);
+    }
+
+    .chat-log {
+      min-height: 72px;
+      max-height: 290px;
+      border: 0;
+      border-radius: 16px;
+      background: var(--surface-soft);
+      padding: 12px;
+    }
+
+    .message {
+      max-width: min(82%, 720px);
+      border-radius: 14px;
+      padding: 11px 13px;
+    }
+
+    .message.bot {
+      border-color: #d6e4fb;
+      background: #ffffff;
+      color: #31445c;
+    }
+
+    .message.user {
+      background: var(--ink);
+      box-shadow: 0 8px 18px rgba(11, 31, 58, 0.12);
+    }
+
+    .assistant-input {
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: end;
+      border: 1px solid var(--line-strong);
+      border-radius: 18px;
+      background: #ffffff;
+      padding: 8px;
+      box-shadow: 0 10px 30px rgba(26, 54, 93, 0.06);
+      transition: border-color 180ms ease, box-shadow 180ms ease;
+    }
+
+    .assistant-input:focus-within {
+      border-color: #7fa5ee;
+      box-shadow: 0 0 0 4px rgba(21, 94, 239, 0.10), 0 18px 38px rgba(26, 54, 93, 0.08);
+    }
+
+    .assistant-input textarea {
+      min-height: 92px;
+      max-height: 220px;
+      border: 0;
+      border-radius: 12px;
+      padding: 16px;
+      color: var(--ink);
+      font-size: 17px;
+      line-height: 1.45;
+      outline: none;
+    }
+
+    .assistant-input textarea::placeholder {
+      color: #8795a8;
+    }
+
+    .assistant-input .primary {
+      min-width: 180px;
+      min-height: 54px;
+      border-radius: 13px;
+      box-shadow: 0 12px 24px rgba(21, 94, 239, 0.18);
+      padding: 0 20px;
+    }
+
+    .primary {
+      background: var(--accent);
+    }
+
+    .primary:hover {
+      background: var(--accent-strong);
+      transform: translateY(-1px);
+    }
+
+    .secondary,
+    .chip {
+      border-color: var(--line-strong);
+    }
+
+    .technical-details {
+      border-top: 1px solid var(--line);
+      padding-top: 2px;
+    }
+
+    .technical-details > summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 42px;
+      border-radius: 10px;
+      color: #53657c;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 680;
+      list-style: none;
+      padding: 0 8px;
+    }
+
+    .technical-details > summary:hover {
+      background: var(--surface-soft);
+      color: var(--ink);
+    }
+
+    .technical-details .runtime-strip {
+      margin-top: 8px;
+    }
+
+    .runtime-node {
+      border-color: var(--line);
+      border-radius: 12px;
+      background: var(--surface-soft);
+    }
+
+    .runtime-node span {
+      text-transform: none;
+    }
+
+    .agent-sidecars {
+      border-top: 1px solid var(--line);
+      padding-top: 16px;
+    }
+
+    .agent-sidecars:not(:has(.choice-card, .action-card)) {
+      display: none;
+    }
+
+    .agent-plan-card {
+      border-color: #c9d9f3;
+      border-radius: 18px;
+      background: linear-gradient(180deg, #f7faff 0%, #ffffff 100%);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+      padding: 18px;
+    }
+
+    .agent-plan-card h3,
+    .agent-plan-card h4 {
+      margin: 0 0 6px;
+      color: var(--ink);
+      letter-spacing: -0.02em;
+    }
+
+    .agent-plan-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: white;
+      padding: 4px;
+    }
+
+    .agent-plan-grid div {
+      min-height: 66px;
+      border-radius: 10px;
+      padding: 10px;
+    }
+
+    .agent-plan-grid div:nth-child(odd) {
+      background: var(--surface-soft);
+    }
+
+    .exact-search {
+      width: min(1160px, 100%);
+      margin: 18px auto 30px;
+      scroll-margin-top: 92px;
+      overflow: hidden;
+    }
+
+    .exact-search > summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      cursor: pointer;
+      list-style: none;
+      padding: 18px 20px;
+      transition: background 180ms ease;
+    }
+
+    .exact-search > summary:hover {
+      background: var(--surface-soft);
+    }
+
+    .exact-summary-copy {
+      display: grid;
+      gap: 4px;
+    }
+
+    .exact-summary-copy .panel-title {
+      font-size: 18px;
+    }
+
+    .summary-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+      border-radius: 10px;
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+      font-size: 12px;
+      font-weight: 760;
+      padding: 10px 12px;
+    }
+
+    .summary-action::after {
+      content: "↓";
+      transition: transform 180ms ease;
+    }
+
+    .summary-label-open {
+      display: none;
+    }
+
+    .exact-search[open] .summary-label-closed {
+      display: none;
+    }
+
+    .exact-search[open] .summary-label-open {
+      display: inline;
+    }
+
+    .exact-search[open] .summary-action::after {
+      transform: rotate(180deg);
+    }
+
+    .exact-search[open] > summary {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .search-form {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      padding: 20px;
+    }
+
+    label {
+      gap: 7px;
+      color: #465a72;
+      font-size: 12px;
+      font-weight: 710;
+    }
+
+    input,
+    textarea {
+      border-color: var(--line-strong);
+      border-radius: 11px;
+    }
+
+    input {
+      height: 48px;
+      font-weight: 620;
+    }
+
+    input:hover,
+    textarea:hover {
+      border-color: #9eb2ca;
+    }
+
+    .search-form .form-actions {
+      margin-top: 2px;
+      border-top: 1px solid var(--line);
+      padding-top: 16px;
+    }
+
+    .search-form .primary,
+    .search-form .secondary {
+      min-height: 44px;
+      border-radius: 11px;
+    }
+
+    .panel {
+      border-color: rgba(196, 208, 223, 0.88);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 18px 50px rgba(26, 54, 93, 0.07);
+    }
+
+    .panel-header {
+      align-items: center;
+      border-bottom-color: var(--line);
+      background: rgba(255, 255, 255, 0.88);
+      padding: 18px 20px;
+    }
+
+    .panel-title {
+      font-family: Bahnschrift, "Aptos Display", Aptos, sans-serif;
+      font-size: 21px;
+      font-weight: 650;
+      letter-spacing: -0.035em;
+    }
+
+    .panel-kicker {
+      color: #68798d;
+    }
+
+    .results-panel {
+      scroll-margin-top: 92px;
+      margin: 0 0 22px;
+    }
+
+    .results-panel .panel-header {
+      padding-block: 20px;
+    }
+
+    .result-row {
+      grid-template-columns: minmax(250px, 1.1fr) minmax(140px, 0.48fr) minmax(270px, 0.92fr);
+      gap: 18px;
+      padding: 18px 20px;
+      transition: background 180ms ease, transform 180ms ease;
+    }
+
+    .result-row:hover {
+      background: #fbfdff;
+    }
+
+    .route {
+      color: var(--ink);
+      font-size: 16px;
+    }
+
+    .price {
+      color: var(--ink);
+      font-size: 24px;
+      letter-spacing: -0.025em;
+    }
+
+    .badge {
+      border-radius: 8px;
+    }
+
+    .utility-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 18px;
+      align-items: start;
+    }
+
+    .providers-panel {
+      grid-column: span 4;
+    }
+
+    .watches-panel {
+      grid-column: span 8;
+      scroll-margin-top: 92px;
+    }
+
+    .utility-panel {
+      grid-column: span 6;
+    }
+
+    .utility-panel > summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      cursor: pointer;
+      list-style: none;
+      padding: 18px 20px;
+    }
+
+    .utility-panel > summary::after {
+      content: "+";
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border-radius: 9px;
+      background: var(--surface-soft);
+      color: var(--accent-strong);
+      font-size: 18px;
+      transition: transform 180ms ease;
+    }
+
+    .utility-panel[open] > summary {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .utility-panel[open] > summary::after {
+      transform: rotate(45deg);
+    }
+
+    .panel-toolbar {
+      display: flex;
+      justify-content: flex-end;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-soft);
+      padding: 10px 16px;
+    }
+
+    .panel-toolbar .secondary {
+      min-height: 36px;
+    }
+
+    .empty-state,
+    .error-state {
+      padding: 32px 20px;
+    }
+
+    @media (max-width: 1080px) {
+      .topnav {
+        display: none;
+      }
+
+      .status-line {
+        max-width: 180px;
+      }
+
+      .hero-search {
+        margin-top: 54px;
+      }
+
+      .agent-plan-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .providers-panel,
+      .watches-panel,
+      .utility-panel {
+        grid-column: span 12;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .shell {
+        width: min(100% - 24px, 1360px);
+      }
+
+      .topbar {
+        position: relative;
+        min-height: auto;
+        align-items: center;
+        flex-direction: row;
+        flex-wrap: wrap;
+        margin: 0 -12px;
+        padding: 10px 12px;
+      }
+
+      .brand-title span,
+      .status-line {
+        display: none;
+      }
+
+      .topbar-actions {
+        margin-left: auto;
+      }
+
+      .account-popover {
+        position: fixed;
+        top: 68px;
+        right: 12px;
+        left: 12px;
+        width: auto;
+        max-height: calc(100dvh - 84px);
+        overflow: auto;
+      }
+
+      .hero-search {
+        margin-top: 42px;
+      }
+
+      .hero-copy h1 {
+        font-size: clamp(42px, 13vw, 62px);
+      }
+
+      .hero-copy p:last-child {
+        font-size: 15px;
+      }
+
+      .assistant-body {
+        padding: 16px;
+      }
+
+      .hero-card .quick-actions {
+        display: flex;
+        justify-content: flex-start;
+        flex-wrap: nowrap;
+        margin: 0 -16px;
+        overflow-x: auto;
+        padding: 0 16px 4px;
+        scrollbar-width: none;
+      }
+
+      .hero-card .quick-actions::-webkit-scrollbar {
+        display: none;
+      }
+
+      .hero-card .chip {
+        flex: 0 0 auto;
+      }
+
+      .assistant-input {
+        grid-template-columns: 1fr;
+      }
+
+      .assistant-input .primary {
+        width: 100%;
+      }
+
+      .runtime-strip,
+      .agent-plan-grid,
+      .agent-sidecars {
+        grid-template-columns: 1fr;
+      }
+
+      .search-form {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .result-row {
+        grid-template-columns: 1fr;
+      }
+
+      .price,
+      .caveats,
+      .result-actions,
+      .confirmation-actions,
+      .confirmation-status {
+        text-align: left;
+        justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 520px) {
+      .brand-title strong {
+        font-size: 18px;
+      }
+
+      .mark {
+        width: 38px;
+        height: 38px;
+      }
+
+      .account-menu > summary {
+        min-height: 38px;
+        padding-inline: 9px;
+      }
+
+      .account-icon,
+      .account-chevron {
+        display: none;
+      }
+
+      .auth-form,
+      .search-form {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-card {
+        border-radius: 20px;
+      }
+
+      .hero-copy {
+        text-align: left;
+      }
+
+      .hero-copy h1,
+      .hero-copy p:last-child {
+        margin-inline: 0;
+      }
+
+      .hero-copy h1 {
+        font-size: 46px;
+      }
+
+      .exact-search > summary {
+        align-items: flex-start;
+      }
+
+      .summary-action {
+        width: 38px;
+        height: 38px;
+        justify-content: center;
+        overflow: hidden;
+        padding: 0;
+        white-space: nowrap;
+        color: transparent;
+      }
+
+      .summary-action::after {
+        color: var(--accent-strong);
+      }
+
+      .form-actions,
+      .form-actions .quick-actions {
+        width: 100%;
+      }
+
+      .search-form .primary,
+      .search-form .secondary {
+        width: 100%;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+      }
+    }
   </style>
 </head>
 <body>
+  <a class="skip-link" href="#main-search">Перейти к поиску</a>
   <main class="shell">
     <header class="topbar">
       <div class="brand">
@@ -724,67 +1666,89 @@ def render_index_html() -> str:
         </span>
         <div class="brand-title">
           <strong>Flight Hunter</strong>
-          <span>семейный поиск билетов без выдуманных цен</span>
+          <span>личный помощник по дешёвым маршрутам</span>
         </div>
       </div>
-      <div class="status-line" id="status-line">локальный режим · данные помечаются по свежести</div>
+      <nav class="topnav" aria-label="Основные разделы">
+        <a href="#main-search">Поиск</a>
+        <a href="#results-heading">Результаты</a>
+        <a href="#watches-heading">Отслеживания</a>
+      </nav>
+      <div class="topbar-actions">
+        <div class="status-line" id="status-line">локально · цены с отметкой свежести</div>
+        <details class="account-menu">
+          <summary aria-controls="account-popover">
+            <span class="account-icon" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="8" r="3.5" stroke="currentColor" stroke-width="1.8"/>
+                <path d="M5 20c.6-4 3-6 7-6s6.4 2 7 6" stroke="currentColor"
+                  stroke-width="1.8" stroke-linecap="round"/>
+              </svg>
+            </span>
+            <span id="account-label">Войти</span>
+            <span class="account-chevron" aria-hidden="true">⌄</span>
+          </summary>
+          <div class="account-popover" id="account-popover">
+            <div class="account-copy">
+              <h2 id="auth-heading">Локальный доступ</h2>
+              <p>Одноразовый код нужен только для личных планов, истории и отслеживаний.</p>
+            </div>
+            <form class="auth-form" id="auth-form">
+              <div class="auth-state" id="auth-state" role="status" aria-live="polite"></div>
+              <label>Код приглашения
+                <input name="invitation_code" autocomplete="one-time-code"
+                  placeholder="Вставьте одноразовый код">
+              </label>
+              <label>Ваше имя
+                <input name="display_name" autocomplete="name" placeholder="Например, Алексей">
+              </label>
+              <button class="primary" type="submit" id="auth-submit-button">Войти</button>
+              <button class="secondary" type="button" id="auth-signout-button">Выйти</button>
+            </form>
+          </div>
+        </details>
+      </div>
     </header>
 
-    <section class="panel auth-panel" aria-labelledby="auth-heading">
-      <div class="panel-header">
-        <div>
-          <h2 class="panel-title" id="auth-heading">Session</h2>
-          <div class="panel-kicker">Invitation-only access for household data.</div>
-        </div>
+    <section class="agent-cockpit hero-search" id="main-search" aria-labelledby="assistant-heading">
+      <div class="hero-copy">
+        <p class="eyebrow">Умный поиск маршрута</p>
+        <h1 id="assistant-heading">Куда летим?</h1>
+        <p>Опишите поездку обычными словами. Агент соберёт даты, аэропорты и пересадки в понятный план — без выдуманных цен.</p>
       </div>
-      <form class="auth-form" id="auth-form">
-        <label>Invitation code
-          <input name="invitation_code" autocomplete="one-time-code">
-        </label>
-        <label>Name
-          <input name="display_name" autocomplete="name">
-        </label>
-        <button class="primary" type="submit" id="auth-submit-button">Accept</button>
-        <button class="secondary" type="button" id="auth-signout-button">Sign out</button>
-        <div class="auth-state" id="auth-state" aria-live="polite"></div>
-      </form>
-    </section>
-
-    <section class="workbench agent-cockpit" aria-label="Agent cockpit">
-      <aside class="panel" aria-labelledby="assistant-heading">
-        <div class="panel-header">
-          <div>
-            <h1 class="panel-title" id="assistant-heading">Agent cockpit</h1>
-            <div class="panel-kicker">Human-in-the-loop агент понимает маршрут словами, строит typed tool plan и запускает только policy-разрешенные действия.</div>
-          </div>
-          <span class="badge ok" id="agent-mode">harness</span>
-        </div>
+      <div class="hero-card">
         <div class="assistant-body">
           <div class="quick-actions" id="preset-list" aria-label="Сценарии ИИ">
             <button class="chip" type="button" data-preset="flexible_dates">Даты ±3 дня</button>
             <button class="chip" type="button" data-preset="nearby_airports">Аэропорты рядом</button>
             <button class="chip" type="button" data-preset="buy_timing">Когда покупать</button>
           </div>
-          <div class="runtime-strip" id="runtime-strip" aria-label="Agent runtime">
-            <div class="runtime-node">
-              <span>Runtime</span>
-              <strong id="agent-runtime">deterministic_harness</strong>
+          <details class="technical-details">
+            <summary>
+              <span>Как работает поиск</span>
+              <span class="badge ok" id="agent-mode">локальный агент</span>
+            </summary>
+            <div class="runtime-strip" id="runtime-strip" aria-label="Технические параметры агента">
+              <div class="runtime-node">
+                <span>Режим</span>
+                <strong id="agent-runtime">локальный</strong>
+              </div>
+              <div class="runtime-node">
+                <span>План</span>
+                <strong id="agent-loop">проверяется перед запуском</strong>
+              </div>
+              <div class="runtime-node">
+                <span>Актуальные цены</span>
+                <strong id="agent-live-policy">только после вашего клика</strong>
+              </div>
+              <div class="runtime-node">
+                <span>Данные</span>
+                <strong id="agent-edge-ready">хранятся локально</strong>
+              </div>
             </div>
-            <div class="runtime-node">
-              <span>Loop</span>
-              <strong id="agent-loop">policy_validated_tool_plan</strong>
-            </div>
-            <div class="runtime-node">
-              <span>Live</span>
-              <strong id="agent-live-policy">user action only</strong>
-            </div>
-            <div class="runtime-node">
-              <span>Cloudflare</span>
-              <strong id="agent-edge-ready">portable boundary</strong>
-            </div>
-          </div>
+          </details>
           <div class="chat-log" id="chat-log" aria-live="polite">
-            <div class="message bot">Напиши: “Хочу из СПб улететь в Шанхай в октябре”. Агент разберёт intent, покажет аэропорты, попросит дату вместо угадывания и не сделает live-вызов без твоего клика.</div>
+            <div class="message bot">Например: «Хочу самый дешёвый вариант из Санкт-Петербурга во Францию в сентябре на неделю». Я уточню только то, без чего нельзя начать поиск.</div>
           </div>
           <div class="agent-sidecars" id="decision-rail">
             <div>
@@ -845,19 +1809,26 @@ def render_index_html() -> str:
             <div class="agent-plan-region" id="agent-partial-errors" role="alert" hidden></div>
           </section>
           <form class="assistant-input" id="assistant-form">
-            <textarea name="agent_prompt" placeholder="Например: из Варшавы в Барселону 2026-10-12 2026-10-19 следи"></textarea>
-            <button class="primary" type="submit">Спросить агента</button>
+            <textarea name="agent_prompt" aria-label="Опишите поездку"
+              placeholder="Например: самый дешёвый путь из Санкт-Петербурга во Францию в сентябре на неделю"></textarea>
+            <button class="primary" type="submit">Собрать план</button>
           </form>
         </div>
-      </aside>
+      </div>
+    </section>
 
-      <section class="panel" aria-labelledby="search-heading">
-        <div class="panel-header">
-          <div>
-            <h2 class="panel-title" id="search-heading">Маршрут</h2>
-            <div class="panel-kicker">Сначала показываем cached-варианты. Live-проверка запускается отдельной кнопкой.</div>
-          </div>
-        </div>
+    <details class="panel exact-search" aria-labelledby="search-heading">
+      <summary>
+        <span class="exact-summary-copy">
+          <span class="fineprint">Если уже знаете аэропорты и даты</span>
+          <span class="panel-title" id="search-heading">Задать точный маршрут</span>
+          <span class="panel-kicker">Быстрый поиск по конкретным параметрам без диалога с агентом.</span>
+        </span>
+        <span class="summary-action">
+          <span class="summary-label-closed">Открыть форму</span>
+          <span class="summary-label-open">Скрыть форму</span>
+        </span>
+      </summary>
         <form class="search-form" id="search-form">
           <label>Откуда
             <input name="origin" value="WAW" maxlength="3" autocomplete="off" required>
@@ -886,88 +1857,89 @@ def render_index_html() -> str:
           <div class="form-actions">
             <span class="fineprint" id="passenger-total">2 пассажира · туда-обратно</span>
             <div class="quick-actions" aria-label="Ручные проверки">
-              <button class="secondary" type="button" id="personal-observe-button">Считать из браузера</button>
-              <button class="secondary" type="button" id="deal-discovery-button">Найти акции</button>
+              <button class="secondary" type="button" id="personal-observe-button">Проверить в браузере</button>
+              <button class="secondary" type="button" id="deal-discovery-button">Найти спеццены</button>
               <button class="primary" type="submit" id="submit-button">Найти билеты</button>
             </div>
           </div>
         </form>
-      </section>
+    </details>
+
+    <section class="panel results-panel" aria-labelledby="results-heading">
+      <div class="panel-header">
+        <div>
+          <h2 class="panel-title" id="results-heading">Лучшие варианты</h2>
+          <div class="panel-kicker">Цена, пересадки, риск, источник и свежесть — в одном месте.</div>
+        </div>
+        <span class="small" id="results-count">0 вариантов</span>
+      </div>
+      <div class="result-list" id="results-list">
+        <div class="empty-state">Опишите поездку выше или задайте точный маршрут — найденные билеты появятся здесь.</div>
+      </div>
+      <div class="denial-list" id="confirmation-list"></div>
+      <div class="denial-list" id="live-list"></div>
+      <div class="denial-list" id="denials-list"></div>
     </section>
 
-    <section class="lower-grid">
-      <div class="side-stack">
-        <aside class="panel" aria-labelledby="providers-heading">
-          <div class="panel-header">
-            <div>
-              <h2 class="panel-title" id="providers-heading">Источники</h2>
-              <div class="panel-kicker">Что сейчас можно использовать.</div>
-            </div>
-          </div>
-          <div class="provider-list" id="providers-list">
-            <div class="empty-state">Загружаю источники...</div>
-          </div>
-        </aside>
-
-        <section class="panel" aria-labelledby="watches-heading">
-          <div class="panel-header">
-            <div>
-              <h2 class="panel-title" id="watches-heading">Отслеживания</h2>
-              <div class="panel-kicker">Слежение работает по расписанию и не запускает браузер без клика.</div>
-            </div>
-          </div>
-          <div class="watch-toolbar">
-            <button class="secondary" type="button" id="create-watch-button">Следить за маршрутом</button>
-            <button class="secondary" type="button" id="refresh-watches-button">Обновить watches</button>
-          </div>
-          <div class="watch-list" id="watch-list">
-            <div class="empty-state">Загружаю watches...</div>
-          </div>
-          <div class="watch-history" id="watch-history-list"></div>
-        </section>
-
-        <section class="panel" aria-labelledby="admin-health-heading">
-          <div class="panel-header">
-            <div>
-              <h2 class="panel-title" id="admin-health-heading">Health</h2>
-              <div class="panel-kicker">Read-only provider/source status; no live checks on refresh.</div>
-            </div>
-            <button class="secondary" type="button" id="refresh-admin-health-button">Обновить</button>
-          </div>
-          <div class="admin-health-list" id="admin-health-list">
-            <div class="empty-state">Загружаю health...</div>
-          </div>
-        </section>
-
-        <section class="panel" aria-labelledby="audit-heading">
-          <div class="panel-header">
-            <div>
-              <h2 class="panel-title" id="audit-heading">Audit</h2>
-              <div class="panel-kicker">Household-scoped lifecycle log; read-only.</div>
-            </div>
-            <button class="secondary" type="button" id="refresh-audit-button">РћР±РЅРѕРІРёС‚СЊ</button>
-          </div>
-          <div class="admin-health-list" id="audit-list">
-            <div class="empty-state">Р—Р°РіСЂСѓР¶Р°СЋ audit...</div>
-          </div>
-        </section>
-      </div>
-
-      <section class="panel" aria-labelledby="results-heading">
+    <section class="utility-grid" aria-label="Личные данные и диагностика">
+      <section class="panel watches-panel" aria-labelledby="watches-heading">
         <div class="panel-header">
           <div>
-            <h2 class="panel-title" id="results-heading">Результаты</h2>
-            <div class="panel-kicker">Цены из кэша, ссылки для проверки и свежие наблюдения из браузера показываются отдельно.</div>
+            <h2 class="panel-title" id="watches-heading">Отслеживания</h2>
+            <div class="panel-kicker">Сохраняйте маршрут и получайте изменения цены без повторного ввода.</div>
           </div>
-          <span class="small" id="results-count">0 вариантов</span>
         </div>
-        <div class="result-list" id="results-list">
-          <div class="empty-state">Заполни маршрут и нажми “Найти билеты”.</div>
+        <div class="watch-toolbar">
+          <button class="secondary" type="button" id="create-watch-button">Следить за маршрутом</button>
+          <button class="secondary" type="button" id="refresh-watches-button">Обновить список</button>
         </div>
-        <div class="denial-list" id="confirmation-list"></div>
-        <div class="denial-list" id="live-list"></div>
-        <div class="denial-list" id="denials-list"></div>
+        <div class="watch-list" id="watch-list">
+          <div class="empty-state">Войдите, чтобы видеть отслеживания.</div>
+        </div>
+        <div class="watch-history" id="watch-history-list"></div>
       </section>
+
+      <aside class="panel providers-panel" aria-labelledby="providers-heading">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title" id="providers-heading">Источники и точность</h2>
+            <div class="panel-kicker">Какие данные доступны сейчас и требуют ли они проверки.</div>
+          </div>
+        </div>
+        <div class="provider-list" id="providers-list">
+          <div class="empty-state">Проверяю доступные источники...</div>
+        </div>
+      </aside>
+
+      <details class="panel utility-panel" aria-labelledby="admin-health-heading">
+        <summary>
+          <span>
+            <span class="panel-title" id="admin-health-heading">Диагностика</span>
+            <span class="panel-kicker">Состояние источников и фоновых задач без запуска поиска.</span>
+          </span>
+        </summary>
+        <div class="panel-toolbar">
+          <button class="secondary" type="button" id="refresh-admin-health-button">Обновить</button>
+        </div>
+        <div class="admin-health-list" id="admin-health-list">
+          <div class="empty-state">Загружаю состояние...</div>
+        </div>
+      </details>
+
+      <details class="panel utility-panel" aria-labelledby="audit-heading">
+        <summary>
+          <span>
+            <span class="panel-title" id="audit-heading">Журнал действий</span>
+            <span class="panel-kicker">История операций внутри вашей локальной группы.</span>
+          </span>
+        </summary>
+        <div class="panel-toolbar">
+          <button class="secondary" type="button" id="refresh-audit-button">Обновить</button>
+        </div>
+        <div class="admin-health-list" id="audit-list">
+          <div class="empty-state">Войдите, чтобы видеть журнал.</div>
+        </div>
+      </details>
     </section>
   </main>
 
@@ -1004,6 +1976,8 @@ def render_index_html() -> str:
     const authState = document.querySelector("#auth-state");
     const authSubmitButton = document.querySelector("#auth-submit-button");
     const authSignoutButton = document.querySelector("#auth-signout-button");
+    const accountMenu = document.querySelector(".account-menu");
+    const accountLabel = document.querySelector("#account-label");
     let browserSources = [];
     let agentPresets = [];
     let lastSearchPayload = null;
@@ -1078,11 +2052,18 @@ def render_index_html() -> str:
         && sessionGeneration === agentSessionGeneration;
     }
 
+    function householdRoleLabel(role) {
+      return ({owner: "Владелец", admin: "Администратор", member: "Участник", viewer: "Просмотр"})[role]
+        || "Профиль";
+    }
+
     function storeSession(session) {
       clearAgentSessionState();
       window.localStorage.setItem(sessionTokenKey, session.session_token);
-      authState.textContent = `Session: ${session.role} · ${session.household_id.slice(0, 8)}`;
+      accountLabel.textContent = householdRoleLabel(session.role);
+      authState.textContent = `Вход выполнен · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
       authSignoutButton.disabled = false;
+      accountMenu.open = false;
     }
 
     function clearAgentSessionState() {
@@ -1131,14 +2112,15 @@ def render_index_html() -> str:
       agentActionList.replaceChildren();
       airportChoiceList.replaceChildren();
       chatLog.replaceChildren();
-      addMessage("bot", "Войдите, чтобы создавать и просматривать планы.");
+      addMessage("bot", "Для планов и истории нужен локальный вход. Нажмите «Войти» вверху; точный поиск билетов доступен и без входа.");
     }
 
     function clearSession() {
       window.localStorage.removeItem(sessionTokenKey);
       window.localStorage.removeItem(agentPlanStorageKey);
       window.localStorage.removeItem(agentRunStorageKey);
-      authState.textContent = "Session: не выполнен вход";
+      accountLabel.textContent = "Войти";
+      authState.textContent = "Вход не выполнен";
       authSignoutButton.disabled = true;
       renderSignedOutState();
     }
@@ -1179,12 +2161,13 @@ def render_index_html() -> str:
         if (!response.ok) throw new Error(await codedMessage(response));
         const session = await response.json();
         if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;
-        authState.textContent = `Session: ${session.role} · ${session.household_id.slice(0, 8)}`;
+        accountLabel.textContent = householdRoleLabel(session.role);
+        authState.textContent = `Вход выполнен · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
         authSignoutButton.disabled = false;
       } catch (error) {
         if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;
         clearSession();
-        statusLine.textContent = "session expired";
+        statusLine.textContent = "сессия истекла · войдите снова";
       }
     }
 
@@ -1194,7 +2177,7 @@ def render_index_html() -> str:
       const invitationCode = text(form.get("invitation_code"));
       const displayName = text(form.get("display_name"));
       if (!invitationCode || !displayName) {
-        authState.textContent = "Session: invitation code and name required";
+        authState.textContent = "Введите код приглашения и имя";
         return;
       }
       authSubmitButton.disabled = true;
@@ -1210,10 +2193,10 @@ def render_index_html() -> str:
         if (!response.ok) throw new Error(await codedMessage(response));
         storeSession(await response.json());
         authForm.reset();
-        statusLine.textContent = "session active";
+        statusLine.textContent = "локальный вход выполнен";
         await loadSessionBoundData();
       } catch (error) {
-        authState.textContent = `Session: ${error.message}`;
+        authState.textContent = `Не удалось войти: ${error.message}`;
       } finally {
         authSubmitButton.disabled = false;
       }
@@ -1422,16 +2405,16 @@ def render_index_html() -> str:
     function renderAgentRuntime(runtime) {
       const details = runtime || {};
       agentRuntime.textContent = details.model
-        ? `${details.backend || "deterministic_harness"} · ${details.model}`
-        : details.backend || "deterministic_harness";
-      agentLoop.textContent = details.agentic_loop || "policy_validated_tool_plan";
+        ? `ИИ-модель · ${details.model}`
+        : "детерминированный локальный режим";
+      agentLoop.textContent = "запрос → понятный план → подтверждение → поиск";
       agentLivePolicy.textContent = details.live_calls_allowed
-        ? "enabled by user grant"
-        : "user action only";
+        ? "разрешены текущим действием"
+        : "только после вашего клика";
       agentEdgeReady.textContent = details.cloudflare_ready
-        ? "portable boundary"
-        : "local only";
-      agentMode.textContent = details.backend === "openai_responses" ? "agent" : "harness";
+        ? "локальное хранение · переносимый запуск"
+        : "только локально";
+      agentMode.textContent = details.backend === "openai_responses" ? "ИИ подключён" : "локальный агент";
     }
 
     function renderProviders(providers) {
@@ -2471,7 +3454,7 @@ def render_index_html() -> str:
       const body = await response.json();
       agentPresets = body.presets || [];
       if (!body.mode || !body.mode.enabled) {
-        agentMode.textContent = "harness";
+        agentMode.textContent = "локальный агент";
       }
       presetList.replaceChildren();
       agentPresets.forEach((preset) => {
@@ -3444,8 +4427,19 @@ def render_index_html() -> str:
       return response.json();
     }
 
+    function promptForLocalAccess() {
+      accountMenu.open = true;
+      authState.textContent = "Войдите один раз, чтобы агент мог сохранять план и продолжать его после перезапуска.";
+      statusLine.textContent = "нужен локальный вход";
+    }
+
     async function requestAgentChat(prompt) {
       const sessionGeneration = agentSessionGeneration;
+      if (!sessionToken()) {
+        promptForLocalAccess();
+        addMessage("bot", "Открыл вход в правом верхнем углу. После входа запрос останется в поле — отправьте его ещё раз.");
+        return;
+      }
       lastAgentPrompt = prompt;
       addMessage("user", prompt);
       statusLine.textContent = "агент думает...";
@@ -3492,6 +4486,11 @@ def render_index_html() -> str:
 
     async function requestAgentPlan(presetId, visiblePrompt) {
       const sessionGeneration = agentSessionGeneration;
+      if (!sessionToken()) {
+        promptForLocalAccess();
+        addMessage("bot", "Для этого сценария нужен локальный вход — форма уже открыта в правом верхнем углу.");
+        return;
+      }
       addMessage("user", visiblePrompt);
       statusLine.textContent = "ИИ думает...";
       try {
@@ -3742,7 +4741,7 @@ def render_index_html() -> str:
     authForm.addEventListener("submit", acceptInvitation);
     authSignoutButton.addEventListener("click", () => {
       clearSession();
-      statusLine.textContent = "session cleared";
+      statusLine.textContent = "вы вышли из локального профиля";
     });
     personalObserveButton.addEventListener("click", runPersonalObservation);
     dealDiscoveryButton.addEventListener("click", runDealDiscovery);
@@ -3757,7 +4756,7 @@ def render_index_html() -> str:
       if (!prompt) return;
       const operation = agentEditMode ? editAgentPlan(prompt) : requestAgentChat(prompt);
       void operation;
-      event.currentTarget.reset();
+      if (sessionToken()) event.currentTarget.reset();
     });
     updatePassengerSummary();
     renderAgentRuntime({
@@ -3796,12 +4795,12 @@ def render_web_manifest() -> dict[str, object]:
     return {
         "name": "Flight Hunter",
         "short_name": "Flight Hunter",
-        "description": "Self-hosted flight search and watch workbench.",
+        "description": "Локальный помощник для поиска и отслеживания авиабилетов.",
         "start_url": "/",
         "scope": "/",
         "display": "standalone",
-        "background_color": "#edf1f4",
-        "theme_color": "#126d7a",
+        "background_color": "#f3f5f8",
+        "theme_color": "#155eef",
         "icons": [
             {
                 "src": "/pwa-icon.svg",
@@ -3815,17 +4814,17 @@ def render_web_manifest() -> dict[str, object]:
 
 def render_pwa_icon_svg() -> str:
     return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="92" fill="#14242c"/>
+  <rect width="512" height="512" rx="92" fill="#0b1f3a"/>
   <path d="M104 272h248M256 128l120 144-120 112" fill="none" stroke="#fff"
     stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M116 356h124" fill="none" stroke="#72d0d8" stroke-width="28"
+  <path d="M116 356h124" fill="none" stroke="#65a7ff" stroke-width="28"
     stroke-linecap="round"/>
 </svg>
 """
 
 
 def render_service_worker_js() -> str:
-    return """const CACHE_NAME = "flight-hunter-shell-v1";
+    return """const CACHE_NAME = "flight-hunter-shell-v2";
 const SHELL_URLS = ["/", "/manifest.webmanifest", "/pwa-icon.svg"];
 
 self.addEventListener("install", (event) => {
