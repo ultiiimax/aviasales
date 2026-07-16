@@ -1062,6 +1062,68 @@ def test_ready_results_schema_exposes_typed_facts_without_provider_reference() -
             state="ready",
             evidence_available=True,
             report=report,
+            analysis={
+                "version": "fare-analysis-snapshot-v1",
+                "source": "confirmed_exact_history",
+                "aggregation_mode": "market_minimum",
+                "scope_status": "supported",
+                "trip_shape": "one_way",
+                "requested_modes": ["buy_timing"],
+                "primary_evidence_id": str(evidence.id),
+                "history_series_hash": "sha256:" + "a" * 64,
+                "history_observation_count": 0,
+                "history_evidence_fingerprint": "sha256:" + "b" * 64,
+                "source_evidence_truncated": False,
+                "provider_id": "aviasales_search",
+                "freshness": "live",
+                "passengers": 1,
+                "passenger_basis": "total_for_passengers",
+                "primary_amount": {
+                    "minor_units": evidence.total_amount.minor_units,
+                    "currency": evidence.total_amount.currency,
+                },
+                "origin": "LED",
+                "destination": "CDG",
+                "departure_date": "2026-09-10",
+                "return_date": None,
+                "observed_at": evidence.observed_at.isoformat(),
+                "watch_action": {
+                    "available": True,
+                    "origin": "LED",
+                    "destination": "CDG",
+                    "departure_date": "2026-09-10",
+                    "return_date": None,
+                    "passengers": 1,
+                    "currency": "RUB",
+                },
+                "buy_timing": {
+                    "status": "insufficient_data",
+                    "watch_action_available": True,
+                    "sample_count": 1,
+                    "distinct_dates": 1,
+                    "distinct_weeks": 1,
+                    "history_span_days": 0,
+                    "current_percentile": None,
+                    "twentieth_percentile_minor_units": None,
+                    "median_minor_units": None,
+                    "timezone": "UTC",
+                    "days_to_departure_band": "30-59",
+                    "recommended_weekday": None,
+                    "weekday_savings_percent": None,
+                    "recommended_four_hour_bucket": None,
+                    "four_hour_savings_percent": None,
+                    "calculation_version": "buy-timing-v1",
+                    "thresholds": {
+                        "minimum_observations": 40,
+                        "minimum_history_span_days": 21,
+                        "minimum_distinct_dates": 14,
+                        "minimum_bucket_observations": 8,
+                        "minimum_bucket_weeks": 4,
+                        "minimum_recommendation_difference_percent": "5",
+                        "buy_now_percentile": "20",
+                    },
+                },
+            },
         )
     )
     payload = response.model_dump(mode="json", exclude_none=True)
@@ -1081,6 +1143,15 @@ def test_ready_results_schema_exposes_typed_facts_without_provider_reference() -
     assert payload["candidates"][0]["trip_shape"] == "one_way"
     assert payload["candidates"][0]["price_basis"] == "total_for_passengers"
     assert payload["candidates"][0]["price_comparison_status"] == "fully_priced"
+    assert payload["analysis"]["scope_status"] == "supported"
+    assert payload["analysis"]["primary_amount"] == {
+        "minor_units": 20_000,
+        "currency": "RUB",
+    }
+    assert payload["analysis"]["provider_id"] == "aviasales_search"
+    assert payload["analysis"]["freshness"] == "live"
+    assert payload["analysis"]["passengers"] == 1
+    assert payload["analysis"]["watch_action"]["available"] is True
     assert payload["candidates"][0]["ordered_legs"] == [
         {
             "ordinal": 0,
@@ -1102,9 +1173,31 @@ def test_ready_results_schema_exposes_typed_facts_without_provider_reference() -
     assert payload["candidates"][0]["connection_assumptions"] == []
     assert payload["candidates"][0]["unknown_costs"] == []
     assert payload["candidates"][0]["booking_action"] == {"available": False}
+    assert payload["analysis"]["requested_modes"] == ["buy_timing"]
+    assert payload["analysis"]["buy_timing"]["status"] == "insufficient_data"
+    assert payload["analysis"]["buy_timing"]["watch_action_available"] is True
     rendered = json.dumps(payload)
     assert "PRIVATE-provider-reference" not in rendered
     assert "provider_offer_id" not in rendered
+
+
+def test_invalid_stored_analysis_payload_returns_unavailable_instead_of_500() -> None:
+    response = AgentRunResultsResponse.from_view(
+        RunResultsView(
+            run_id=UUID("55555555-5555-4555-8555-555555555555"),
+            state="ready",
+            evidence_available=True,
+            analysis={
+                "version": "fare-analysis-snapshot-v1",
+                "source": "confirmed_exact_history",
+            },
+        )
+    )
+
+    assert response.state == "unavailable"
+    assert response.evidence_available is True
+    assert response.analysis is None
+    assert response.error_code == "agent_results_unavailable"
 
 
 def test_hidden_city_results_are_separate_research_only_and_force_actions_off() -> None:

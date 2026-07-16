@@ -849,7 +849,8 @@ agent_run_operations_table = Table(
     ),
     CheckConstraint(
         "result_type IS NULL OR result_type IN ('scope_snapshot', 'discovery_signal', "
-        "'confirmed_offer', 'composed_candidate', 'ranking_snapshot', 'operation')",
+        "'confirmed_offer', 'composed_candidate', 'ranking_snapshot', "
+        "'analysis_snapshot', 'operation')",
         name="ck_agent_run_operation_result_type",
     ),
     CheckConstraint(
@@ -1160,6 +1161,7 @@ agent_confirmed_offer_evidence_table = Table(
     Column("baggage_status", String(30), nullable=True),
     Column("transfer_status", String(30), nullable=True),
     Column("visa_status", String(30), nullable=True),
+    Column("history_series_hash", String(71), nullable=True),
     Column("fingerprint", String(71), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("run_id", "fingerprint", name="uq_agent_confirmed_evidence_fingerprint"),
@@ -1203,6 +1205,14 @@ agent_confirmed_offer_evidence_table = Table(
         "visa_status IS NULL OR visa_status IN ('required', 'not_required', 'unknown')",
         name="ck_agent_confirmed_evidence_visa",
     ),
+)
+
+Index(
+    "ix_agent_confirmed_evidence_history_series",
+    agent_confirmed_offer_evidence_table.c.household_id,
+    agent_confirmed_offer_evidence_table.c.history_series_hash,
+    agent_confirmed_offer_evidence_table.c.observed_at,
+    agent_confirmed_offer_evidence_table.c.id,
 )
 
 
@@ -1298,6 +1308,38 @@ agent_ranking_snapshots_table = Table(
     CheckConstraint(
         "confirmed_evidence_ids_json <> '[]' OR composed_candidate_ids_json <> '[]'",
         name="ck_agent_ranking_references",
+    ),
+)
+
+
+agent_analysis_snapshots_table = Table(
+    "agent_analysis_snapshots",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column(
+        "run_id",
+        String(36),
+        ForeignKey("agent_plan_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("source_evidence_ids_json", Text, nullable=False),
+    Column("analysis_json", Text, nullable=False),
+    Column("fingerprint", String(71), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("run_id", name="uq_agent_analysis_snapshot_run"),
+    CheckConstraint(
+        "source_evidence_ids_json <> '[]'",
+        name="ck_agent_analysis_snapshot_references",
+    ),
+    CheckConstraint(
+        "analysis_json <> '{}'",
+        name="ck_agent_analysis_snapshot_payload",
+    ),
+    CheckConstraint(
+        "length(fingerprint) = 71",
+        name="ck_agent_analysis_snapshot_fingerprint",
     ),
 )
 

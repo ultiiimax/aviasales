@@ -46,7 +46,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [x] Compose and rank split, self-transfer, open-jaw and multi-city routes
     (Task 11 accepted at `ce4231a`).
   - [x] Isolate hidden-city research behind a second acknowledgement.
-  - [ ] Add evidence-gated buy timing, anomaly and currency analysis.
+  - [x] Add evidence-gated buy timing, anomaly and currency analysis.
   - [ ] Pass browser, recovery, migration, security and release gates.
 
 Task 8 slice plan: freeze explicit airport/city provider locations; split exact
@@ -268,17 +268,30 @@ intentionally skipped because no browser runtime was requested. Implementation
 is committed at `cabeeeb`. No live provider call or user database access was
 performed.
 
-Task 13 active slice plan: add exact typed history keys, robust buy-timing and
-suspected-anomaly assessments, and fail-closed currency comparison over
-confirmed append-only evidence only. Forward migration
-`0028_agent_fare_analysis_history` will add a nullable canonical series hash,
-the household/series/time query index, and immutable per-run analysis
-snapshots. New evidence receives a deterministic hash; legacy `NULL` rows stay
-excluded because their missing comparability facts cannot be reconstructed
-honestly. Provider market/currency variants may execute only when frozen into
-the approved plan and HTTP budget. With no configured FX provider, the stable
-production result is `fx_provider_unavailable`; no rates, fees, markets or
-savings claims are inferred.
+Task 13 was accepted by independent read-only review on 2026-07-16 with zero
+Critical, Important or Minor findings. Exact confirmed evidence now receives a
+canonical history-series hash; migration `0028_agent_fare_analysis_history`
+adds the household/series/time index and one immutable append-only analysis
+snapshot per run. Legacy `NULL` evidence stays excluded rather than guessed.
+Buy timing and suspected-anomaly decisions publish their thresholds, sample
+coverage and calculation versions; all market-minimum observations participate
+even when the snapshot stores only a bounded representative reference set plus
+a fingerprint of the full input history. Open-jaw, multi-city and composed
+split/self-transfer routes return an explicit unsupported full-itinerary state
+instead of analyzing one component as the trip. Old active `task9-v1`
+`minimal_report` operations recover after upgrade, while mismatched immutable
+inputs or stale snapshots fail closed. Currency output remains
+`fx_provider_unavailable` until a real approved FX path exists, never invents
+savings, and the UI distinguishes a generic price monitor from the canonical
+analysis history.
+
+Task 13 verification: the exact plan gate passes 114 tests; analysis/executor
+passes 196; lifecycle/API/web passes 102; all persistence tests pass 313 with
+one pre-existing aiosqlite teardown warning; migration/history upgrade checks
+pass 18; full mypy passes 123 source files; focused Ruff format/lint and
+`git diff --check` pass. No live provider call or user database access was
+performed. Task 14 browser/recovery/observability and the final release gate are
+next.
 
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic

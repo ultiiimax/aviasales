@@ -209,6 +209,7 @@ def test_review_upgrade_from_immediate_pre_v1_preserves_local_data(tmp_path: Pat
             "agent_confirmed_offer_evidence",
             "agent_composed_route_candidates",
             "agent_ranking_snapshots",
+            "agent_analysis_snapshots",
         }.issubset(new_agent_tables)
         operation_columns = {
             row[1] for row in connection.execute(text("PRAGMA table_info(agent_run_operations)"))
@@ -220,6 +221,10 @@ def test_review_upgrade_from_immediate_pre_v1_preserves_local_data(tmp_path: Pat
         circuit_columns = {
             row[1]
             for row in connection.execute(text("PRAGMA table_info(agent_provider_circuit_state)"))
+        }
+        confirmed_evidence_columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(agent_confirmed_offer_evidence)"))
         }
         operation_table_sql = connection.execute(
             text(
@@ -254,7 +259,9 @@ def test_review_upgrade_from_immediate_pre_v1_preserves_local_data(tmp_path: Pat
             "half_open_probe_token_digest",
         }.issubset(circuit_columns)
         assert "half_open_probe_owner" not in circuit_columns
+        assert "history_series_hash" in confirmed_evidence_columns
         assert "ck_agent_run_operation_logical_shape" in operation_table_sql
+        assert "analysis_snapshot" in operation_table_sql
         assert "uq_agent_run_scope" in scope_table_sql
         assert "uq_agent_run_scope_fingerprint" not in scope_table_sql
         database_revision = connection.execute(text("SELECT version_num FROM alembic_version"))

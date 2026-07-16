@@ -5,12 +5,22 @@ import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from itertools import pairwise
 from typing import Literal, Protocol, cast
 from uuid import UUID, uuid5
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from flight_hunter.agent.presets import AnalysisMode
+from flight_hunter.application.agent_analysis import (
+    CURRENCY_COMPARISON_VERSION,
+    AnomalyAssessment,
+    BuyTimingAssessment,
+    assess_anomaly,
+    assess_buy_timing,
+    history_series_hash,
+)
 from flight_hunter.application.agent_composition import (
     CompositionPolicy,
     CompositionRequest,
@@ -42,11 +52,21 @@ from flight_hunter.application.agent_result_records import (
 )
 from flight_hunter.application.agent_scope import finite_route_pairs
 from flight_hunter.domain.agent_evidence import (
+    BaggageKey,
     CheckedBaggageState,
     ComposedRouteCandidate,
     ConfirmedOfferEvidence,
+    CurrencyBasis,
     DiscoverySignal,
     DiscoverySource,
+    HistoryAggregationMode,
+    HistoryLegKey,
+    HistoryObservation,
+    HistorySeriesKey,
+    ProtectionStatus,
+    RiskClass,
+    StayWindow,
+    TicketStructure,
 )
 from flight_hunter.domain.agent_search import (
     MAX_ANYWHERE_DISCOVERY_MONTHS,
@@ -58,6 +78,7 @@ from flight_hunter.domain.agent_search import (
     TripShape,
     inclusive_month_count,
 )
+from flight_hunter.domain.money import Money
 from flight_hunter.domain.offers import (
     FlightSegmentSummary,
     Freshness,
@@ -66,6 +87,7 @@ from flight_hunter.domain.offers import (
 )
 from flight_hunter.execution_limits import MAX_AGENT_EXECUTION_INTERVAL_SECONDS
 from flight_hunter.persistence.agent_repositories import (
+    AgentAnalysisSnapshotRecord,
     AgentComposedRouteCandidateRecord,
     AgentConfirmedOfferEvidenceRecord,
     AgentDiscoverySignalRecord,
@@ -90,6 +112,7 @@ from flight_hunter.persistence.agent_repositories import (
     AttemptReservationStatus,
     BaggageEvidenceStatus,
     CircuitPermitStatus,
+    NewAgentAnalysisSnapshot,
     NewAgentBookingActionDescriptor,
     NewAgentConfirmedOfferEvidence,
     NewAgentDiscoverySignal,
@@ -271,6 +294,7 @@ class _Workflow:
     currency: str
     one_way: bool
     strategies: tuple[RouteStrategy, ...]
+    analysis_modes: tuple[AnalysisMode, ...]
     exact_limit: int
     calendar_limit: int
     start_attempts: int
@@ -1699,7 +1723,11 @@ class AgentExecutionService:
             return succeeded.status
         if operation.kind is AgentOperationKind.ANALYSIS:
             try:
-                ranking_id = await self._ranking_result_id(run)
+                analysis_snapshot = await self._create_analysis_snapshot(
+                    run,
+                    operation,
+                    now,
+                )
             except (AgentExecutionError, AgentEvidenceError) as error:
                 return await self._fail_claimed_operation(
                     run,
@@ -1711,8 +1739,8 @@ class AgentExecutionService:
                 household_id=run.household_id,
                 operation_id=operation.id,
                 worker_id=self._worker_id,
-                result_type=AgentOperationResultType.RANKING_SNAPSHOT,
-                result_id=ranking_id,
+                result_type=AgentOperationResultType.ANALYSIS_SNAPSHOT,
+                result_id=analysis_snapshot.id,
                 now=now,
             )
             return succeeded.status
@@ -2422,6 +2450,10 @@ class AgentExecutionService:
                 visa_status=None,
                 fingerprint=_evidence_fingerprint(evidence.id),
                 created_at=max(now, evidence.observed_at),
+                history_series_hash=_confirmed_history_series_hash(
+                    evidence,
+                    operation.immutable_input,
+                ),
             )
         )
 
@@ -3097,6 +3129,11 @@ class AgentExecutionService:
         run: AgentPlanRunRecord,
         now: datetime,
     ) -> AgentRunOperationRecord:
+        workflow = await self._workflow(run)
+        immutable_input = {
+            "analysis_modes": [mode.value for mode in workflow.analysis_modes],
+            "version": "fare-analysis-v1",
+        }
         stage = await self._stage(
             run,
             AgentPlanStageKind.ANALYSIS,
@@ -3105,17 +3142,14 @@ class AgentExecutionService:
         )
         return await self._scheduler.materialize(
             OperationSpec(
-                id=_stable_uuid(run.id, 0xF1, "minimal-report"),
+                id=_stable_uuid(run.id, 0xF1, "fare-analysis"),
                 household_id=run.household_id,
                 run_id=run.id,
                 stage_id=stage.id,
                 provider_id=None,
                 kind=AgentOperationKind.ANALYSIS,
-                immutable_input={"analysis_mode": "minimal_report", "version": "task9-v1"},
-                logical_workflow_input={
-                    "analysis_mode": "minimal_report",
-                    "version": "task9-v1",
-                },
+                immutable_input=immutable_input,
+                logical_workflow_input=immutable_input,
                 consumes_logical_unit=False,
                 private_continuation=None,
                 max_attempts=1,
@@ -3181,12 +3215,168 @@ class AgentExecutionService:
             )
         )
 
-    async def _ranking_result_id(self, run: AgentPlanRunRecord) -> UUID:
-        operations = await self._operations.list_operations(run.household_id, run.id)
-        result_id = await self._saved_ranking_result_id(run, operations)
-        if result_id is not None:
-            return result_id
-        raise AgentExecutionError("agent_ranking_result_missing")
+    async def _create_analysis_snapshot(
+        self,
+        run: AgentPlanRunRecord,
+        operation: AgentRunOperationRecord,
+        now: datetime,
+    ) -> AgentAnalysisSnapshotRecord:
+        workflow = await self._workflow(run)
+        bound_modes = _bound_analysis_modes(operation.immutable_input, workflow)
+        confirmed = await self._evidence.list_confirmed_evidence(
+            run.household_id,
+            run.id,
+        )
+        existing = await self._evidence.get_analysis_snapshot_for_run(
+            run.household_id,
+            run.id,
+        )
+        if existing is not None:
+            _validate_existing_analysis_snapshot(
+                existing,
+                workflow=workflow,
+                bound_modes=bound_modes,
+                confirmed=confirmed,
+            )
+            return existing
+
+        if not _analysis_scope_supported(workflow):
+            reference_candidates = tuple(
+                record
+                for record in confirmed
+                if record.source == "exact_search"
+                and record.itinerary_evidence.get("search_role", "base") != "hidden_city"
+            )
+            if not reference_candidates:
+                raise AgentExecutionError("agent_analysis_requires_confirmed_evidence")
+            source_records = _bounded_analysis_source_records(
+                reference_candidates,
+                limit=100,
+            )
+            return await self._evidence.create_analysis_snapshot(
+                NewAgentAnalysisSnapshot(
+                    id=_stable_uuid(run.id, 0xE1, "fare-analysis-snapshot"),
+                    household_id=run.household_id,
+                    run_id=run.id,
+                    source_evidence_ids=tuple(record.id for record in source_records),
+                    analysis={
+                        "version": "fare-analysis-snapshot-v1",
+                        "source": "confirmed_exact_history",
+                        "aggregation_mode": "market_minimum",
+                        "scope_status": "unsupported_trip_structure",
+                        "scope_reason": "full_itinerary_history_unavailable",
+                        "trip_shape": workflow.trip_shape.value,
+                        "requested_modes": [mode.value for mode in bound_modes],
+                        "source_evidence_truncated": (
+                            len(source_records) < len(reference_candidates)
+                        ),
+                    },
+                    created_at=now,
+                )
+            )
+
+        eligible = tuple(
+            record
+            for record in confirmed
+            if record.source == "exact_search"
+            and record.itinerary_evidence.get("search_role", "base") == "base"
+            and record.amount_minor is not None
+            and record.currency is not None
+            and record.history_series_hash is not None
+        )
+        if not eligible:
+            raise AgentExecutionError("agent_analysis_requires_confirmed_evidence")
+        primary = min(
+            eligible,
+            key=lambda record: (
+                cast(int, record.amount_minor),
+                record.observed_at,
+                str(record.id),
+            ),
+        )
+        current = _history_observation_from_record(primary)
+        history_records: tuple[AgentConfirmedOfferEvidenceRecord, ...] = ()
+        history: tuple[HistoryObservation, ...] = ()
+        if {
+            AnalysisMode.BUY_TIMING,
+            AnalysisMode.ERROR_FARE,
+        }.intersection(bound_modes):
+            candidates = await self._evidence.list_confirmed_history(
+                run.household_id,
+                current.series_hash,
+                observed_before=current.observed_at,
+            )
+            history_records, history = _valid_analysis_history_records(candidates)
+
+        try:
+            primary_payload = _analysis_primary_payload(primary, workflow)
+        except (KeyError, TypeError, ValueError) as error:
+            raise AgentExecutionError("agent_confirmed_evidence_invalid") from error
+        origin = cast(str, primary_payload["origin"])
+        destination = cast(str, primary_payload["destination"])
+        departure_date = date.fromisoformat(cast(str, primary_payload["departure_date"]))
+        return_text = primary_payload["return_date"]
+        return_date = None if return_text is None else date.fromisoformat(cast(str, return_text))
+        referenced_history = _bounded_analysis_source_records(
+            history_records,
+            limit=99,
+        )
+
+        payload: dict[str, object] = {
+            "version": "fare-analysis-snapshot-v1",
+            "source": "confirmed_exact_history",
+            "aggregation_mode": "market_minimum",
+            "scope_status": "supported",
+            "trip_shape": workflow.trip_shape.value,
+            "requested_modes": [mode.value for mode in bound_modes],
+            "primary_evidence_id": str(primary.id),
+            "history_series_hash": current.series_hash,
+            "history_observation_count": len(history_records),
+            "history_evidence_fingerprint": _history_evidence_fingerprint(history_records),
+            "source_evidence_truncated": len(referenced_history) < len(history_records),
+            **primary_payload,
+        }
+        if AnalysisMode.BUY_TIMING in bound_modes:
+            assessment = assess_buy_timing(history, current)
+            payload["buy_timing"] = _buy_timing_payload(assessment)
+            payload["watch_action"] = {
+                "available": assessment.watch_action_available,
+                "origin": origin,
+                "destination": destination,
+                "departure_date": departure_date.isoformat(),
+                "return_date": return_date.isoformat() if return_date is not None else None,
+                "passengers": primary.passengers,
+                "currency": cast(str, primary.currency),
+            }
+        if AnalysisMode.ERROR_FARE in bound_modes:
+            payload["anomaly"] = _anomaly_payload(assess_anomaly(history, current))
+        if AnalysisMode.CURRENCY_COMPARE in bound_modes:
+            payload["currency_comparison"] = {
+                "status": "fx_provider_unavailable",
+                "reason_code": "fx_provider_unavailable",
+                "reference_evidence_id": str(primary.id),
+                "reference_amount": {
+                    "minor_units": cast(int, primary.amount_minor),
+                    "currency": cast(str, primary.currency),
+                },
+                "candidate_evidence_id": None,
+                "candidate_amount": None,
+                "comparison_currency": workflow.currency,
+                "savings_minor_units": None,
+                "savings_percent": None,
+                "calculation_version": CURRENCY_COMPARISON_VERSION,
+            }
+        source_ids = (*tuple(record.id for record in referenced_history), primary.id)
+        return await self._evidence.create_analysis_snapshot(
+            NewAgentAnalysisSnapshot(
+                id=_stable_uuid(run.id, 0xE1, "fare-analysis-snapshot"),
+                household_id=run.household_id,
+                run_id=run.id,
+                source_evidence_ids=source_ids,
+                analysis=payload,
+                created_at=now,
+            )
+        )
 
     async def _saved_ranking_result_id(
         self,
@@ -3420,8 +3610,13 @@ class AgentExecutionService:
                 Sequence,
             ):
                 raise TypeError("analysis modes must be an ordered collection")
-            if analysis_modes:
-                tuple(_text(value, "analysis mode") for value in analysis_modes)
+            try:
+                approved_analysis_modes = tuple(
+                    AnalysisMode(_text(value, "analysis mode")) for value in analysis_modes
+                )
+            except ValueError as error:
+                raise AgentExecutionError("agent_analysis_unsupported") from error
+            if len(approved_analysis_modes) != len(set(approved_analysis_modes)):
                 raise AgentExecutionError("agent_analysis_unsupported")
 
             trip_shape = TripShape(_text(intent.get("trip_shape", "one_way"), "trip_shape"))
@@ -3796,6 +3991,7 @@ class AgentExecutionService:
                 currency=currency,
                 one_way=trip_shape is TripShape.ONE_WAY,
                 strategies=effective_strategies,
+                analysis_modes=approved_analysis_modes,
                 exact_limit=exact_estimate - hidden_exact_limit,
                 calendar_limit=calendar_estimate - hidden_calendar_limit,
                 start_attempts=start_attempts,
@@ -4711,6 +4907,446 @@ def _confirmed_itinerary_evidence(
     if stops is not None:
         itinerary["stops"] = stops
     return itinerary
+
+
+def _confirmed_history_series_hash(
+    evidence: ConfirmedOfferEvidence,
+    immutable_input: Mapping[str, object],
+) -> str:
+    departure_date = date.fromisoformat(_text(immutable_input["departure_date"], "departure_date"))
+    return_raw = immutable_input.get("return_date")
+    return_date = (
+        None if return_raw is None else date.fromisoformat(_text(return_raw, "return_date"))
+    )
+    origin = _iata(immutable_input["origin"], "origin")
+    destination = _iata(immutable_input["destination"], "destination")
+    search_role = _text(immutable_input.get("search_role", "base"), "search_role")
+    if search_role == "hidden_city":
+        ticket_structure = TicketStructure.HIDDEN_CITY
+        risk_class = RiskClass.HIGH
+    elif search_role == "split_component":
+        ticket_structure = TicketStructure.SPLIT_TICKET
+        risk_class = RiskClass.HIGH
+    else:
+        ticket_structure = TicketStructure.SINGLE_TICKET
+        risk_class = (
+            RiskClass.LOW
+            if evidence.protection_status is ProtectionStatus.EXPLICITLY_PROTECTED
+            else RiskClass.HIGH
+            if evidence.protection_status is ProtectionStatus.SELF_TRANSFER
+            else RiskClass.MEDIUM
+        )
+    checked_baggage = evidence.checked_baggage
+    if checked_baggage is None:
+        raise AgentExecutionError("agent_confirmed_evidence_invalid")
+    baggage_key = BaggageKey(
+        state=checked_baggage,
+        pieces=0 if checked_baggage is CheckedBaggageState.NOT_INCLUDED else None,
+        weight_kg=(Decimal("0") if checked_baggage is CheckedBaggageState.NOT_INCLUDED else None),
+    )
+    ordered_legs = [
+        HistoryLegKey(
+            origin=origin,
+            destination=destination,
+            date_start=departure_date,
+            date_end=departure_date,
+        )
+    ]
+    stay = None
+    trip_shape = TripShape.ONE_WAY
+    if return_date is not None:
+        ordered_legs.append(
+            HistoryLegKey(
+                origin=destination,
+                destination=origin,
+                date_start=return_date,
+                date_end=return_date,
+            )
+        )
+        nights = (return_date - departure_date).days
+        stay = StayWindow(minimum_nights=nights, maximum_nights=nights)
+        trip_shape = TripShape.ROUND_TRIP
+    return history_series_hash(
+        HistorySeriesKey(
+            ordered_leg_keys=tuple(ordered_legs),
+            trip_shape=trip_shape,
+            stay=stay,
+            cabin=_text(immutable_input["cabin"], "cabin"),
+            passenger_mix=PassengerMix(
+                adults=_positive_int(immutable_input["adults"], "adults"),
+                children=_non_negative_int(immutable_input["children"], "children"),
+                infants=_non_negative_int(immutable_input["infants"], "infants"),
+            ),
+            ticket_structure=ticket_structure,
+            risk_class=risk_class,
+            baggage_key=baggage_key,
+            currency_basis=CurrencyBasis(
+                provider_currency=evidence.total_amount.currency,
+                comparison_currency=evidence.total_amount.currency,
+                fx_source=None,
+            ),
+            aggregation_mode=HistoryAggregationMode.MARKET_MINIMUM,
+            product_key=None,
+        )
+    )
+
+
+def _history_observation_from_record(
+    record: AgentConfirmedOfferEvidenceRecord,
+) -> HistoryObservation:
+    if record.history_series_hash is None or record.amount_minor is None or record.currency is None:
+        raise ValueError("confirmed evidence lacks comparable history facts")
+    departure_date = date.fromisoformat(
+        _text(record.itinerary_evidence["departure_date"], "departure_date")
+    )
+    return HistoryObservation(
+        series_hash=record.history_series_hash,
+        amount=Money(record.amount_minor, record.currency),
+        observed_at=record.observed_at,
+        departure_date=departure_date,
+        timezone="UTC",
+    )
+
+
+def _bound_analysis_modes(
+    immutable_input: Mapping[str, object],
+    workflow: _Workflow,
+) -> tuple[AnalysisMode, ...]:
+    version = immutable_input.get("version")
+    if version == "task9-v1":
+        if (
+            set(immutable_input) != {"analysis_mode", "version"}
+            or immutable_input.get("analysis_mode") != "minimal_report"
+            or workflow.analysis_modes
+        ):
+            raise AgentExecutionError("agent_operation_input_invalid")
+        return ()
+    raw_modes = immutable_input.get("analysis_modes")
+    if (
+        version != "fare-analysis-v1"
+        or set(immutable_input) != {"analysis_modes", "version"}
+        or isinstance(raw_modes, (str, bytes, bytearray))
+        or not isinstance(raw_modes, Sequence)
+    ):
+        raise AgentExecutionError("agent_operation_input_invalid")
+    try:
+        bound_modes = tuple(AnalysisMode(_text(value, "analysis mode")) for value in raw_modes)
+    except (TypeError, ValueError) as error:
+        raise AgentExecutionError("agent_operation_input_invalid") from error
+    if bound_modes != workflow.analysis_modes:
+        raise AgentExecutionError("agent_operation_input_invalid")
+    return bound_modes
+
+
+def _analysis_scope_supported(workflow: _Workflow) -> bool:
+    return (
+        workflow.trip_shape in {TripShape.ONE_WAY, TripShape.ROUND_TRIP}
+        and workflow.composition_rule_version is None
+    )
+
+
+def _validate_existing_analysis_snapshot(
+    snapshot: AgentAnalysisSnapshotRecord,
+    *,
+    workflow: _Workflow,
+    bound_modes: tuple[AnalysisMode, ...],
+    confirmed: Sequence[AgentConfirmedOfferEvidenceRecord],
+) -> None:
+    payload = snapshot.analysis
+    expected_modes = tuple(mode.value for mode in bound_modes)
+    raw_modes = payload.get("requested_modes")
+    if (
+        payload.get("version") != "fare-analysis-snapshot-v1"
+        or payload.get("source") != "confirmed_exact_history"
+        or payload.get("aggregation_mode") != "market_minimum"
+        or isinstance(raw_modes, (str, bytes, bytearray))
+        or not isinstance(raw_modes, Sequence)
+        or tuple(raw_modes) != expected_modes
+        or type(payload.get("source_evidence_truncated")) is not bool
+    ):
+        raise AgentEvidenceError("agent_analysis_snapshot_conflict")
+
+    supported = _analysis_scope_supported(workflow)
+    if not supported:
+        allowed_ids = {
+            record.id
+            for record in confirmed
+            if record.source == "exact_search"
+            and record.itinerary_evidence.get("search_role", "base") != "hidden_city"
+        }
+        if (
+            payload.get("scope_status") != "unsupported_trip_structure"
+            or payload.get("scope_reason") != "full_itinerary_history_unavailable"
+            or payload.get("trip_shape") != workflow.trip_shape.value
+            or not snapshot.source_evidence_ids
+            or not set(snapshot.source_evidence_ids) <= allowed_ids
+            or any(
+                payload.get(key) is not None
+                for key in (
+                    "primary_evidence_id",
+                    "history_series_hash",
+                    "buy_timing",
+                    "anomaly",
+                    "currency_comparison",
+                    "watch_action",
+                )
+            )
+        ):
+            raise AgentEvidenceError("agent_analysis_snapshot_conflict")
+        return
+
+    if (
+        payload.get("scope_status") != "supported"
+        or payload.get("scope_reason") is not None
+        or payload.get("trip_shape") != workflow.trip_shape.value
+    ):
+        raise AgentEvidenceError("agent_analysis_snapshot_conflict")
+    try:
+        primary_id = UUID(_text(payload["primary_evidence_id"], "primary_evidence_id"))
+    except (KeyError, TypeError, ValueError) as error:
+        raise AgentEvidenceError("agent_analysis_snapshot_conflict") from error
+    primary = next((record for record in confirmed if record.id == primary_id), None)
+    if (
+        primary is None
+        or primary.id not in snapshot.source_evidence_ids
+        or primary.source != "exact_search"
+        or primary.itinerary_evidence.get("search_role", "base") != "base"
+        or primary.amount_minor is None
+        or primary.currency is None
+        or primary.history_series_hash is None
+    ):
+        raise AgentEvidenceError("agent_analysis_snapshot_conflict")
+    try:
+        expected = _analysis_primary_payload(primary, workflow)
+    except (KeyError, TypeError, ValueError) as error:
+        raise AgentEvidenceError("agent_analysis_snapshot_conflict") from error
+    if any(payload.get(key) != value for key, value in expected.items()):
+        raise AgentEvidenceError("agent_analysis_snapshot_conflict")
+    history_count = payload.get("history_observation_count")
+    history_fingerprint = payload.get("history_evidence_fingerprint")
+    if (
+        type(history_count) is not int
+        or history_count < 0
+        or not _is_sha256_fingerprint(history_fingerprint)
+    ):
+        raise AgentEvidenceError("agent_analysis_snapshot_conflict")
+
+    result_fields = {
+        AnalysisMode.BUY_TIMING: "buy_timing",
+        AnalysisMode.ERROR_FARE: "anomaly",
+        AnalysisMode.CURRENCY_COMPARE: "currency_comparison",
+    }
+    for mode, field_name in result_fields.items():
+        value = payload.get(field_name)
+        if (mode in bound_modes) != isinstance(value, Mapping):
+            raise AgentEvidenceError("agent_analysis_snapshot_conflict")
+    if AnalysisMode.BUY_TIMING in bound_modes:
+        buy_timing = cast(Mapping[str, object], payload["buy_timing"])
+        watch_action = payload.get("watch_action")
+        if not isinstance(watch_action, Mapping):
+            raise AgentEvidenceError("agent_analysis_snapshot_conflict")
+        expected_watch = {
+            "available": buy_timing.get("watch_action_available"),
+            "origin": expected["origin"],
+            "destination": expected["destination"],
+            "departure_date": expected["departure_date"],
+            "return_date": expected["return_date"],
+            "passengers": expected["passengers"],
+            "currency": cast(Mapping[str, object], expected["primary_amount"])["currency"],
+        }
+        if dict(watch_action) != expected_watch:
+            raise AgentEvidenceError("agent_analysis_snapshot_conflict")
+    elif payload.get("watch_action") is not None:
+        raise AgentEvidenceError("agent_analysis_snapshot_conflict")
+
+
+def _analysis_primary_payload(
+    primary: AgentConfirmedOfferEvidenceRecord,
+    workflow: _Workflow,
+) -> dict[str, object]:
+    if primary.amount_minor is None or primary.currency is None:
+        raise ValueError("analysis primary evidence has no amount")
+    origin = _iata(primary.itinerary_evidence["origin"], "analysis origin")
+    destination = _iata(
+        primary.itinerary_evidence["destination"],
+        "analysis destination",
+    )
+    departure_date = date.fromisoformat(
+        _text(
+            primary.itinerary_evidence["departure_date"],
+            "analysis departure_date",
+        )
+    )
+    return_raw = primary.itinerary_evidence.get("return_date")
+    return_date = (
+        None
+        if return_raw is None
+        else date.fromisoformat(_text(return_raw, "analysis return_date"))
+    )
+    return {
+        "primary_evidence_id": str(primary.id),
+        "history_series_hash": primary.history_series_hash,
+        "provider_id": primary.provider_id,
+        "freshness": primary.freshness.value,
+        "passengers": primary.passengers,
+        "passenger_basis": primary.passenger_basis.value,
+        "primary_amount": {
+            "minor_units": primary.amount_minor,
+            "currency": primary.currency,
+        },
+        "origin": origin,
+        "destination": destination,
+        "departure_date": departure_date.isoformat(),
+        "return_date": return_date.isoformat() if return_date is not None else None,
+        "observed_at": primary.observed_at.isoformat(),
+        "trip_shape": workflow.trip_shape.value,
+    }
+
+
+def _valid_analysis_history_records(
+    records: Sequence[AgentConfirmedOfferEvidenceRecord],
+) -> tuple[tuple[AgentConfirmedOfferEvidenceRecord, ...], tuple[HistoryObservation, ...]]:
+    valid_records: list[AgentConfirmedOfferEvidenceRecord] = []
+    valid_history: list[HistoryObservation] = []
+    for record in _market_minimum_history_records(records):
+        try:
+            observation = _history_observation_from_record(record)
+        except (KeyError, TypeError, ValueError):
+            continue
+        valid_records.append(record)
+        valid_history.append(observation)
+    return tuple(valid_records), tuple(valid_history)
+
+
+def _market_minimum_history_records(
+    records: Sequence[AgentConfirmedOfferEvidenceRecord],
+) -> tuple[AgentConfirmedOfferEvidenceRecord, ...]:
+    best_by_run: dict[UUID, AgentConfirmedOfferEvidenceRecord] = {}
+    for record in records:
+        if record.amount_minor is None:
+            continue
+        existing = best_by_run.get(record.run_id)
+        if existing is None or (
+            record.amount_minor,
+            record.observed_at,
+            str(record.id),
+        ) < (
+            cast(int, existing.amount_minor),
+            existing.observed_at,
+            str(existing.id),
+        ):
+            best_by_run[record.run_id] = record
+    return tuple(
+        sorted(
+            best_by_run.values(),
+            key=lambda record: (record.observed_at, str(record.id)),
+        )
+    )
+
+
+def _bounded_analysis_source_records(
+    records: Sequence[AgentConfirmedOfferEvidenceRecord],
+    *,
+    limit: int,
+) -> tuple[AgentConfirmedOfferEvidenceRecord, ...]:
+    if type(limit) is not int or limit <= 0:
+        raise ValueError("analysis source limit must be positive")
+    ordered = tuple(records)
+    if len(ordered) <= limit:
+        return ordered
+    if limit == 1:
+        return (ordered[-1],)
+    indices = tuple(index * (len(ordered) - 1) // (limit - 1) for index in range(limit))
+    return tuple(ordered[index] for index in indices)
+
+
+def _history_evidence_fingerprint(
+    records: Sequence[AgentConfirmedOfferEvidenceRecord],
+) -> str:
+    canonical = json.dumps(
+        [
+            {
+                "amount_minor": record.amount_minor,
+                "currency": record.currency,
+                "evidence_id": str(record.id),
+                "observed_at": record.observed_at.isoformat(),
+                "run_id": str(record.run_id),
+            }
+            for record in records
+        ],
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _is_sha256_fingerprint(value: object) -> bool:
+    if not isinstance(value, str) or not value.startswith("sha256:") or len(value) != 71:
+        return False
+    return all(character in "0123456789abcdef" for character in value[7:])
+
+
+def _buy_timing_payload(assessment: BuyTimingAssessment) -> dict[str, object]:
+    thresholds = assessment.thresholds
+    return {
+        "status": assessment.status.value,
+        "watch_action_available": assessment.watch_action_available,
+        "sample_count": assessment.sample_count,
+        "distinct_dates": assessment.distinct_dates,
+        "distinct_weeks": assessment.distinct_weeks,
+        "history_span_days": assessment.history_span_days,
+        "current_percentile": _optional_decimal_text(assessment.current_percentile),
+        "twentieth_percentile_minor_units": (assessment.twentieth_percentile_minor_units),
+        "median_minor_units": _optional_decimal_text(assessment.median_minor_units),
+        "timezone": assessment.timezone,
+        "days_to_departure_band": assessment.days_to_departure_band,
+        "recommended_weekday": assessment.recommended_weekday,
+        "weekday_savings_percent": _optional_decimal_text(assessment.weekday_savings_percent),
+        "recommended_four_hour_bucket": assessment.recommended_four_hour_bucket,
+        "four_hour_savings_percent": _optional_decimal_text(assessment.four_hour_savings_percent),
+        "calculation_version": assessment.calculation_version,
+        "thresholds": {
+            "minimum_observations": thresholds.minimum_observations,
+            "minimum_history_span_days": thresholds.minimum_history_span_days,
+            "minimum_distinct_dates": thresholds.minimum_distinct_dates,
+            "minimum_bucket_observations": thresholds.minimum_bucket_observations,
+            "minimum_bucket_weeks": thresholds.minimum_bucket_weeks,
+            "minimum_recommendation_difference_percent": _decimal_text(
+                thresholds.minimum_recommendation_difference_percent
+            ),
+            "buy_now_percentile": _decimal_text(thresholds.buy_now_percentile),
+        },
+    }
+
+
+def _anomaly_payload(assessment: AnomalyAssessment) -> dict[str, object]:
+    thresholds = assessment.thresholds
+    return {
+        "status": assessment.status.value,
+        "sample_count": assessment.sample_count,
+        "distinct_dates": assessment.distinct_dates,
+        "median_minor_units": _optional_decimal_text(assessment.median_minor_units),
+        "ratio_to_median": _optional_decimal_text(assessment.ratio_to_median),
+        "mad_minor_units": _optional_decimal_text(assessment.mad_minor_units),
+        "robust_mad_z": _optional_decimal_text(assessment.robust_mad_z),
+        "observed_range_minor_units": assessment.observed_range_minor_units,
+        "detector_version": assessment.detector_version,
+        "thresholds": {
+            "minimum_observations": thresholds.minimum_observations,
+            "minimum_distinct_dates": thresholds.minimum_distinct_dates,
+            "maximum_median_ratio": _decimal_text(thresholds.maximum_median_ratio),
+            "maximum_robust_mad_z": _decimal_text(thresholds.maximum_robust_mad_z),
+        },
+    }
+
+
+def _optional_decimal_text(value: Decimal | None) -> str | None:
+    return None if value is None else _decimal_text(value)
+
+
+def _decimal_text(value: Decimal) -> str:
+    return format(value.normalize(), "f")
 
 
 def _confirmed_stop_count(evidence: ConfirmedOfferEvidence) -> int | None:

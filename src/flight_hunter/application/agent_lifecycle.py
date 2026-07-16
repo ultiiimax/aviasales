@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
+from types import MappingProxyType
 from typing import Literal, cast
 from uuid import UUID, uuid4
 
@@ -376,6 +377,7 @@ class RunResultsView:
     state: Literal["not_ready", "ready", "unavailable"] = "not_ready"
     evidence_available: bool = False
     report: FactReport | None = None
+    analysis: Mapping[str, object] | None = None
     hidden_city_candidates: tuple[HiddenCityCandidate, ...] = ()
     error_code: Literal["agent_results_unavailable"] | None = None
 
@@ -385,17 +387,25 @@ class RunResultsView:
             isinstance(candidate, HiddenCityCandidate) for candidate in hidden_city_candidates
         ):
             raise TypeError("hidden_city_candidates must contain typed candidates")
+        analysis = self.analysis
+        if analysis is not None:
+            if not isinstance(analysis, Mapping) or not analysis:
+                raise TypeError("analysis must be a non-empty mapping or None")
+            analysis = MappingProxyType(dict(analysis))
         if self.state == "ready":
-            if (self.report is None and not hidden_city_candidates) or self.error_code is not None:
+            if (
+                self.report is None and analysis is None and not hidden_city_candidates
+            ) or self.error_code is not None:
                 raise ValueError("ready results require publishable facts and no error")
-        elif self.report is not None or hidden_city_candidates:
+        elif self.report is not None or analysis is not None or hidden_city_candidates:
             raise ValueError("non-ready results cannot contain publishable facts")
         elif self.state == "unavailable" and self.error_code is None:
             raise ValueError("unavailable results require an error code")
         elif self.state == "not_ready" and self.error_code is not None:
             raise ValueError("not-ready results cannot contain an error code")
-        if hidden_city_candidates and not self.evidence_available:
-            raise ValueError("hidden-city facts require evidence_available")
+        if (hidden_city_candidates or analysis is not None) and not self.evidence_available:
+            raise ValueError("published facts require evidence_available")
+        object.__setattr__(self, "analysis", analysis)
         object.__setattr__(self, "hidden_city_candidates", hidden_city_candidates)
 
 
@@ -720,6 +730,48 @@ class AgentLifecycleService:
                     error_code="agent_results_unavailable",
                 )
             operations = await self._operations.list_operations(household_id, run_id)
+            succeeded_analysis_operations = tuple(
+                operation
+                for operation in operations
+                if operation.kind is AgentOperationKind.ANALYSIS
+                and operation.status is AgentOperationStatus.SUCCEEDED
+            )
+            analysis_operations = tuple(
+                operation
+                for operation in succeeded_analysis_operations
+                if operation.result_type is AgentOperationResultType.ANALYSIS_SNAPSHOT
+                and operation.result_id is not None
+            )
+            legacy_analysis_operations = tuple(
+                operation
+                for operation in succeeded_analysis_operations
+                if _is_legacy_task9_analysis_result(operation)
+            )
+            analysis_record = await self._evidence.get_analysis_snapshot_for_run(
+                household_id,
+                run_id,
+            )
+            if (
+                len(succeeded_analysis_operations) > 1
+                or len(analysis_operations) + len(legacy_analysis_operations)
+                != len(succeeded_analysis_operations)
+                or (legacy_analysis_operations and analysis_record is not None)
+                or (
+                    analysis_record is not None
+                    and (
+                        len(analysis_operations) != 1
+                        or analysis_operations[0].result_id != analysis_record.id
+                    )
+                )
+                or (analysis_operations and analysis_record is None)
+            ):
+                return RunResultsView(
+                    run_id=run.id,
+                    state="unavailable",
+                    evidence_available=evidence_available,
+                    error_code="agent_results_unavailable",
+                )
+            analysis = None if analysis_record is None else analysis_record.analysis
             ranking_operations = tuple(
                 operation
                 for operation in operations
@@ -729,7 +781,7 @@ class AgentLifecycleService:
                 and operation.result_id is not None
             )
             if not ranking_operations:
-                if hidden_city_candidates and run.status in {
+                if (hidden_city_candidates or analysis is not None) and run.status in {
                     "completed",
                     "partial",
                     "failed",
@@ -739,6 +791,7 @@ class AgentLifecycleService:
                         run_id=run.id,
                         state="ready",
                         evidence_available=True,
+                        analysis=analysis,
                         hidden_city_candidates=hidden_city_candidates,
                     )
                 return RunResultsView(
@@ -835,6 +888,7 @@ class AgentLifecycleService:
                 state="ready",
                 evidence_available=True,
                 report=report,
+                analysis=analysis,
                 hidden_city_candidates=hidden_city_candidates,
             )
 
@@ -2464,6 +2518,18 @@ def _hidden_city_candidates_from_records(
                 str(candidate.source_evidence.id),
             ),
         )
+    )
+
+
+def _is_legacy_task9_analysis_result(operation: AgentRunOperationRecord) -> bool:
+    return (
+        operation.result_type is AgentOperationResultType.RANKING_SNAPSHOT
+        and operation.result_id is not None
+        and dict(operation.immutable_input)
+        == {
+            "analysis_mode": "minimal_report",
+            "version": "task9-v1",
+        }
     )
 
 

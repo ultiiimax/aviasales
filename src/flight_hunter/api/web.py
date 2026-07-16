@@ -830,6 +830,10 @@ def render_index_html() -> str:
             </div>
             <div class="agent-plan-region" id="agent-run-progress" role="status" aria-live="polite">Запуск ещё не создан.</div>
             <button class="secondary" type="button" id="agent-run-cancel" disabled>Отменить запуск</button>
+            <section class="agent-plan-region" id="agent-fare-analysis" aria-labelledby="agent-fare-analysis-heading" hidden>
+              <h4 id="agent-fare-analysis-heading">Анализ цены</h4>
+              <div id="agent-fare-analysis-list">Анализ ещё не рассчитан.</div>
+            </section>
             <section class="agent-plan-region" id="agent-risky-results" aria-labelledby="agent-risky-results-heading" hidden>
               <h4 id="agent-risky-results-heading">Hidden-city исследования</h4>
               <div id="agent-risky-results-list">Нет подтверждённых рискованных вариантов.</div>
@@ -1096,6 +1100,7 @@ def render_index_html() -> str:
         "agent-plan-source",
         "agent-plan-expiry",
         "agent-run-progress",
+        "agent-fare-analysis-list",
         "agent-risky-results-list",
         "agent-partial-errors"
       ].forEach((id) => {
@@ -1108,6 +1113,7 @@ def render_index_html() -> str:
       document.getElementById("agent-plan-full").disabled = true;
       document.getElementById("agent-plan-edit").disabled = true;
       document.getElementById("agent-run-cancel").disabled = true;
+      document.getElementById("agent-fare-analysis").hidden = true;
       document.getElementById("agent-risky-results").hidden = true;
       document.getElementById("agent-partial-errors").hidden = true;
       agentActionList.replaceChildren();
@@ -1922,6 +1928,37 @@ def render_index_html() -> str:
       }
     }
 
+    async function createWatchFromAgentAnalysis(action, button) {
+      if (!action?.available) return;
+      button.disabled = true;
+      statusLine.textContent = "создаю отслеживание по анализу...";
+      try {
+        const response = await fetch("/api/v1/watches", {
+          method: "POST",
+          headers: authHeaders({"Content-Type": "application/json"}),
+          body: JSON.stringify({
+            origin: action.origin,
+            destination: action.destination,
+            departure_date: action.departure_date,
+            return_date: action.return_date,
+            passengers: action.passengers,
+            currency: action.currency,
+            allowed_provider_ids: []
+          })
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+        const watch = await response.json();
+        statusLine.textContent = `отслеживание создано · v${watch.version}`;
+        await loadWatches();
+        await loadAuditEvents();
+        await loadWatchHistory(watch);
+      } catch (error) {
+        statusLine.textContent = `ошибка отслеживания: ${error.message}`;
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     async function pauseWatch(watch) {
       await mutateWatch(watch, `/api/v1/watches/${watch.id}/pause`, "POST", {}, "watch paused");
     }
@@ -2732,7 +2769,166 @@ def render_index_html() -> str:
         : agentRunErrorMessage(run.error_code, run.public_message || `Состояние: ${run.status}`);
     }
 
+    function renderAgentFareAnalysis(analysis) {
+      const region = document.getElementById("agent-fare-analysis");
+      const list = document.getElementById("agent-fare-analysis-list");
+      const requestedModes = analysis?.requested_modes || [];
+      list.replaceChildren();
+      if (!analysis || requestedModes.length === 0) {
+        region.hidden = true;
+        list.textContent = "Анализ не запрашивался.";
+        return;
+      }
+      region.hidden = false;
+      const appendLine = (text, tone = "") => {
+        const line = document.createElement("div");
+        line.className = tone ? `agent-analysis-line ${tone}` : "agent-analysis-line";
+        line.textContent = text;
+        list.append(line);
+      };
+      if (analysis.scope_status === "unsupported_trip_structure") {
+        appendLine(
+          "Исторический анализ цены полного маршрута пока недоступен для open-jaw, "
+          + "multi-city и составных split/self-transfer билетов. Цена отдельного участка "
+          + "не выдаётся за цену всей поездки.",
+          "warn"
+        );
+        return;
+      }
+      appendLine(
+        `${formatMinorAmount(
+          analysis.primary_amount.minor_units,
+          analysis.primary_amount.currency
+        )} · ${analysis.passengers} пасс. · ${analysis.provider_id} · `
+        + `${String(analysis.freshness).toUpperCase()} · ${formatIsoMinute(analysis.observed_at)}`
+      );
+      const buyTiming = analysis.buy_timing;
+      if (requestedModes.includes("buy_timing")) {
+        if (!buyTiming || buyTiming.status === "insufficient_data") {
+          const sampleCount = buyTiming?.sample_count ?? 0;
+          const watchHint = buyTiming?.watch_action_available
+            ? " Можно создать отдельный мониторинг текущей цены; "
+              + "он не увеличивает выборку этого анализа."
+            : "";
+          appendLine(
+            `Лучшее время покупки: Недостаточно данных (${sampleCount} наблюдений; `
+            + `нужно ${buyTiming?.thresholds?.minimum_observations ?? 40}, `
+            + `${buyTiming?.thresholds?.minimum_history_span_days ?? 21} дней и `
+            + `${buyTiming?.thresholds?.minimum_distinct_dates ?? 14} дат).${watchHint}`,
+            "warn"
+          );
+        } else if (buyTiming.status === "historically_low") {
+          appendLine(
+            `Текущая цена исторически низкая: не выше 20-го процентиля `
+            + `(${formatMinorAmount(
+              buyTiming.twentieth_percentile_minor_units,
+              analysis.primary_amount.currency
+            )}).`,
+            "ok"
+          );
+        } else {
+          appendLine("Сигнала «покупать сейчас» по накопленной истории нет.");
+        }
+        const weekdayNames = [
+          "понедельник",
+          "вторник",
+          "среда",
+          "четверг",
+          "пятница",
+          "суббота",
+          "воскресенье"
+        ];
+        if (Number.isInteger(buyTiming?.recommended_weekday)) {
+          appendLine(
+            `По истории выгоднее бронировать в ${weekdayNames[buyTiming.recommended_weekday]}: `
+            + `медиана ниже примерно на ${buyTiming.weekday_savings_percent}%.`
+          );
+        }
+        if (Number.isInteger(buyTiming?.recommended_four_hour_bucket)) {
+          const startHour = buyTiming.recommended_four_hour_bucket;
+          const endHour = (startHour + 4) % 24;
+          appendLine(
+            `Выгодное окно бронирования: ${String(startHour).padStart(2, "0")}:00–`
+            + `${String(endHour).padStart(2, "0")}:00 (${buyTiming.timezone}); `
+            + `медиана ниже примерно на ${buyTiming.four_hour_savings_percent}%.`
+          );
+        }
+        if (buyTiming?.watch_action_available && analysis.watch_action?.available) {
+          const watchButton = document.createElement("button");
+          watchButton.type = "button";
+          watchButton.className = "secondary";
+          watchButton.textContent = "Создать отдельный мониторинг цены";
+          watchButton.addEventListener("click", () => {
+            void createWatchFromAgentAnalysis(analysis.watch_action, watchButton);
+          });
+          list.append(watchButton);
+        }
+      }
+      const anomaly = analysis.anomaly;
+      if (requestedModes.includes("error_fare")) {
+        if (!anomaly || anomaly.status === "insufficient_data") {
+          appendLine("Проверка аномалии: Недостаточно данных.", "warn");
+        } else if (anomaly.status === "suspected_anomaly") {
+          appendLine(
+            "Подозрение на аномально низкую цену — это не гарантия ошибочного тарифа.",
+            "warn"
+          );
+        } else {
+          appendLine("Цена не прошла строгие пороги подозрения на аномалию.");
+        }
+      }
+      const currency = analysis.currency_comparison;
+      if (requestedModes.includes("currency_compare")) {
+        const referenceAmount = currency
+          ? formatMinorAmount(
+              currency.reference_amount.minor_units,
+              currency.reference_amount.currency
+            )
+          : null;
+        const candidateAmount = currency?.candidate_amount
+          ? formatMinorAmount(
+              currency.candidate_amount.minor_units,
+              currency.candidate_amount.currency
+            )
+          : null;
+        const comparedAmounts = candidateAmount
+          ? ` Базовый вариант: ${referenceAmount}; альтернативный: ${candidateAmount}.`
+          : ` Базовый вариант: ${referenceAmount}.`;
+        if (!currency || currency.status === "fx_provider_unavailable") {
+          appendLine(
+            `Сравнение валют: FX-провайдер не настроен. Экономия не рассчитана.${comparedAmounts}`,
+            "warn"
+          );
+        } else if (currency.status === "not_comparable") {
+          appendLine(
+            `Сравнение валют: варианты материально несопоставимы.${comparedAmounts}`,
+            "warn"
+          );
+        } else if (
+          Number.isSafeInteger(Number(currency.savings_minor_units))
+          && Number(currency.savings_minor_units) > 0
+        ) {
+          const percent = currency.savings_percent
+            ? ` (${currency.savings_percent}%)`
+            : "";
+          appendLine(
+            `Сравнение валют: подтверждённая экономия `
+            + `${formatMinorAmount(
+              currency.savings_minor_units,
+              currency.comparison_currency
+            )}${percent}.${comparedAmounts}`,
+            "ok"
+          );
+        } else {
+          appendLine(
+            `Сравнение валют: положительная экономия не подтверждена.${comparedAmounts}`
+          );
+        }
+      }
+    }
+
     function renderAgentRunResults(results) {
+      renderAgentFareAnalysis(results.analysis);
       const region = document.getElementById("agent-risky-results");
       const list = document.getElementById("agent-risky-results-list");
       const candidates = results.hidden_city_candidates || [];

@@ -153,6 +153,9 @@ def test_web_ui_contains_accessible_durable_agent_plan_and_run_regions() -> None
         'id="agent-plan-edit"',
         'id="agent-run-progress" role="status" aria-live="polite"',
         'id="agent-run-cancel"',
+        'id="agent-fare-analysis"',
+        'aria-labelledby="agent-fare-analysis-heading"',
+        'id="agent-fare-analysis-list"',
         'id="agent-risky-results"',
         'aria-labelledby="agent-risky-results-heading"',
         'id="agent-partial-errors" role="alert"',
@@ -273,6 +276,49 @@ def test_web_hidden_city_results_are_fetched_into_a_separate_actionless_section(
     assert "renderAgentRunResults" in load
     assert "loadAgentRunResults" in poll
     assert "loadAgentRunResults" in reload
+
+
+def test_web_fare_analysis_uses_honest_evidence_gated_wording() -> None:
+    html = TestClient(create_app()).get("/").text
+
+    render = _javascript_sync_function(html, "renderAgentFareAnalysis")
+    create_watch = _javascript_function(html, "createWatchFromAgentAnalysis")
+    run_results = _javascript_sync_function(html, "renderAgentRunResults")
+
+    assert "buy_timing" in render
+    assert "Недостаточно данных" in render
+    assert "полного маршрута" in render
+    assert "исторически низкая" in render
+    assert "recommended_weekday" in render
+    assert "weekday_savings_percent" in render
+    assert "recommended_four_hour_bucket" in render
+    assert "four_hour_savings_percent" in render
+    assert "Подозрение на аномально низкую цену" in render
+    assert "не гарантия ошибочного тарифа" in render
+    assert "FX-провайдер не настроен" in render
+    assert "Экономия не рассчитана" in render
+    assert "watch_action_available" in render
+    assert "Создать отдельный мониторинг цены" in render
+    assert "не увеличивает выборку этого анализа" in render
+    assert "для накопления истории" not in render
+    assert "createWatchFromAgentAnalysis" in render
+    assert "положительная экономия не подтверждена" in render
+    assert "savings_minor_units ?? 0" not in render
+    assert "formatMinorAmount" in render
+    assert "currency.reference_amount.minor_units" in render
+    assert "currency.candidate_amount.minor_units" in render
+    assert "analysis.provider_id" in render
+    assert "analysis.freshness" in render
+    assert "analysis.passengers" in render
+    assert "analysis.observed_at" in render
+    assert 'fetch("/api/v1/watches"' in create_watch
+    assert "action.origin" in create_watch
+    assert "action.destination" in create_watch
+    assert "action.departure_date" in create_watch
+    assert "action.return_date" in create_watch
+    assert "action.passengers" in create_watch
+    assert "action.currency" in create_watch
+    assert "renderAgentFareAnalysis(results.analysis)" in run_results
 
 
 def test_web_agent_entry_points_auth_render_and_revision_actions_share_plan_card() -> None:

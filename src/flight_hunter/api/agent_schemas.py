@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import date as Date
 from datetime import datetime
-from typing import Literal, cast
+from typing import Literal, Self, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, model_validator
 
 from flight_hunter.agent.presets import AgentPresetId
 from flight_hunter.application.agent_lifecycle import PlanView, RunResultsView, RunView
@@ -499,17 +499,227 @@ class AgentHiddenCityCandidateResponse(BaseModel):
     watch_available: Literal[False]
 
 
+class AgentBuyTimingThresholdsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    minimum_observations: int
+    minimum_history_span_days: int
+    minimum_distinct_dates: int
+    minimum_bucket_observations: int
+    minimum_bucket_weeks: int
+    minimum_recommendation_difference_percent: str
+    buy_now_percentile: str
+
+
+class AgentBuyTimingAnalysisResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["insufficient_data", "historically_low", "no_buy_signal"]
+    watch_action_available: bool
+    sample_count: int
+    distinct_dates: int
+    distinct_weeks: int
+    history_span_days: int
+    current_percentile: str | None
+    twentieth_percentile_minor_units: int | None
+    median_minor_units: str | None
+    timezone: str
+    days_to_departure_band: Literal["0-6", "7-13", "14-29", "30-59", "60+"]
+    recommended_weekday: int | None
+    weekday_savings_percent: str | None
+    recommended_four_hour_bucket: int | None
+    four_hour_savings_percent: str | None
+    calculation_version: Literal["buy-timing-v1"]
+    thresholds: AgentBuyTimingThresholdsResponse
+
+
+class AgentAnomalyThresholdsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    minimum_observations: int
+    minimum_distinct_dates: int
+    maximum_median_ratio: str
+    maximum_robust_mad_z: str
+
+
+class AgentAnomalyAnalysisResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["insufficient_data", "suspected_anomaly", "not_anomalous"]
+    sample_count: int
+    distinct_dates: int
+    median_minor_units: str | None
+    ratio_to_median: str | None
+    mad_minor_units: str | None
+    robust_mad_z: str | None
+    observed_range_minor_units: int | None
+    detector_version: Literal["suspected-anomaly-v1"]
+    thresholds: AgentAnomalyThresholdsResponse
+
+
+class AgentCurrencyAnalysisResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["comparable", "not_comparable", "fx_provider_unavailable"]
+    reason_code: str
+    reference_evidence_id: UUID
+    reference_amount: AgentMoneyResponse
+    candidate_evidence_id: UUID | None
+    candidate_amount: AgentMoneyResponse | None
+    comparison_currency: str
+    savings_minor_units: int | None
+    savings_percent: str | None
+    calculation_version: Literal["currency-comparison-v1"]
+
+
+class AgentFareAnalysisWatchActionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    available: bool
+    origin: str = Field(pattern=r"^[A-Z]{3}$")
+    destination: str = Field(pattern=r"^[A-Z]{3}$")
+    departure_date: Date
+    return_date: Date | None
+    passengers: int = Field(ge=1)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+
+
+class AgentFareAnalysisResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal["fare-analysis-snapshot-v1"]
+    source: Literal["confirmed_exact_history"]
+    aggregation_mode: Literal["market_minimum"]
+    scope_status: Literal["supported", "unsupported_trip_structure"]
+    scope_reason: Literal["full_itinerary_history_unavailable"] | None = None
+    trip_shape: Literal["one_way", "round_trip", "open_jaw", "multi_city"]
+    requested_modes: list[Literal["buy_timing", "error_fare", "currency_compare"]]
+    source_evidence_truncated: bool
+    primary_evidence_id: UUID | None = None
+    history_series_hash: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    history_observation_count: int | None = Field(default=None, ge=0)
+    history_evidence_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    provider_id: str | None = None
+    freshness: Literal["live"] | None = None
+    passengers: int | None = Field(default=None, ge=1)
+    passenger_basis: Literal["total_for_passengers"] | None = None
+    primary_amount: AgentMoneyResponse | None = None
+    origin: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    destination: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    departure_date: Date | None = None
+    return_date: Date | None = None
+    observed_at: datetime | None = None
+    watch_action: AgentFareAnalysisWatchActionResponse | None = None
+    buy_timing: AgentBuyTimingAnalysisResponse | None = None
+    anomaly: AgentAnomalyAnalysisResponse | None = None
+    currency_comparison: AgentCurrencyAnalysisResponse | None = None
+
+    @model_validator(mode="after")
+    def validate_scope_contract(self) -> Self:
+        mode_fields = {
+            "buy_timing": self.buy_timing,
+            "error_fare": self.anomaly,
+            "currency_compare": self.currency_comparison,
+        }
+        if len(self.requested_modes) != len(set(self.requested_modes)):
+            raise ValueError("requested analysis modes must be unique")
+        if self.scope_status == "unsupported_trip_structure":
+            if self.scope_reason != "full_itinerary_history_unavailable" or any(
+                value is not None
+                for value in (
+                    self.primary_evidence_id,
+                    self.history_series_hash,
+                    self.history_observation_count,
+                    self.history_evidence_fingerprint,
+                    self.provider_id,
+                    self.freshness,
+                    self.passengers,
+                    self.passenger_basis,
+                    self.primary_amount,
+                    self.origin,
+                    self.destination,
+                    self.departure_date,
+                    self.return_date,
+                    self.observed_at,
+                    self.watch_action,
+                    *mode_fields.values(),
+                )
+            ):
+                raise ValueError("unsupported analysis scope cannot expose partial-trip results")
+            return self
+
+        required = (
+            self.primary_evidence_id,
+            self.history_series_hash,
+            self.history_observation_count,
+            self.history_evidence_fingerprint,
+            self.provider_id,
+            self.freshness,
+            self.passengers,
+            self.passenger_basis,
+            self.primary_amount,
+            self.origin,
+            self.destination,
+            self.departure_date,
+            self.observed_at,
+        )
+        if (
+            self.scope_reason is not None
+            or self.trip_shape not in {"one_way", "round_trip"}
+            or any(value is None for value in required)
+        ):
+            raise ValueError("supported analysis scope requires complete evidence facts")
+        for mode, value in mode_fields.items():
+            if (mode in self.requested_modes) != (value is not None):
+                raise ValueError("analysis result fields must match requested modes")
+        if ("buy_timing" in self.requested_modes) != (self.watch_action is not None):
+            raise ValueError("watch action must match buy timing analysis")
+        if self.watch_action is not None and (
+            self.buy_timing is None
+            or self.watch_action.available != self.buy_timing.watch_action_available
+            or self.watch_action.origin != self.origin
+            or self.watch_action.destination != self.destination
+            or self.watch_action.departure_date != self.departure_date
+            or self.watch_action.return_date != self.return_date
+            or self.watch_action.passengers != self.passengers
+            or self.primary_amount is None
+            or self.watch_action.currency != self.primary_amount.currency
+        ):
+            raise ValueError("watch action must be bound to the analyzed fare")
+        return self
+
+
 class AgentRunResultsResponse(BaseModel):
     run_id: UUID
     state: Literal["not_ready", "ready", "unavailable"]
     evidence_available: bool
     ranking: AgentRankingSnapshotResponse | None = None
     candidates: list[AgentCandidateFactResponse] | None = None
+    analysis: AgentFareAnalysisResponse | None = None
     hidden_city_candidates: list[AgentHiddenCityCandidateResponse] | None = None
     error_code: Literal["agent_results_unavailable"] | None = None
 
     @classmethod
     def from_view(cls, view: RunResultsView) -> AgentRunResultsResponse:
+        try:
+            analysis = (
+                None
+                if view.analysis is None
+                else AgentFareAnalysisResponse.model_validate(view.analysis)
+            )
+        except ValidationError:
+            return cls(
+                run_id=view.run_id,
+                state="unavailable",
+                evidence_available=view.evidence_available,
+                error_code="agent_results_unavailable",
+            )
         report = view.report
         return cls(
             run_id=view.run_id,
@@ -655,6 +865,7 @@ class AgentRunResultsResponse(BaseModel):
                     for candidate in report.candidates
                 ]
             ),
+            analysis=analysis,
             hidden_city_candidates=(
                 None
                 if not view.hidden_city_candidates

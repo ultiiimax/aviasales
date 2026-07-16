@@ -31,6 +31,7 @@ from flight_hunter.domain.agent_search import TripShape
 from flight_hunter.domain.money import MAX_MONEY_MINOR_UNITS
 from flight_hunter.domain.offers import Freshness, PriceBasis
 from flight_hunter.persistence.models import (
+    agent_analysis_snapshots_table,
     agent_booking_action_descriptors_table,
     agent_composed_route_candidates_table,
     agent_confirmed_offer_evidence_table,
@@ -345,6 +346,7 @@ class AgentOperationResultType(StrEnum):
     CONFIRMED_OFFER = "confirmed_offer"
     COMPOSED_CANDIDATE = "composed_candidate"
     RANKING_SNAPSHOT = "ranking_snapshot"
+    ANALYSIS_SNAPSHOT = "analysis_snapshot"
     OPERATION = "operation"
 
 
@@ -739,6 +741,7 @@ class NewAgentConfirmedOfferEvidence:
     visa_status: VisaEvidenceStatus | None
     fingerprint: str
     created_at: datetime
+    history_series_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -760,6 +763,7 @@ class AgentConfirmedOfferEvidenceRecord:
     baggage_status: BaggageEvidenceStatus | None
     transfer_status: TransferEvidenceStatus | None
     visa_status: VisaEvidenceStatus | None
+    history_series_hash: str | None
     fingerprint: str
     created_at: datetime
 
@@ -887,6 +891,41 @@ class AgentRankingSnapshotRecord:
             self,
             "ranking",
             cast(Mapping[str, object], _deep_freeze(self.ranking)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NewAgentAnalysisSnapshot:
+    id: UUID
+    household_id: UUID
+    run_id: UUID
+    source_evidence_ids: tuple[UUID, ...]
+    analysis: Mapping[str, object]
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "analysis",
+            cast(Mapping[str, object], _deep_freeze(self.analysis)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentAnalysisSnapshotRecord:
+    id: UUID
+    household_id: UUID
+    run_id: UUID
+    source_evidence_ids: tuple[UUID, ...]
+    analysis: Mapping[str, object]
+    fingerprint: str
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "analysis",
+            cast(Mapping[str, object], _deep_freeze(self.analysis)),
         )
 
 
@@ -4159,6 +4198,7 @@ class AgentEvidenceRepository:
                             evidence.visa_status,
                             VisaEvidenceStatus,
                         ),
+                        history_series_hash=evidence.history_series_hash,
                         fingerprint=evidence.fingerprint,
                         created_at=_utc_datetime(evidence.created_at),
                     )
@@ -4206,6 +4246,38 @@ class AgentEvidenceRepository:
                 .where(agent_confirmed_offer_evidence_table.c.household_id == str(household_id))
                 .where(agent_confirmed_offer_evidence_table.c.run_id == str(run_id))
                 .order_by(
+                    agent_confirmed_offer_evidence_table.c.observed_at.asc(),
+                    agent_confirmed_offer_evidence_table.c.id.asc(),
+                )
+            )
+        ).mappings()
+        return tuple(_confirmed_evidence_record(row) for row in rows)
+
+    async def list_confirmed_history(
+        self,
+        household_id: UUID,
+        history_series_hash: str,
+        *,
+        observed_before: datetime | None = None,
+    ) -> tuple[AgentConfirmedOfferEvidenceRecord, ...]:
+        _validate_fingerprint(history_series_hash, "history_series_hash")
+        if observed_before is not None:
+            _require_aware(observed_before, "observed_before")
+        statement = (
+            select(agent_confirmed_offer_evidence_table)
+            .where(agent_confirmed_offer_evidence_table.c.household_id == str(household_id))
+            .where(
+                agent_confirmed_offer_evidence_table.c.history_series_hash == history_series_hash
+            )
+            .where(agent_confirmed_offer_evidence_table.c.source == "exact_search")
+        )
+        if observed_before is not None:
+            statement = statement.where(
+                agent_confirmed_offer_evidence_table.c.observed_at < _utc_datetime(observed_before)
+            )
+        rows = (
+            await self._session.execute(
+                statement.order_by(
                     agent_confirmed_offer_evidence_table.c.observed_at.asc(),
                     agent_confirmed_offer_evidence_table.c.id.asc(),
                 )
@@ -4512,6 +4584,86 @@ class AgentEvidenceRepository:
         )
         return _ranking_snapshot_record(row) if row is not None else None
 
+    async def create_analysis_snapshot(
+        self,
+        snapshot: NewAgentAnalysisSnapshot,
+    ) -> AgentAnalysisSnapshotRecord:
+        source_evidence_ids, analysis_json, fingerprint = _validate_analysis_snapshot(snapshot)
+        await self._acquire_write_transaction()
+        existing = await self.get_analysis_snapshot_for_run(
+            snapshot.household_id,
+            snapshot.run_id,
+        )
+        if existing is not None:
+            if _analysis_snapshot_matches(
+                existing,
+                source_evidence_ids=source_evidence_ids,
+                analysis_json=analysis_json,
+                fingerprint=fingerprint,
+            ):
+                return existing
+            raise AgentEvidenceError("agent_analysis_snapshot_conflict")
+
+        await self._require_run(snapshot.household_id, snapshot.run_id)
+        await self._require_analysis_evidence_references(
+            snapshot.household_id,
+            source_evidence_ids,
+        )
+        try:
+            async with self._session.begin_nested():
+                await self._session.execute(
+                    insert(agent_analysis_snapshots_table).values(
+                        id=str(snapshot.id),
+                        household_id=str(snapshot.household_id),
+                        run_id=str(snapshot.run_id),
+                        source_evidence_ids_json=_uuid_tuple_json(source_evidence_ids),
+                        analysis_json=analysis_json,
+                        fingerprint=fingerprint,
+                        created_at=_utc_datetime(snapshot.created_at),
+                    )
+                )
+        except IntegrityError as error:
+            existing = await self.get_analysis_snapshot_for_run(
+                snapshot.household_id,
+                snapshot.run_id,
+            )
+            if existing is not None and _analysis_snapshot_matches(
+                existing,
+                source_evidence_ids=source_evidence_ids,
+                analysis_json=analysis_json,
+                fingerprint=fingerprint,
+            ):
+                return existing
+            if existing is not None:
+                raise AgentEvidenceError("agent_analysis_snapshot_conflict") from error
+            raise
+
+        stored = await self.get_analysis_snapshot_for_run(
+            snapshot.household_id,
+            snapshot.run_id,
+        )
+        if stored is None:
+            raise RuntimeError("created analysis snapshot is missing")
+        return stored
+
+    async def get_analysis_snapshot_for_run(
+        self,
+        household_id: UUID,
+        run_id: UUID,
+    ) -> AgentAnalysisSnapshotRecord | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(agent_analysis_snapshots_table)
+                    .where(agent_analysis_snapshots_table.c.household_id == str(household_id))
+                    .where(agent_analysis_snapshots_table.c.run_id == str(run_id))
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return _analysis_snapshot_record(row) if row is not None else None
+
     async def _acquire_write_transaction(self) -> None:
         try:
             await _acquire_sqlite_write_transaction(self._session)
@@ -4573,6 +4725,27 @@ class AgentEvidenceRepository:
         if set(by_id) != set(evidence_ids):
             raise AgentEvidenceError("agent_evidence_reference_not_found")
         return tuple(by_id[value] for value in evidence_ids)
+
+    async def _require_analysis_evidence_references(
+        self,
+        household_id: UUID,
+        evidence_ids: tuple[UUID, ...],
+    ) -> None:
+        stored_ids = set(
+            (
+                await self._session.execute(
+                    select(agent_confirmed_offer_evidence_table.c.id)
+                    .where(agent_confirmed_offer_evidence_table.c.household_id == str(household_id))
+                    .where(
+                        agent_confirmed_offer_evidence_table.c.id.in_(
+                            tuple(str(value) for value in evidence_ids)
+                        )
+                    )
+                )
+            ).scalars()
+        )
+        if stored_ids != {str(value) for value in evidence_ids}:
+            raise AgentEvidenceError("agent_analysis_evidence_not_found")
 
     async def _require_ranking_references(self, snapshot: NewAgentRankingSnapshot) -> None:
         requested_confirmed = {str(value) for value in snapshot.confirmed_evidence_ids}
@@ -5091,6 +5264,13 @@ def _json_string_mapping(raw: str) -> dict[str, str]:
 
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SAFE_SHA256_JSON_PATHS = frozenset(
+    {
+        "$.catalog_checksum",
+        "$.history_evidence_fingerprint",
+        "$.history_series_hash",
+    }
+)
 _UNSAFE_JSON_KEY_PARTS = (
     "authorization",
     "signature",
@@ -5171,7 +5351,7 @@ _OPERATION_RESULT_MATRIX: dict[AgentOperationKind, frozenset[AgentOperationResul
     AgentOperationKind.COMPARISON: frozenset(),
     AgentOperationKind.COMPOSITION: frozenset({AgentOperationResultType.COMPOSED_CANDIDATE}),
     AgentOperationKind.RANKING: frozenset({AgentOperationResultType.RANKING_SNAPSHOT}),
-    AgentOperationKind.ANALYSIS: frozenset({AgentOperationResultType.RANKING_SNAPSHOT}),
+    AgentOperationKind.ANALYSIS: frozenset({AgentOperationResultType.ANALYSIS_SNAPSHOT}),
 }
 _RESULT_REFERENCE_TABLES: dict[AgentOperationResultType, tuple[Table, bool]] = {
     AgentOperationResultType.SCOPE_SNAPSHOT: (agent_run_scope_snapshots_table, False),
@@ -5182,6 +5362,7 @@ _RESULT_REFERENCE_TABLES: dict[AgentOperationResultType, tuple[Table, bool]] = {
         True,
     ),
     AgentOperationResultType.RANKING_SNAPSHOT: (agent_ranking_snapshots_table, False),
+    AgentOperationResultType.ANALYSIS_SNAPSHOT: (agent_analysis_snapshots_table, False),
 }
 
 _OPERATION_INPUT_KEYS = frozenset(
@@ -5217,6 +5398,7 @@ _OPERATION_INPUT_KEYS = frozenset(
         "ranking_profile",
         "workflow_version",
         "analysis_mode",
+        "analysis_modes",
         "comparison_key",
         "ordered",
         "version",
@@ -5405,7 +5587,7 @@ def _sanitize_json_value(
         return value
     if isinstance(value, str):
         stripped = value.strip()
-        if path == "$.catalog_checksum" and _SHA256_RE.fullmatch(stripped):
+        if path in _SAFE_SHA256_JSON_PATHS and _SHA256_RE.fullmatch(stripped):
             return stripped
         if re.match(r"^(?:[a-z][a-z0-9+.-]*:|//)", stripped, flags=re.IGNORECASE):
             raise ValueError(f"unsafe field at {path}: URI values are not allowed")
@@ -6080,6 +6262,8 @@ def _validate_confirmed_evidence(evidence: NewAgentConfirmedOfferEvidence) -> st
         evidence.visa_status,
     )
     _validate_evidence_times(evidence.observed_at, evidence.created_at)
+    if evidence.history_series_hash is not None:
+        _validate_fingerprint(evidence.history_series_hash, "history_series_hash")
     _validate_fingerprint(evidence.fingerprint, "fingerprint")
     return _canonical_confirmed_itinerary_json(evidence.itinerary_evidence)
 
@@ -6772,6 +6956,52 @@ def _validate_ranking_snapshot(snapshot: NewAgentRankingSnapshot) -> str:
     return _canonical_ranking_json(snapshot.ranking)
 
 
+def _validate_analysis_snapshot(
+    snapshot: NewAgentAnalysisSnapshot,
+) -> tuple[tuple[UUID, ...], str, str]:
+    _validate_evidence_ownership(
+        snapshot.id,
+        snapshot.household_id,
+        snapshot.run_id,
+        None,
+    )
+    _validate_uuid_references(
+        snapshot.source_evidence_ids,
+        "source_evidence_ids",
+        allow_empty=False,
+    )
+    if len(snapshot.source_evidence_ids) > 100:
+        raise ValueError("source_evidence_ids cannot contain more than 100 values")
+    if not isinstance(snapshot.analysis, Mapping) or not snapshot.analysis:
+        raise ValueError("analysis must be a non-empty JSON object")
+    _require_aware(snapshot.created_at, "created_at")
+    source_evidence_ids = tuple(sorted(snapshot.source_evidence_ids, key=str))
+    analysis_json = canonical_sanitized_json(snapshot.analysis)
+    fingerprint_payload = "\0".join(
+        (
+            "agent-analysis-snapshot-v1",
+            _uuid_tuple_json(source_evidence_ids),
+            analysis_json,
+        )
+    )
+    fingerprint = "sha256:" + hashlib.sha256(fingerprint_payload.encode("utf-8")).hexdigest()
+    return source_evidence_ids, analysis_json, fingerprint
+
+
+def _analysis_snapshot_matches(
+    stored: AgentAnalysisSnapshotRecord,
+    *,
+    source_evidence_ids: tuple[UUID, ...],
+    analysis_json: str,
+    fingerprint: str,
+) -> bool:
+    return (
+        stored.source_evidence_ids == source_evidence_ids
+        and canonical_sanitized_json(stored.analysis) == analysis_json
+        and stored.fingerprint == fingerprint
+    )
+
+
 def _optional_enum_value(value: object, enum_type: type[StrEnum]) -> str | None:
     if value is None:
         return None
@@ -6840,6 +7070,9 @@ def _confirmed_evidence_record(row: RowMapping) -> AgentConfirmedOfferEvidenceRe
         baggage_status=_optional_baggage_status(row["baggage_status"]),
         transfer_status=_optional_transfer_status(row["transfer_status"]),
         visa_status=_optional_visa_status(row["visa_status"]),
+        history_series_hash=(
+            str(row["history_series_hash"]) if row["history_series_hash"] is not None else None
+        ),
         fingerprint=str(row["fingerprint"]),
         created_at=_aware_datetime(row["created_at"]),
     )
@@ -6892,6 +7125,18 @@ def _ranking_snapshot_record(row: RowMapping) -> AgentRankingSnapshotRecord:
         confirmed_evidence_ids=_json_uuid_tuple(str(row["confirmed_evidence_ids_json"])),
         composed_candidate_ids=_json_uuid_tuple(str(row["composed_candidate_ids_json"])),
         ranking=_json_object(str(row["ranking_json"])),
+        fingerprint=str(row["fingerprint"]),
+        created_at=_aware_datetime(row["created_at"]),
+    )
+
+
+def _analysis_snapshot_record(row: RowMapping) -> AgentAnalysisSnapshotRecord:
+    return AgentAnalysisSnapshotRecord(
+        id=UUID(str(row["id"])),
+        household_id=UUID(str(row["household_id"])),
+        run_id=UUID(str(row["run_id"])),
+        source_evidence_ids=_json_uuid_tuple(str(row["source_evidence_ids_json"])),
+        analysis=_json_object(str(row["analysis_json"])),
         fingerprint=str(row["fingerprint"]),
         created_at=_aware_datetime(row["created_at"]),
     )

@@ -16,6 +16,7 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 
 from flight_hunter.ops.structured_logging import LOGGER_NAME
 from flight_hunter.persistence.models import (
+    agent_analysis_snapshots_table,
     agent_booking_action_descriptors_table,
     agent_composed_route_candidates_table,
     agent_confirmed_offer_evidence_table,
@@ -163,6 +164,7 @@ def test_review_agent_ledger_core_metadata_has_budget_checks_and_indexes() -> No
     assert "logical_root_operation_id" in operation_checks["ck_agent_run_operation_logical_shape"]
     assert "circuit_permit_token_digest" in operation_checks["ck_agent_run_operation_permit_shape"]
     assert "operation" in operation_checks["ck_agent_run_operation_result_type"]
+    assert "analysis_snapshot" in operation_checks["ck_agent_run_operation_result_type"]
     assert {
         "operation_attempt_number",
         "circuit_permit_generation",
@@ -187,6 +189,22 @@ def test_review_agent_ledger_core_metadata_has_budget_checks_and_indexes() -> No
     assert any(
         constraint.name == "uq_agent_ranking_fingerprint"
         for constraint in agent_ranking_snapshots_table.constraints
+    )
+    history_index = next(
+        index
+        for index in agent_confirmed_offer_evidence_table.indexes
+        if index.name == "ix_agent_confirmed_evidence_history_series"
+    )
+    assert [column.name for column in history_index.columns] == [
+        "household_id",
+        "history_series_hash",
+        "observed_at",
+        "id",
+    ]
+    assert agent_confirmed_offer_evidence_table.c.history_series_hash.nullable
+    assert any(
+        constraint.name == "uq_agent_analysis_snapshot_run"
+        for constraint in agent_analysis_snapshots_table.constraints
     )
 
 
@@ -396,6 +414,7 @@ def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> N
                 "agent_confirmed_offer_evidence",
                 "agent_composed_route_candidates",
                 "agent_ranking_snapshots",
+                "agent_analysis_snapshots",
                 "agent_booking_action_descriptors",
             )
         }
@@ -430,6 +449,16 @@ def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> N
             "select sql from sqlite_master where type = 'table' and name = ?",
             ("agent_ranking_snapshots",),
         ).fetchone()
+        analysis_table_sql = connection.execute(
+            "select sql from sqlite_master where type = 'table' and name = ?",
+            ("agent_analysis_snapshots",),
+        ).fetchone()
+        history_index_columns = [
+            row[2]
+            for row in connection.execute(
+                "pragma index_info(ix_agent_confirmed_evidence_history_series)"
+            ).fetchall()
+        ]
 
     assert {
         "watches",
@@ -472,6 +501,7 @@ def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> N
         "agent_confirmed_offer_evidence",
         "agent_composed_route_candidates",
         "agent_ranking_snapshots",
+        "agent_analysis_snapshots",
         "agent_booking_action_descriptors",
     }.issubset(tables)
     assert {
@@ -684,6 +714,7 @@ def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> N
     assert "ck_agent_run_operation_logical_shape" in operation_table_sql[0]
     assert "ck_agent_run_operation_permit_shape" in operation_table_sql[0]
     assert "'operation'" in operation_table_sql[0]
+    assert "'analysis_snapshot'" in operation_table_sql[0]
     assert "'suggest_discovery'" in operation_table_sql[0]
     assert any(
         row[2] == "agent_run_operations"
@@ -709,6 +740,16 @@ def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> N
     assert "half_open_probe_operation_id" in circuit_table_sql[0]
     assert ranking_table_sql is not None
     assert "uq_agent_ranking_fingerprint" in ranking_table_sql[0]
+    assert analysis_table_sql is not None
+    assert "uq_agent_analysis_snapshot_run" in analysis_table_sql[0]
+    assert "ck_agent_analysis_snapshot_references" in analysis_table_sql[0]
+    assert "history_series_hash" in ledger_table_columns["agent_confirmed_offer_evidence"]
+    assert history_index_columns == [
+        "household_id",
+        "history_series_hash",
+        "observed_at",
+        "id",
+    ]
 
 
 def test_review_fresh_core_metadata_matches_migration_head_for_agent_ledger(
@@ -729,6 +770,7 @@ def test_review_fresh_core_metadata_matches_migration_head_for_agent_ledger(
         agent_confirmed_offer_evidence_table,
         agent_composed_route_candidates_table,
         agent_ranking_snapshots_table,
+        agent_analysis_snapshots_table,
         agent_booking_action_descriptors_table,
     )
 
@@ -1088,3 +1130,228 @@ def test_airport_commercial_migration_backfills_legacy_rows(tmp_path: Path) -> N
     assert row == (1, "legacy_import_filter")
     assert columns["scheduled_service"][3] == 1
     assert columns["commercial_provenance"][3] == 1
+
+
+def test_0027_to_0028_preserves_legacy_evidence_and_operations(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "agent-0027-analysis-upgrade.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path.as_posix()}")
+    command.upgrade(config, "0027_agent_hidden_city_research")
+    now = "2026-07-16T12:00:00+00:00"
+
+    with sqlite3.connect(db_path) as connection:
+        _insert_0027_analysis_fixture(connection, now)
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "select history_series_hash from agent_confirmed_offer_evidence "
+            "where id = '70000000-0000-0000-0000-000000000001'"
+        ).fetchone() == (None,)
+        assert connection.execute(
+            "select operation_kind, status, immutable_input_json from agent_run_operations "
+            "where id = '80000000-0000-0000-0000-000000000001'"
+        ).fetchone() == (
+            "analysis",
+            "pending",
+            '{"analysis_mode":"minimal_report","version":"task9-v1"}',
+        )
+        connection.execute(
+            "insert into agent_analysis_snapshots ("
+            "id, household_id, run_id, source_evidence_ids_json, analysis_json, "
+            "fingerprint, created_at) values (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "90000000-0000-0000-0000-000000000001",
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "50000000-0000-0000-0000-000000000001",
+                '["70000000-0000-0000-0000-000000000001"]',
+                '{"version":"fare-analysis-v1"}',
+                "sha256:" + "f" * 64,
+                now,
+            ),
+        )
+        connection.execute(
+            "update agent_run_operations set status = 'succeeded', "
+            "result_type = 'analysis_snapshot', result_id = ?, "
+            "updated_at = ?, completed_at = ? where id = ?",
+            (
+                "90000000-0000-0000-0000-000000000001",
+                now,
+                now,
+                "80000000-0000-0000-0000-000000000001",
+            ),
+        )
+        connection.commit()
+        assert connection.execute(
+            "select status, result_type, result_id from agent_run_operations "
+            "where id = '80000000-0000-0000-0000-000000000001'"
+        ).fetchone() == (
+            "succeeded",
+            "analysis_snapshot",
+            "90000000-0000-0000-0000-000000000001",
+        )
+
+
+def _insert_0027_analysis_fixture(
+    connection: sqlite3.Connection,
+    now: str,
+) -> None:
+    household_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    run_id = "50000000-0000-0000-0000-000000000001"
+    exact_stage_id = "60000000-0000-0000-0000-000000000001"
+    analysis_stage_id = "60000000-0000-0000-0000-000000000002"
+    connection.execute(
+        "insert into agent_search_plans (id, household_id, created_by_user_id, created_at) "
+        "values (?, ?, ?, ?)",
+        ("10000000-0000-0000-0000-000000000001", household_id, "user", now),
+    )
+    connection.execute(
+        "insert into agent_search_plan_revisions ("
+        "id, plan_id, household_id, revision_number, state, plan_json, "
+        "scope_snapshot_json, capability_snapshot_json, cost_model_snapshot_json, "
+        "parser_version, planner_version, estimated_calendar_searches, "
+        "estimated_exact_searches, estimated_logical_operations, "
+        "estimated_http_attempts, estimated_deadline_seconds, content_hash, "
+        "created_at, expires_at, consumed_at) values "
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "20000000-0000-0000-0000-000000000001",
+            "10000000-0000-0000-0000-000000000001",
+            household_id,
+            1,
+            "consumed",
+            "{}",
+            "{}",
+            "{}",
+            "{}",
+            "parser-v1",
+            "planner-v1",
+            0,
+            1,
+            1,
+            4,
+            600,
+            "sha256:" + "a" * 64,
+            now,
+            "2026-07-16T13:00:00+00:00",
+            now,
+        ),
+    )
+    connection.execute(
+        "insert into agent_plan_execution_approvals ("
+        "id, household_id, plan_id, revision_id, approved_by_user_id, "
+        "revision_content_hash, approved_by_session_id, approved_budget_json, "
+        "approved_strategies_json, risk_warning_versions_json, approved_at, expires_at, "
+        "consumed_at, run_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "30000000-0000-0000-0000-000000000001",
+            household_id,
+            "10000000-0000-0000-0000-000000000001",
+            "20000000-0000-0000-0000-000000000001",
+            "user",
+            "sha256:" + "a" * 64,
+            "session",
+            '{"logical_operations":1,"http_attempts":4}',
+            '["direct"]',
+            "{}",
+            now,
+            "2026-07-16T12:30:00+00:00",
+            now,
+            run_id,
+        ),
+    )
+    connection.execute(
+        "insert into agent_plan_runs ("
+        "id, household_id, plan_id, revision_id, approval_id, execute_idempotency_key, "
+        "status, created_at, deadline_at, logical_operation_budget, "
+        "logical_operations_consumed, http_attempt_budget, http_attempts_consumed) "
+        "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            run_id,
+            household_id,
+            "10000000-0000-0000-0000-000000000001",
+            "20000000-0000-0000-0000-000000000001",
+            "30000000-0000-0000-0000-000000000001",
+            "execute:0027-analysis",
+            "running",
+            now,
+            "2026-07-16T12:10:00+00:00",
+            1,
+            0,
+            4,
+            0,
+        ),
+    )
+    connection.executemany(
+        "insert into agent_plan_stages ("
+        "id, household_id, run_id, stage_kind, status, created_at, updated_at) "
+        "values (?, ?, ?, ?, ?, ?, ?)",
+        (
+            (exact_stage_id, household_id, run_id, "exact_search", "completed", now, now),
+            (analysis_stage_id, household_id, run_id, "analysis", "pending", now, now),
+        ),
+    )
+    connection.execute(
+        "insert into agent_confirmed_offer_evidence ("
+        "id, household_id, run_id, stage_id, provider_id, source, observed_at, "
+        "freshness, passengers, passenger_basis, amount_minor, currency, "
+        "itinerary_evidence_json, protection_status, baggage_status, "
+        "transfer_status, visa_status, fingerprint, created_at) values "
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "70000000-0000-0000-0000-000000000001",
+            household_id,
+            run_id,
+            exact_stage_id,
+            "aviasales_search",
+            "exact_search",
+            now,
+            "live_observed",
+            1,
+            "provider_single_adult_ticket",
+            20_000,
+            "RUB",
+            "{}",
+            "unknown",
+            None,
+            None,
+            None,
+            "sha256:" + "b" * 64,
+            now,
+        ),
+    )
+    connection.execute(
+        "insert into agent_run_operations ("
+        "id, household_id, run_id, stage_id, provider_id, operation_kind, "
+        "operation_fingerprint, logical_operation_fingerprint, "
+        "logical_root_operation_id, handoff_predecessor_operation_id, "
+        "consumes_logical_unit, immutable_input_json, private_continuation_json, "
+        "status, attempt_count, max_attempts, http_attempts_consumed, "
+        "created_at, updated_at) values "
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "80000000-0000-0000-0000-000000000001",
+            household_id,
+            run_id,
+            analysis_stage_id,
+            None,
+            "analysis",
+            "sha256:" + "c" * 64,
+            "sha256:" + "d" * 64,
+            None,
+            None,
+            0,
+            '{"analysis_mode":"minimal_report","version":"task9-v1"}',
+            None,
+            "pending",
+            0,
+            3,
+            0,
+            now,
+            now,
+        ),
+    )

@@ -4,7 +4,7 @@ import hashlib
 import importlib
 import json
 import traceback
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -51,6 +51,7 @@ from flight_hunter.geo.airports import (
     freeze_airport_catalog,
 )
 from flight_hunter.persistence.agent_repositories import (
+    AgentConfirmedOfferEvidenceRecord,
     AgentEvidenceRepository,
     AgentOperationKind,
     AgentOperationRepository,
@@ -61,6 +62,7 @@ from flight_hunter.persistence.agent_repositories import (
     AgentPlanStageKind,
     AgentRunRepository,
     AgentStageStatus,
+    NewAgentAnalysisSnapshot,
     NewAgentConfirmedOfferEvidence,
     NewAgentDiscoverySignal,
     NewAgentPlan,
@@ -71,6 +73,7 @@ from flight_hunter.persistence.agent_repositories import (
 )
 from flight_hunter.persistence.database import create_database_engine
 from flight_hunter.persistence.models import (
+    agent_analysis_snapshots_table,
     agent_confirmed_offer_evidence_table,
     agent_discovery_signals_table,
     agent_plan_execution_approvals_table,
@@ -1219,6 +1222,7 @@ async def test_multi_city_ranks_only_the_full_composed_route_not_individual_legs
         exact_searches=2,
         logical_budget=2,
         poll_rounds=1,
+        analysis_modes=("buy_timing",),
     )
     clock = MutableClock()
     gateway = ResumableFakeGateway(clock)
@@ -1246,6 +1250,10 @@ async def test_multi_city_ranks_only_the_full_composed_route_not_individual_legs
             HOUSEHOLD_ID,
             ranking_operation.result_id,
         )
+        analysis_record = await evidence_repository.get_analysis_snapshot_for_run(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
         await session.rollback()
         results = await AgentLifecycleService(
             session=session,
@@ -1272,6 +1280,10 @@ async def test_multi_city_ranks_only_the_full_composed_route_not_individual_legs
     assert results.state == "ready"
     assert results.report is not None
     assert results.report.ranking == ranking
+    assert analysis_record is not None
+    assert analysis_record.analysis["scope_status"] == "unsupported_trip_structure"
+    assert analysis_record.analysis["scope_reason"] == "full_itinerary_history_unavailable"
+    assert "buy_timing" not in analysis_record.analysis
     assert "stored-evidence:" not in repr(results.report)
     await engine.dispose()
 
@@ -3407,6 +3419,7 @@ async def test_round_trip_split_preserves_two_directions_and_never_searches_same
         exact_searches=9,
         logical_budget=9,
         poll_rounds=1,
+        analysis_modes=("buy_timing", "error_fare"),
     )
     clock = MutableClock()
     gateway = ResumableFakeGateway(clock, connecting_evidence=True)
@@ -3423,6 +3436,10 @@ async def test_round_trip_split_preserves_two_directions_and_never_searches_same
             RUN_ID,
         )
         operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        analysis_record = await evidence_repository.get_analysis_snapshot_for_run(
             HOUSEHOLD_ID,
             RUN_ID,
         )
@@ -3462,31 +3479,45 @@ async def test_round_trip_split_preserves_two_directions_and_never_searches_same
         (0, "LED", "CDG", "2026-09-10"),
         (1, "CDG", "LED", "2026-09-20"),
     ]
+    assert analysis_record is not None
+    assert analysis_record.analysis["scope_status"] == "unsupported_trip_structure"
+    assert "buy_timing" not in analysis_record.analysis
+    assert "anomaly" not in analysis_record.analysis
     await engine.dispose()
 
 
 @pytest.mark.anyio
-async def test_task9_fails_closed_for_approved_analysis_it_does_not_implement(
+async def test_approved_analysis_modes_persist_evidence_gated_snapshot_without_extra_io(
     tmp_path: Path,
     execution_module: ModuleType,
 ) -> None:
-    engine, sessions = await _session_factory(tmp_path, "unsupported-analysis.db")
+    engine, sessions = await _session_factory(tmp_path, "fare-analysis.db")
     await _seed_run(
         sessions,
         date_mode="exact",
-        analysis_modes=("buy_timing",),
+        analysis_modes=("buy_timing", "error_fare", "currency_compare"),
     )
     clock = MutableClock()
     gateway = ResumableFakeGateway(clock)
 
     async with sessions() as session:
-        step = await _service(execution_module, session, gateway, clock).run_step(
-            household_id=HOUSEHOLD_ID,
-            run_id=RUN_ID,
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
         )
-        await session.commit()
-        terminal = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
         operations = await AgentOperationRepository(session).list_operations(HOUSEHOLD_ID, RUN_ID)
+        evidence = await AgentEvidenceRepository(session).list_confirmed_evidence(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        analysis_operation = next(
+            operation for operation in operations if operation.kind is AgentOperationKind.ANALYSIS
+        )
+        assert analysis_operation.result_id is not None
+        snapshot = await AgentEvidenceRepository(session).get_analysis_snapshot_for_run(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
         reservations = (
             await session.execute(
                 select(func.count()).select_from(agent_provider_http_attempts_table)
@@ -3497,13 +3528,335 @@ async def test_task9_fails_closed_for_approved_analysis_it_does_not_implement(
                 select(func.count()).select_from(agent_provider_circuit_state_table)
             )
         ).scalar_one()
+        await session.rollback()
+        results = await AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(clock=clock),
+            clock=clock,
+        ).get_run_results(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
 
-    assert step.operation_claimed is False and step.run_status == "failed"
-    assert terminal is not None and terminal.error_code == "agent_analysis_unsupported"
-    assert terminal.http_attempts_consumed == 0
-    assert operations == ()
-    assert circuit_rows == reservations == gateway.provider_calls == 0
+    assert terminal.status == "completed"
+    assert len(evidence) == 1
+    assert evidence[0].history_series_hash is not None
+    assert analysis_operation.result_type is AgentOperationResultType.ANALYSIS_SNAPSHOT
+    assert snapshot is not None
+    assert snapshot.id == analysis_operation.result_id
+    assert snapshot.source_evidence_ids == (evidence[0].id,)
+    assert snapshot.analysis["version"] == "fare-analysis-snapshot-v1"
+    assert snapshot.analysis["aggregation_mode"] == "market_minimum"
+    assert snapshot.analysis["scope_status"] == "supported"
+    assert snapshot.analysis["provider_id"] == "aviasales_search"
+    assert snapshot.analysis["freshness"] == "live"
+    assert snapshot.analysis["passengers"] == 1
+    assert snapshot.analysis["passenger_basis"] == "total_for_passengers"
+    assert snapshot.analysis["primary_amount"] == {
+        "minor_units": 20_000,
+        "currency": "RUB",
+    }
+    assert snapshot.analysis["origin"] == "LED"
+    assert snapshot.analysis["destination"] == "CDG"
+    assert snapshot.analysis["departure_date"] == "2026-09-10"
+    assert snapshot.analysis["return_date"] is None
+    assert snapshot.analysis["history_observation_count"] == 0
+    history_fingerprint = snapshot.analysis["history_evidence_fingerprint"]
+    assert isinstance(history_fingerprint, str)
+    assert history_fingerprint.startswith("sha256:")
+    assert snapshot.analysis["source_evidence_truncated"] is False
+    assert snapshot.analysis["requested_modes"] == (
+        "buy_timing",
+        "error_fare",
+        "currency_compare",
+    )
+    buy_timing = snapshot.analysis["buy_timing"]
+    anomaly = snapshot.analysis["anomaly"]
+    currency = snapshot.analysis["currency_comparison"]
+    assert isinstance(buy_timing, Mapping)
+    assert isinstance(anomaly, Mapping)
+    assert isinstance(currency, Mapping)
+    assert buy_timing["status"] == "insufficient_data"
+    assert buy_timing["watch_action_available"] is True
+    assert snapshot.analysis["watch_action"] == {
+        "available": True,
+        "origin": "LED",
+        "destination": "CDG",
+        "departure_date": "2026-09-10",
+        "return_date": None,
+        "passengers": 1,
+        "currency": "RUB",
+    }
+    assert anomaly["status"] == "insufficient_data"
+    assert currency["status"] == "fx_provider_unavailable"
+    assert currency["savings_minor_units"] is None
+    assert currency["savings_percent"] is None
+    assert results.state == "ready"
+    assert results.analysis == snapshot.analysis
+    assert circuit_rows == 1
+    assert reservations == gateway.provider_calls == 2
     await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_active_task9_analysis_operation_recovers_after_upgrade(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "legacy-analysis-recovery.db")
+    await _seed_run(sessions, date_mode="exact")
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async with sessions() as session:
+        service = _service(execution_module, session, gateway, clock)
+        analysis_operation = None
+        for _ in range(12):
+            await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+            await session.commit()
+            operations = await AgentOperationRepository(session).list_operations(
+                HOUSEHOLD_ID,
+                RUN_ID,
+            )
+            analysis_operation = next(
+                (
+                    operation
+                    for operation in operations
+                    if operation.kind is AgentOperationKind.ANALYSIS
+                ),
+                None,
+            )
+            if (
+                analysis_operation is not None
+                and analysis_operation.status is AgentOperationStatus.PENDING
+            ):
+                break
+        assert analysis_operation is not None
+        await session.execute(
+            update(agent_run_operations_table)
+            .where(agent_run_operations_table.c.id == str(analysis_operation.id))
+            .values(
+                immutable_input_json=json.dumps(
+                    {"analysis_mode": "minimal_report", "version": "task9-v1"},
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        )
+        await session.commit()
+
+        terminal = await _run_until_terminal(service, session, limit=4)
+        snapshot = await AgentEvidenceRepository(session).get_analysis_snapshot_for_run(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    assert terminal.status == "completed"
+    assert snapshot is not None
+    assert snapshot.analysis["requested_modes"] == ()
+    assert snapshot.analysis["scope_status"] == "supported"
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("immutable_input", "expected_state"),
+    (
+        ({"analysis_mode": "minimal_report", "version": "task9-v1"}, "ready"),
+        ({"analysis_modes": [], "version": "fare-analysis-v1"}, "unavailable"),
+    ),
+)
+async def test_only_legacy_task9_ranking_link_is_accepted_as_completed_analysis(
+    tmp_path: Path,
+    execution_module: ModuleType,
+    immutable_input: dict[str, object],
+    expected_state: Literal["ready", "unavailable"],
+) -> None:
+    engine, sessions = await _session_factory(
+        tmp_path,
+        f"legacy-analysis-result-{expected_state}.db",
+    )
+    await _seed_run(sessions, date_mode="exact")
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+        )
+        assert terminal.status == "completed"
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        ranking = next(
+            operation for operation in operations if operation.kind is AgentOperationKind.RANKING
+        )
+        analysis = next(
+            operation for operation in operations if operation.kind is AgentOperationKind.ANALYSIS
+        )
+        assert ranking.result_id is not None
+        await session.execute(
+            delete(agent_analysis_snapshots_table).where(
+                agent_analysis_snapshots_table.c.run_id == str(RUN_ID)
+            )
+        )
+        await session.execute(
+            update(agent_run_operations_table)
+            .where(agent_run_operations_table.c.id == str(analysis.id))
+            .values(
+                immutable_input_json=json.dumps(
+                    immutable_input,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                result_type=AgentOperationResultType.RANKING_SNAPSHOT.value,
+                result_id=str(ranking.result_id),
+            )
+        )
+        await session.commit()
+
+        results = await AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(clock=clock),
+            clock=clock,
+        ).get_run_results(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
+
+    assert results.state == expected_state
+    assert results.analysis is None
+    assert (results.error_code is None) == (expected_state == "ready")
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_existing_analysis_snapshot_is_validated_before_retry_reuse(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "analysis-retry-binding.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        analysis_modes=("buy_timing",),
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async with sessions() as session:
+        service = _service(execution_module, session, gateway, clock)
+        analysis_operation = None
+        for _ in range(12):
+            await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+            await session.commit()
+            operations = await AgentOperationRepository(session).list_operations(
+                HOUSEHOLD_ID,
+                RUN_ID,
+            )
+            analysis_operation = next(
+                (
+                    operation
+                    for operation in operations
+                    if operation.kind is AgentOperationKind.ANALYSIS
+                ),
+                None,
+            )
+            if (
+                analysis_operation is not None
+                and analysis_operation.status is AgentOperationStatus.PENDING
+            ):
+                break
+        assert analysis_operation is not None
+        evidence = await AgentEvidenceRepository(session).list_confirmed_evidence(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        await AgentEvidenceRepository(session).create_analysis_snapshot(
+            NewAgentAnalysisSnapshot(
+                id=uuid4(),
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                source_evidence_ids=(evidence[0].id,),
+                analysis={
+                    "version": "fare-analysis-snapshot-v1",
+                    "source": "confirmed_exact_history",
+                    "aggregation_mode": "market_minimum",
+                    "scope_status": "supported",
+                    "requested_modes": [],
+                },
+                created_at=clock(),
+            )
+        )
+        await session.commit()
+
+        step = await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+        await session.commit()
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        stored_analysis = next(
+            operation for operation in operations if operation.kind is AgentOperationKind.ANALYSIS
+        )
+
+    assert step.operation_status == "failed"
+    assert stored_analysis.error_code == "agent_analysis_snapshot_conflict"
+    await engine.dispose()
+
+
+def test_analysis_history_validation_keeps_all_market_observations(
+    execution_module: ModuleType,
+) -> None:
+    records = tuple(
+        AgentConfirmedOfferEvidenceRecord(
+            id=UUID(int=index + 1),
+            household_id=HOUSEHOLD_ID,
+            run_id=UUID(int=10_000 + index),
+            stage_id=UUID(int=20_000 + index),
+            provider_id="aviasales_search",
+            source="exact_search",
+            observed_at=NOW - timedelta(days=120 - index),
+            freshness=Freshness.LIVE,
+            passengers=1,
+            passenger_basis=PriceBasis.TOTAL_FOR_PASSENGERS,
+            amount_minor=20_000 + index,
+            currency="RUB",
+            itinerary_evidence={"departure_date": "2026-09-10"},
+            protection_status=ProtectionStatus.UNKNOWN,
+            baggage_status=None,
+            transfer_status=None,
+            visa_status=None,
+            history_series_hash="sha256:" + "a" * 64,
+            fingerprint="sha256:" + f"{index:064x}",
+            created_at=NOW - timedelta(days=120 - index),
+        )
+        for index in range(120)
+    )
+
+    duplicate_offer = replace(
+        records[50],
+        id=UUID(int=50_000),
+        amount_minor=10_000,
+        fingerprint="sha256:" + "f" * 64,
+    )
+    valid_records, observations = execution_module._valid_analysis_history_records(
+        (*records, duplicate_offer)
+    )
+
+    assert len(valid_records) == 120
+    assert len(observations) == 120
+    assert valid_records[0].id == UUID(int=1)
+    assert valid_records[-1].id == UUID(int=120)
+    selected_run_offer = next(
+        record for record in valid_records if record.run_id == duplicate_offer.run_id
+    )
+    assert selected_run_offer.id == duplicate_offer.id
+    bounded = execution_module._bounded_analysis_source_records(valid_records, limit=99)
+    assert len(bounded) == 99
+    assert bounded[0].id == valid_records[0].id
+    assert bounded[-1].id == valid_records[-1].id
+    assert execution_module._history_evidence_fingerprint(
+        valid_records
+    ) != execution_module._history_evidence_fingerprint(bounded)
 
 
 @pytest.mark.anyio

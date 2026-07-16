@@ -1597,7 +1597,7 @@ No live provider call or user database access was performed.
 - Reads exact confirmed append-only evidence only.
 - Uses typed fresh `FxRateObservation` and explicit card-fee assumptions.
 
-- [ ] **Step 1: Write failing history comparability tests**
+- [x] **Step 1: Write failing history comparability tests**
 
 Prove distinct history series for differences in:
 
@@ -1624,7 +1624,7 @@ Also cover all evidence gates:
 - legacy confirmed evidence with no canonical series hash is excluded rather than guessed;
 - analysis snapshots are append-only, idempotent and household-isolated.
 
-- [ ] **Step 2: Run focused tests and confirm analysis is absent**
+- [x] **Step 2: Run focused tests and confirm analysis is absent**
 
 ```powershell
 uv run pytest tests/unit/application/test_agent_analysis.py tests/unit/persistence/test_agent_history_repository.py tests/unit/api/test_agent_plan_api.py tests/unit/api/test_web_ui.py -q
@@ -1632,7 +1632,7 @@ uv run pytest tests/unit/application/test_agent_analysis.py tests/unit/persisten
 
 Expected: import and behavior failures.
 
-- [ ] **Step 3: Implement exact history keys and repository query**
+- [x] **Step 3: Implement exact history keys and repository query**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -1656,7 +1656,7 @@ analysis snapshots. New exact evidence stores the hash; legacy `NULL` rows are
 not backfilled from incomplete facts and are excluded from analysis.
 `market_minimum` and `same_product` queries never mix.
 
-- [ ] **Step 4: Implement robust deterministic assessments**
+- [x] **Step 4: Implement robust deterministic assessments**
 
 Use integer/`Decimal` calculations. Publish sample count, dates, weeks, span, percentile/median, days-to-departure bands, timezone, thresholds, and calculation version. Failed evidence gates produce `insufficient_data` and a separate explicit watch action.
 
@@ -1666,7 +1666,7 @@ The executor stores one deterministic analysis snapshot per run after confirmed
 evidence is durable. Reads return that snapshot and never silently recompute an
 old run against newer history.
 
-- [ ] **Step 5: Implement currency comparability**
+- [x] **Step 5: Implement currency comparability**
 
 Stable flight fingerprint includes airports, ordered segments, carrier/flight number, local departure timestamps, and cabin. Require equivalent seller/gate, fare code/family, baggage, ticket structure, and known refund/change rules. Without all material equivalence plus fresh FX and fee assumptions, show side-by-side amounts without a savings claim.
 
@@ -1675,7 +1675,7 @@ the approved plan and budget. Until an FX provider/config is enabled, the
 production result is `fx_provider_unavailable`; no default market list, FX rate,
 card fee or savings amount is invented.
 
-- [ ] **Step 6: Verify analytics and UI wording**
+- [x] **Step 6: Verify analytics and UI wording**
 
 ```powershell
 uv run pytest tests/unit/application/test_agent_analysis.py tests/unit/persistence/test_agent_history_repository.py tests/unit/api/test_agent_plan_api.py tests/unit/api/test_web_ui.py -q
@@ -1684,7 +1684,15 @@ uv run mypy src/flight_hunter/application/agent_analysis.py src/flight_hunter/ap
 
 Expected: all threshold boundaries and honest fallback states pass.
 
-- [ ] **Step 7: Commit**
+Accepted verification on 2026-07-16: the exact four-file gate passes 114 tests;
+analysis/executor passes 196; lifecycle/API/web passes 102; persistence passes
+313; migration/history upgrade checks pass 18; full mypy passes 123 source
+files; Ruff and `git diff --check` pass. Independent read-only review returned
+`APPROVE` with zero Critical, Important or Minor findings after two hardening
+cycles. Generic watches remain explicitly separate from canonical analysis
+history. No live provider call or user database access was performed.
+
+- [x] **Step 7: Commit**
 
 ```powershell
 git add src/flight_hunter/application/agent_analysis.py src/flight_hunter/domain/agent_evidence.py src/flight_hunter/application/agent_execution.py src/flight_hunter/application/agent_reporting.py src/flight_hunter/persistence/agent_repositories.py src/flight_hunter/api/agent_schemas.py src/flight_hunter/api/web.py tests/unit/application/test_agent_analysis.py tests/unit/persistence/test_agent_history_repository.py tests/unit/api/test_agent_plan_api.py tests/unit/api/test_web_ui.py
