@@ -113,8 +113,8 @@ local Aviasales settings, Compose and operator docs. Prove restart, dedupe,
 cancellation/deadline zero-I/O, retry/circuit behavior and household/private
 continuation isolation fixture-only before marking the slice complete. The
 existing forward migration `0024_agent_execution_ledger` is sufficient. The
-slice was accepted on 2026-07-15; Task 10 coverage breadth and Task 11
-composition remain unstarted.
+slice was accepted on 2026-07-15; Task 10 coverage breadth is now accepted and
+Task 11 composition is the active release slice.
 
 Task 9 implementation on 2026-07-15 is accepted by independent review. The
 dedicated agent worker now
@@ -142,8 +142,8 @@ Alembic has the single `0024_agent_execution_ledger` head. Accepted executor
 hardening is `c0d7de6`; deterministic clean-environment gates are `98147bc`.
 No live provider call was made and the user's local database was untouched.
 
-Task 10 implementation candidate on 2026-07-16 is hardened and awaiting a new
-independent manifest review. QUICK and FULL execute every frozen finite
+Task 10 implementation was accepted and committed on 2026-07-16. QUICK and FULL
+execute every frozen finite
 airport/date pair for airport, city, country, region and nearby scopes; aliases
 collapse, same-airport pairs are excluded, taxonomy/catalog versions and nearby
 distances are frozen before approval, and unknown ground cost remains unknown.
@@ -153,7 +153,7 @@ ordered destination/source-signal snapshot before exact searches. Later catalog
 or feed changes cannot expand the approved run. Public run views expose an
 honest per-pair coverage report; corrupt projections fail closed, and incomplete
 FULL coverage remains `partial` with stable reasons. Migration
-`0025_agent_anywhere_discovery` is the candidate single head. The exact
+`0025_agent_anywhere_discovery` is the single head. The exact
 four-file Task 10 plan gate passes 231 tests; provider, persistence and worker
 regressions pass 382 tests; all 1,362 unit tests and all 4 integration tests pass.
 Fresh full mypy passes all 118 source files, Ruff reports 288 formatted files
@@ -169,8 +169,26 @@ months at planning/scope/snapshot/client boundaries; and all money entering the
 agent path fits the shared signed SQL `Integer` ceiling. The bounded parser still
 validates every in-bounds row and constructs only the deterministic selected
 top-K. No live provider call was made and no user database was opened or
-migrated. Task 10 is not accepted or committed until both independent re-review
-gates accept the same new manifest.
+migrated. Both independent re-review gates accepted the exact same manifest
+with zero Critical, Important or Minor findings. The provider/persistence
+review additionally passed 521 tests; the architecture/spec review passed the
+231-test required gate, 454 expanded tests, all 118 mypy source files, Ruff over
+288 files, PostgreSQL offline DDL compilation and the final manifest recheck.
+The accepted implementation commit is `39fcf60`; its reviewed pre-commit
+manifest was HEAD `4744e4e`, tracked patch `4ce4a188`, migration `0e0d5a3f`,
+fixture `af82d67a` and coverage test `648bf32c`.
+
+Task 11 active slice plan: compose routes only from confirmed evidence; retain a
+native multi-segment provider result as one ticket with unknown protection;
+enforce deterministic same-airport, airport-change, overlap and maximum-layover
+rules for split/self-transfer candidates; reject incomparable currency or
+passenger bases and keep unknown transfer cost explicit. Materialize open-jaw
+and multi-city as bounded per-leg exact searches while native capability is
+unknown, bound candidate growth with a stable beam, persist immutable component
+and ranking snapshots, then expose cheapest, fastest, balanced, low-risk,
+split/self-transfer and risky views without leaking provider references or URLs.
+Implementation proceeds test-first through domain composition, execution,
+persistence, API reporting and focused/full quality gates.
 
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic

@@ -1292,7 +1292,7 @@ git commit -m "feat: execute agent searches durably"
 - Anywhere freezes a bounded rule before approval and an immutable destination snapshot after discovery.
 - Produces explicit coverage report for attempted/succeeded/failed/skipped pairs.
 
-- [ ] **Step 1: Write failing scope-coverage tests**
+- [x] **Step 1: Write failing scope-coverage tests**
 
 Cover:
 
@@ -1306,7 +1306,7 @@ Cover:
 - `full` status is impossible when any frozen pair was silently skipped;
 - coverage response lists each pair and stable failure reason.
 
-- [ ] **Step 2: Run focused tests and confirm incomplete breadth handling**
+- [x] **Step 2: Run focused tests and confirm incomplete breadth handling**
 
 ```powershell
 uv run pytest tests/unit/application/test_agent_coverage.py tests/unit/application/test_agent_scope.py tests/unit/application/test_agent_execution.py tests/unit/api/test_agent_plan_api.py -q
@@ -1314,7 +1314,7 @@ uv run pytest tests/unit/application/test_agent_coverage.py tests/unit/applicati
 
 Expected: failures for anywhere snapshot and complete coverage accounting.
 
-- [ ] **Step 3: Implement deterministic quick ordering**
+- [x] **Step 3: Implement deterministic quick ordering**
 
 Order quick candidates by a stable tuple:
 
@@ -1330,15 +1330,15 @@ def quick_scope_key(candidate: ScopeAirportCandidate) -> tuple[int, int, int, st
 
 Unknown nearby ground cost remains `None` and contributes an uncertainty flag; it is never added as zero.
 
-- [ ] **Step 4: Freeze anywhere discovery once**
+- [x] **Step 4: Freeze anywhere discovery once**
 
 On first successful discovery stage, atomically insert one scope snapshot containing ordered destination codes and source signal IDs. Later calendar/exact stages read only that snapshot. Concurrent workers use a unique `run_id` constraint so only one snapshot wins.
 
-- [ ] **Step 5: Build honest coverage reporting**
+- [x] **Step 5: Build honest coverage reporting**
 
 Report frozen input, catalog/taxonomy version, planned pairs, attempted, succeeded, failed, skipped, and reason counts. A full run with failures may be `partial` but never relabeled as complete coverage.
 
-- [ ] **Step 6: Verify all scope modes**
+- [x] **Step 6: Verify all scope modes**
 
 ```powershell
 uv run pytest tests/unit/application/test_agent_coverage.py tests/unit/application/test_agent_scope.py tests/unit/application/test_agent_execution.py tests/unit/api/test_agent_plan_api.py -q
@@ -1347,7 +1347,7 @@ uv run mypy src/flight_hunter/application/agent_scope.py src/flight_hunter/appli
 
 Expected: all generic scope and coverage tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add src/flight_hunter/application/agent_scope.py src/flight_hunter/application/agent_planning.py src/flight_hunter/application/agent_execution.py src/flight_hunter/application/agent_operations.py src/flight_hunter/persistence/agent_repositories.py src/flight_hunter/api/agent_schemas.py tests/unit/application/test_agent_coverage.py tests/unit/application/test_agent_scope.py tests/unit/application/test_agent_execution.py tests/unit/api/test_agent_plan_api.py
