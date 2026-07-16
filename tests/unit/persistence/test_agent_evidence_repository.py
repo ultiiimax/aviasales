@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from flight_hunter.domain.agent_evidence import DiscoverySource, ProtectionStatus
+from flight_hunter.domain.money import MAX_MONEY_MINOR_UNITS
 from flight_hunter.domain.offers import Freshness, PriceBasis
 from flight_hunter.persistence.agent_repositories import (
     AgentEvidenceError,
@@ -488,6 +489,7 @@ async def test_review_current_safe_discovery_segment_component_and_ranking_field
     [
         {"observed_at": NOW.replace(tzinfo=None)},
         {"amount_minor": -1},
+        {"amount_minor": MAX_MONEY_MINOR_UNITS + 1},
         {"amount_minor": 1, "currency": None},
         {"amount_minor": None, "currency": "RUB"},
         {"currency": "rubles"},

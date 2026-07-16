@@ -8,6 +8,10 @@ locale classification. No prices, search IDs, result hosts, booking URLs,
 credentials or raw payloads were recorded. Search/result/click field provenance
 also uses the sanitized 2026-07-04 capture against `tickets-api.aviasales.ru`.
 
+Hot offers: APK contract statically verified 2026-07-15. No live hot-offer smoke
+was run, so the hot-offer section makes no claim of current upstream availability
+or of having captured an observed live payload.
+
 Source: reverse-engineered from Aviasales Android APK `Aviasales_7.24.0` (local
 hobby project, not a partner integration). The mobile API endpoints below are
 used directly — no authorization, no partner token, no official ToS gating. See
@@ -18,6 +22,20 @@ Local provenance inspected for this release:
 - `C:\Users\kiwun\Документы\api finder\aviasales_search.py`;
 - `C:\Users\kiwun\Документы\api finder\aviasales_client.py`;
 - `C:\Users\kiwun\Документы\api finder\aviasales_work` (APK/decompiled worktree).
+
+The Explore hot-offer contract is pinned to these exact decompiled classes:
+
+- `C:\Users\kiwun\Документы\api finder\aviasales_work\jadx_out\sources\aviasales\explore\feature\hottickets\data\hotticket\service\HotTicketsService.java`;
+- `C:\Users\kiwun\Документы\api finder\aviasales_work\jadx_out\sources\aviasales\explore\feature\hottickets\data\hotticket\entity\HotTicketsDto$$serializer.java`;
+- `C:\Users\kiwun\Документы\api finder\aviasales_work\jadx_out\sources\aviasales\explore\feature\hottickets\data\hotticket\entity\HotTicketsDto$Direction$$serializer.java`;
+- `C:\Users\kiwun\Документы\api finder\aviasales_work\jadx_out\sources\aviasales\explore\feature\hottickets\data\shared\entity\TicketDto$$serializer.java`;
+- `C:\Users\kiwun\Документы\api finder\aviasales_work\jadx_out\sources\aviasales\explore\feature\hottickets\data\shared\entity\CityDto$$serializer.java`;
+- `C:\Users\kiwun\Документы\api finder\aviasales_work\jadx_out\sources\aviasales\explore\content\data\model\places\PlacesDto$$serializer.java`;
+- `C:\Users\kiwun\Документы\api finder\aviasales_work\jadx_out\sources\aviasales\explore\content\data\model\places\PlacesDto$Translation$$serializer.java`;
+- `C:\Users\kiwun\Документы\api finder\aviasales_work\jadx_out\sources\aviasales\shared\ariadne\fragment\PriceFragmentImpl_ResponseAdapter$PriceFragment.java`;
+- `C:\Users\kiwun\Документы\api finder\aviasales_work\jadx_out\sources\aviasales\shared\ariadne\fragment\PriceFragmentImpl_ResponseAdapter$Segment.java`;
+- `C:\Users\kiwun\Документы\api finder\aviasales_work\jadx_out\sources\aviasales\shared\ariadne\fragment\PriceFragmentImpl_ResponseAdapter$FlightLeg.java`;
+- `C:\Users\kiwun\Документы\api finder\aviasales_work\jadx_out\sources\aviasales\shared\ariadne\fragment\PriceFragment.java`.
 
 Credential values from these materials are intentionally not copied into this
 contract, logs, fixtures or smoke output.
@@ -39,8 +57,11 @@ WAF. No live calls run in CI.
 | `https://explore-api.aviasales.ru/api/v6/calendar.json` | GET | Price calendar | `marker` query |
 | `https://ariadne.aviasales.ru/api/gql` | POST | GraphQL feed/blocks (`MainPageBlocksV1`, `DirectionPageBlocksV2`, `WeekendPricesListV1`, `AIFlexibleCalendarResultsV4`) | — |
 
-Reference: the local provenance paths above and sanitized provider fixtures in
-`tests/fixtures/providers/aviasales_search/`.
+Reference: the local provenance paths above and provider fixtures in
+`tests/fixtures/provider/aviasales_search/`. `raw_chunk_mow_led.json` is the
+sanitized exact-search capture. `hot_offers_nested_apk_contract.json` is a
+synthetic fixture constructed from the inspected APK serializers/adapters; it
+is not an observed provider response.
 
 ## Request schema — `/search/v2/start`
 
@@ -121,10 +142,108 @@ no independent passenger argument: it reconstructs and validates this private
 state before I/O, then rejects any ticket whose route, trip shape, dates,
 currency or money contradicts the bound request.
 
-The sanitized fixture and live response expose no verified terminal
+The sanitized exact-search fixture exposes no verified terminal
 `complete`/`finished` field. A ticket-bearing poll proves confirmed evidence is
 available but does **not** prove the upstream search is complete; the resumable
 gateway conservatively reports `complete=false`.
+
+## Request/response schema — Explore hot offers
+
+GET `https://explore-api.aviasales.ru/v1/hot_offers/list.json`. The agent path
+sends the frozen airport origin and approved date basis as:
+
+```text
+origin=SVO
+origin_type=airport
+market=RU
+passport_country=RU
+language=ru
+currency=rub
+one_way=true
+sort_type=price
+with_baggage=false
+direct=false
+depart_months[]=2026-09&depart_months[]=2026-10
+marker=<private>
+```
+
+`depart_months[]` is the canonical, unique, ascending `YYYY-MM` sequence that
+covers every month intersecting the inclusive approved `date_from..date_to`.
+It is a coarse provider filter, not permission to publish every returned day.
+ANYWHERE discovery is limited to 12 inclusive calendar months. Planning returns
+the typed `anywhere_date_range_too_large` clarification above that boundary;
+scope reconstruction and the client repeat the same check before provider I/O.
+
+The APK serializers establish this nested response, with no flat `tickets` or
+flat price fallback:
+
+- top level: `origin` (`CityDto`, whose required translation key is `su`),
+  `directions`, nullable `sale_info`, `entities_info` (`PlacesDto`; its
+  airport/city/country maps are optional), nullable `tags_order`,
+  `filters_order`;
+- each direction: `destination_iata`, `ticket`, nullable `sale_ticket`, nullable
+  `tags`, `tickets_count`;
+- each ticket: a required `price` JSON object and nullable `badge`;
+- each price: `signature`, `value`, `currency`, `duration`, `gate`, `search_id`,
+  `origin_city_iata`, `destination_city_iata`, `depart_date`, `return_date`,
+  `withBaggage`, `fareKey`, `segments`.
+- each non-empty segment: `localArrivalDate`, `localArrivalTime`,
+  `localDepartDate`, `localDepartTime`, non-empty `flightLegs`, `transfers`;
+- each flight leg: `localArrivalDate`, `localArrivalTime`, `localDepartDate`,
+  `localDepartTime`, `origin`, `destination`, `carrier`, `technicalStops`,
+  `flightNumber`, `aircraftCode`, `durationSeconds`, `equipmentType`.
+
+`HotTicketsDto` and its `Direction` serializer provide the container mapping;
+`TicketDto$$serializer` proves that `price` is the nested JSON object; the
+`PriceFragment` response adapters provide the price, segment and flight-leg
+response names and scalar types. The mapper emits one typed row for
+`ticket.price` and, when present, one for `sale_ticket.price`.
+
+`origin_city_iata` and `destination_city_iata` are city identifiers, not airport
+identifiers. The direction `destination_iata` is bound to
+`destination_city_iata`; neither city code is exported as the flown route. The
+actual origin/destination airports come from the first origin and final
+destination of the ordered, continuous, non-empty
+`segments[].flightLegs[]`. The first airport must equal the approved request
+origin. The fixture deliberately models request `SVO`, price city route
+`MOW`→`PAR`, and actual flight leg `SVO`→`CDG`; the typed output is `SVO`→`CDG`.
+Empty, malformed or discontinuous flight legs are schema errors.
+
+The mapper also requires canonical ISO dates, matching ASCII ISO currency and
+an integer-valued, non-negative major-unit `value`, converted once to integer
+minor units. The converted value must fit the shared signed SQL `Integer`
+ceiling of `2,147,483,647` minor units; larger provider values fail as schema
+errors before multiplication, mapping or persistence.
+`signature` is validated only as private structural provenance and is never
+stored, logged, represented or exported.
+
+Malformed rows, route/origin contradictions, currency contradictions and
+one-way rows carrying a return date fail the whole response with the stable
+`aviasales_search_schema_error`. A structurally valid row outside the exact
+approved day window is merely a coarse-month nonmatch and is skipped; valid
+in-window rows in the same payload remain usable.
+
+The hot-offer boundary is resource-bounded before mapping: at most 2 MiB of
+response bytes, 512 directions, 64 direction/top-level tags, 64 filters, 2,048
+combined airport/city/country entities, 8 segments per price, 16 flight legs
+and 16 transfers per segment, and 8 technical stops per leg. Exceeding any
+limit fails the whole batch as `aviasales_search_schema_error` without retry.
+The parser still validates every object inside those bounds, but constructs and
+retains no more `HotOffer` objects than the current durable per-binding
+remaining capacity. Exact approved day bounds, the frozen catalog-airport
+allowlist and already-persisted destinations for that origin/source binding are
+applied before a row consumes this capacity. Candidate selection is bounded and
+deterministic; the cheapest eligible row per destination wins. Rows outside the
+filters are still schema-validated, so a malformed later row fails the batch.
+
+Hot offers are `API_CACHED` discovery signals, never live confirmed prices.
+The endpoint exposes an indicative provider-one-adult basis, so every emitted
+signal has `passengers=1` even when the approved request contains a larger
+adult/child/infant mix. Exact search later verifies the actual requested mix.
+The gateway passes the frozen airport allowlist only to make bounded candidate
+selection safe; it does not consult mutable geography. The executor independently
+revalidates every returned destination, source binding, date, currency and
+remaining durable capacity before persistence.
 
 ## Request schema — Explore calendar
 
@@ -221,6 +340,10 @@ Plain `httpx`/`requests` get HTTP 403 from CloudFront. The adapter uses
 mobile app headers (`User-Agent`, `X-Client-Type: mobile`, `Referer`). This is
 the same approach as the decompiled APK client. HTTP 403 is surfaced as
 `aviasales_search_blocked` so the UI can show an honest `blocked` state.
+The real transport streams into a bounded buffer and aborts the download above
+16 MiB for every endpoint; hot offers apply the tighter 2 MiB pre-decode limit
+described above. A size abort is a non-retryable schema failure, and the
+provider exception text and partial response bytes are discarded.
 
 Stable failure codes:
 
@@ -256,13 +379,17 @@ uv run flight-hunter-source-smoke --source aviasales_search --exact-search --ori
 
 The output contains only status, code, count, source IDs and freshness values;
 it excludes amounts, offer IDs, raw payloads, provider refs and booking URLs.
+This command is historical exact-search provenance; it was not run as part of
+the 2026-07-15 hot-offer APK verification.
 
 ## Policy (Flight Hunter, local hobby project)
 
 - Adapter disabled until `AVIASALES_SEARCH_ENABLED=true` and
   `AVIASALES_SEARCH_SIGNATURE` / `AVIASALES_SEARCH_MARKER` are set in `.env`.
   Missing credentials → `credentials_missing` denial, no HTTP call.
-- Data kind: `LIVE`. Results carry `observed_at` and `Freshness.LIVE`.
+- Exact search data kind: `LIVE`; confirmed results carry `observed_at` and
+  `Freshness.LIVE`. Explore hot offers are `API_CACHED` indicative discovery
+  signals and require exact verification.
 - Background watch scans **allowed** (scheduler context authorized).
 - Results are **mergeable** with other sources.
 - Booking URL resolved lazily on click (`resolve_purchase_url`), not preloaded.

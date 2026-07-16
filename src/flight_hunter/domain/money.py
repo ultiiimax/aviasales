@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Self
 
 _ISO_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+MAX_MONEY_MINOR_UNITS = 2_147_483_647
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +18,8 @@ class Money:
     def __post_init__(self) -> None:
         if type(self.minor_units) is not int:
             raise TypeError("minor_units must be an int, never float or bool")
+        if not -MAX_MONEY_MINOR_UNITS <= self.minor_units <= MAX_MONEY_MINOR_UNITS:
+            raise ValueError("minor_units is outside the supported persistence range")
         if not isinstance(self.currency, str):
             raise TypeError("currency must be a string")
 

@@ -17,17 +17,20 @@ from flight_hunter.application.agent_operations import (
     ProviderFailureClass,
     retry_decision,
 )
+from flight_hunter.application.agent_scope import finite_route_pairs
 from flight_hunter.domain.agent_evidence import (
     ConfirmedOfferEvidence,
     DiscoverySignal,
     DiscoverySource,
 )
 from flight_hunter.domain.agent_search import (
+    MAX_ANYWHERE_DISCOVERY_MONTHS,
     DateConstraint,
     DateMode,
     LocationScopeKind,
     RouteStrategy,
     TripShape,
+    inclusive_month_count,
 )
 from flight_hunter.domain.offers import FlightSegmentSummary, Freshness, PriceBasis
 from flight_hunter.execution_limits import MAX_AGENT_EXECUTION_INTERVAL_SECONDS
@@ -48,6 +51,7 @@ from flight_hunter.persistence.agent_repositories import (
     AgentRankingSnapshotRecord,
     AgentRunOperationRecord,
     AgentRunRepository,
+    AgentRunScopeSnapshotRecord,
     AgentStageStatus,
     AttemptKind,
     AttemptReservationStatus,
@@ -56,6 +60,7 @@ from flight_hunter.persistence.agent_repositories import (
     NewAgentDiscoverySignal,
     NewAgentPlanStage,
     NewAgentRankingSnapshot,
+    NewAgentRunScopeSnapshot,
     ServerPrivateOperationLease,
     recompute_agent_plan_revision_content_hash,
 )
@@ -70,6 +75,7 @@ from flight_hunter.providers.aviasales_search.client import (
     SearchStartParams,
 )
 from flight_hunter.providers.aviasales_search.gateway import (
+    AnywhereDiscoveryParams,
     AviasalesSearchCapabilityError,
     AviasalesSearchPolicyDenied,
     CalendarSearchParams,
@@ -110,6 +116,14 @@ class AgentSearchGateway(Protocol):
     async def calendar(
         self,
         params: CalendarSearchParams,
+        *,
+        evidence_namespace: UUID,
+        request_fingerprint: str,
+    ) -> tuple[DiscoverySignal, ...]: ...
+
+    async def discover_anywhere(
+        self,
+        params: AnywhereDiscoveryParams,
         *,
         evidence_namespace: UUID,
         request_fingerprint: str,
@@ -166,9 +180,30 @@ class AgentExecutionStep:
 
 
 @dataclass(frozen=True, slots=True)
+class _RoutePair:
+    origin: str
+    destination: str
+
+
+@dataclass(frozen=True, slots=True)
+class _AnywhereRule:
+    origins: tuple[str, ...]
+    date_start: date
+    date_end: date
+    discovery_source_ids: tuple[str, ...]
+    max_destination_seeds: int
+    exact_verification_limit: int
+    catalog_checksum: str
+    taxonomy_version: str
+    coverage: str
+    eligible_destination_countries: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _Workflow:
     origin: str
     destination: str
+    route_pairs: tuple[_RoutePair, ...]
     date_mode: str
     departure_date: date
     departure_end_date: date
@@ -185,6 +220,8 @@ class _Workflow:
     poll_rounds: int
     attempts_per_poll: int
     approved_provider_rpm: int
+    anywhere_rule: _AnywhereRule | None = None
+    anywhere_signals: tuple[AgentDiscoverySignalRecord, ...] = ()
 
     @property
     def passengers(self) -> int:
@@ -325,6 +362,7 @@ class AgentExecutionService:
             AgentOperationKind.CALENDAR_SEARCH,
             AgentOperationKind.EXACT_START,
             AgentOperationKind.EXACT_POLL,
+            AgentOperationKind.SUGGEST_DISCOVERY,
         }:
             status = await self._run_network_operation(run, lease, now)
         else:
@@ -405,6 +443,16 @@ class AgentExecutionService:
         if await self._operations.list_operations(run.household_id, run.id):
             return
         workflow = await self._workflow(run)
+        if workflow.anywhere_rule is not None:
+            materialized = await self._materialize_next_anywhere_discovery(
+                run,
+                workflow,
+                (),
+                now,
+            )
+            if not materialized:
+                raise AgentExecutionError("agent_plan_snapshot_invalid")
+            return
         if workflow.date_mode == "exact":
             stage = await self._stage(
                 run,
@@ -412,15 +460,18 @@ class AgentExecutionService:
                 prefix=0x02,
                 now=now,
             )
-            await self._materialize_exact_start(
-                run,
-                stage.id,
-                workflow,
-                departure_date=workflow.departure_date,
-                return_date=workflow.return_date,
-                ordinal=0,
-                now=now,
-            )
+            for ordinal, route_pair in enumerate(workflow.route_pairs):
+                await self._materialize_exact_start(
+                    run,
+                    stage.id,
+                    workflow,
+                    origin=route_pair.origin,
+                    destination=route_pair.destination,
+                    departure_date=workflow.departure_date,
+                    return_date=workflow.return_date,
+                    ordinal=ordinal,
+                    now=now,
+                )
             return
         stage = await self._stage(
             run,
@@ -428,39 +479,48 @@ class AgentExecutionService:
             prefix=0x01,
             now=now,
         )
-        for ordinal in range(workflow.calendar_limit):
-            departure_date = workflow.departure_date + timedelta(days=ordinal)
-            immutable_input = {
-                "origin": workflow.origin,
-                "destination": workflow.destination,
-                "departure_date": departure_date.isoformat(),
-                "return_date": (workflow.return_date.isoformat() if workflow.return_date else None),
-                "passengers": workflow.passengers,
-                "currency": workflow.currency,
-                "phase": "calendar",
-            }
-            await self._scheduler.materialize(
-                OperationSpec(
-                    id=_stable_uuid(
-                        run.id,
-                        0x10 + min(ordinal, 0x0F),
-                        f"calendar:{departure_date}:{workflow.return_date}",
+        ordinal = 0
+        date_count = (workflow.departure_end_date - workflow.departure_date).days + 1
+        for route_pair in workflow.route_pairs:
+            for date_offset in range(date_count):
+                departure_date = workflow.departure_date + timedelta(days=date_offset)
+                immutable_input = {
+                    "origin": route_pair.origin,
+                    "destination": route_pair.destination,
+                    "departure_date": departure_date.isoformat(),
+                    "return_date": (
+                        workflow.return_date.isoformat() if workflow.return_date else None
                     ),
-                    household_id=run.household_id,
-                    run_id=run.id,
-                    stage_id=stage.id,
-                    provider_id=_PROVIDER_ID,
-                    kind=AgentOperationKind.CALENDAR_SEARCH,
-                    immutable_input=immutable_input,
-                    logical_workflow_input={
-                        key: value for key, value in immutable_input.items() if key != "phase"
-                    },
-                    consumes_logical_unit=True,
-                    private_continuation=None,
-                    max_attempts=workflow.start_attempts,
-                    created_at=now,
+                    "passengers": workflow.passengers,
+                    "currency": workflow.currency,
+                    "phase": "calendar",
+                }
+                await self._scheduler.materialize(
+                    OperationSpec(
+                        id=_stable_uuid(
+                            run.id,
+                            0x10 + min(ordinal, 0x0F),
+                            (
+                                f"calendar:{route_pair.origin}:{route_pair.destination}:"
+                                f"{departure_date}:{workflow.return_date}"
+                            ),
+                        ),
+                        household_id=run.household_id,
+                        run_id=run.id,
+                        stage_id=stage.id,
+                        provider_id=_PROVIDER_ID,
+                        kind=AgentOperationKind.CALENDAR_SEARCH,
+                        immutable_input=immutable_input,
+                        logical_workflow_input={
+                            key: value for key, value in immutable_input.items() if key != "phase"
+                        },
+                        consumes_logical_unit=True,
+                        private_continuation=None,
+                        max_attempts=workflow.start_attempts,
+                        created_at=now,
+                    )
                 )
-            )
+                ordinal += 1
 
     async def _run_network_operation(
         self,
@@ -483,6 +543,50 @@ class AgentExecutionService:
                 now=now,
             )
             return failed.status
+
+        anywhere_existing: tuple[AgentDiscoverySignalRecord, ...] = ()
+        anywhere_remaining_capacity: int | None = None
+        if lease.operation.kind is AgentOperationKind.SUGGEST_DISCOVERY:
+            try:
+                (
+                    anywhere_existing,
+                    anywhere_remaining_capacity,
+                ) = await self._validated_existing_anywhere_capacity(
+                    run,
+                    workflow,
+                    lease.operation,
+                )
+            except AgentExecutionError as error:
+                failed = await self._operations.mark_operation_failed(
+                    household_id=run.household_id,
+                    operation_id=lease.operation.id,
+                    worker_id=self._worker_id,
+                    error_code=error.code,
+                    now=now,
+                )
+                return failed.status
+            if anywhere_remaining_capacity == 0:
+                current_origin = _iata(lease.operation.immutable_input["origin"], "origin")
+                current_source = _text(
+                    lease.operation.immutable_input["source_id"],
+                    "source_id",
+                )
+                current_record = next(
+                    record
+                    for record in anywhere_existing
+                    if record.origin == current_origin
+                    and _text(record.signal_evidence.get("source_id"), "source_id")
+                    == current_source
+                )
+                succeeded = await self._operations.mark_operation_succeeded(
+                    household_id=run.household_id,
+                    operation_id=lease.operation.id,
+                    worker_id=self._worker_id,
+                    result_type=AgentOperationResultType.DISCOVERY_SIGNAL,
+                    result_id=current_record.id,
+                    now=now,
+                )
+                return succeeded.status
 
         before_preflight_now = self._now()
         inactive = await self._skip_claimed_if_inactive(
@@ -652,7 +756,12 @@ class AgentExecutionService:
             return inactive or AgentOperationStatus.LEASED
 
         try:
-            raw_outcome = await self._dispatch_provider(lease)
+            raw_outcome = await self._dispatch_provider(
+                lease,
+                workflow=workflow,
+                anywhere_remaining_capacity=anywhere_remaining_capacity,
+                anywhere_existing=anywhere_existing,
+            )
             response_now = self._now()
             outcome = _validated_provider_outcome(
                 run=run,
@@ -661,6 +770,15 @@ class AgentExecutionService:
                 workflow=workflow,
                 outcome=raw_outcome,
                 observed_by=response_now,
+                anywhere_remaining_capacity=anywhere_remaining_capacity,
+                anywhere_existing_candidate_bindings=frozenset(
+                    (
+                        signal.origin,
+                        _text(signal.signal_evidence.get("source_id"), "source_id"),
+                        signal.destination,
+                    )
+                    for signal in anywhere_existing
+                ),
             )
         except (
             AviasalesSearchAuthFailed,
@@ -724,6 +842,73 @@ class AgentExecutionService:
             outcome_checkpoint_now,
         )
 
+    async def _validated_existing_anywhere_capacity(
+        self,
+        run: AgentPlanRunRecord,
+        workflow: _Workflow,
+        operation: AgentRunOperationRecord,
+    ) -> tuple[tuple[AgentDiscoverySignalRecord, ...], int]:
+        rule = workflow.anywhere_rule
+        if rule is None:
+            raise AgentExecutionError("agent_operation_input_invalid")
+        _anywhere_params(operation.immutable_input, workflow)
+        current_origin = _iata(operation.immutable_input["origin"], "origin")
+        current_source = _text(operation.immutable_input["source_id"], "source_id")
+        current_limit = _anywhere_binding_seed_limit(rule, current_origin, current_source)
+        ordered = await self._validated_durable_anywhere_records(run, workflow)
+        current_count = sum(
+            record.origin == current_origin
+            and _text(record.signal_evidence.get("source_id"), "source_id") == current_source
+            for record in ordered
+        )
+        return ordered, current_limit - current_count
+
+    async def _validated_durable_anywhere_records(
+        self,
+        run: AgentPlanRunRecord,
+        workflow: _Workflow,
+    ) -> tuple[AgentDiscoverySignalRecord, ...]:
+        rule = workflow.anywhere_rule
+        if rule is None:
+            raise AgentExecutionError("agent_operation_input_invalid")
+        records = await self._evidence.list_discovery_signals(run.household_id, run.id)
+        eligible_destinations = dict(rule.eligible_destination_countries)
+        candidate_bindings: set[tuple[str, str, str]] = set()
+        counts_by_binding: dict[tuple[str, str], int] = {}
+        for record in records:
+            source_id = _text(record.signal_evidence.get("source_id"), "source_id")
+            binding = (record.origin, source_id)
+            candidate_binding = (*binding, record.destination)
+            if (
+                record.provider_id != _PROVIDER_ID
+                or record.origin not in rule.origins
+                or source_id not in rule.discovery_source_ids
+                or record.destination not in eligible_destinations
+                or not rule.date_start <= record.departure_date <= rule.date_end
+                or record.return_date is not None
+                or record.amount_minor is None
+                or record.currency != workflow.currency
+                or record.passengers != 1
+                or record.passenger_basis is not PriceBasis.PROVIDER_SINGLE_ADULT_TICKET
+                or record.source_kind is not DiscoverySource.HOT_OFFER
+                or record.freshness is not Freshness.API_CACHED
+                or record.fingerprint != _evidence_fingerprint(record.id)
+                or not _durable_provider_observation(record, run)
+                or candidate_binding in candidate_bindings
+            ):
+                raise AgentExecutionError("agent_discovery_evidence_invalid")
+            candidate_bindings.add(candidate_binding)
+            counts_by_binding[binding] = counts_by_binding.get(binding, 0) + 1
+            if counts_by_binding[binding] > _anywhere_binding_seed_limit(
+                rule,
+                *binding,
+            ):
+                raise AgentExecutionError("agent_discovery_evidence_invalid")
+        ordered = tuple(sorted(records, key=_stored_discovery_order))
+        if len(ordered) > rule.max_destination_seeds:
+            raise AgentExecutionError("agent_discovery_evidence_invalid")
+        return ordered
+
     async def _fresh_inactive_code(
         self,
         run: AgentPlanRunRecord,
@@ -765,10 +950,25 @@ class AgentExecutionService:
         workflow = await self._workflow_for_ids(operation.household_id, operation.run_id)
         validation_error = AgentExecutionError("agent_operation_input_invalid")
         try:
+            if workflow.anywhere_rule is not None and operation.kind in {
+                AgentOperationKind.EXACT_START,
+                AgentOperationKind.EXACT_POLL,
+            }:
+                exact_operations = tuple(
+                    candidate
+                    for candidate in await self._operations.list_operations(
+                        operation.household_id,
+                        operation.run_id,
+                    )
+                    if candidate.kind is AgentOperationKind.EXACT_START
+                )
+                _validated_anywhere_exact_source_ids(exact_operations, workflow)
             if operation.kind is AgentOperationKind.EXACT_START:
                 binding = _exact_binding_from_immutable(operation.immutable_input, workflow)
                 if operation.immutable_input.get("phase") != "start":
                     raise AgentExecutionError("agent_operation_input_invalid")
+                if workflow.anywhere_rule is not None:
+                    _source_signal_id_for_binding(operation.immutable_input, workflow, binding)
                 _start_params(operation.immutable_input, workflow)
                 if binding.passengers != workflow.passengers:
                     raise AgentExecutionError("agent_operation_input_invalid")
@@ -778,6 +978,9 @@ class AgentExecutionService:
                 return workflow
             if operation.kind is AgentOperationKind.CALENDAR_SEARCH:
                 _calendar_params(operation.immutable_input, workflow)
+                return workflow
+            if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY:
+                _anywhere_params(operation.immutable_input, workflow)
                 return workflow
         except (KeyError, TypeError, ValueError):
             validation_error = AgentExecutionError("agent_operation_input_invalid")
@@ -813,6 +1016,8 @@ class AgentExecutionService:
         ):
             raise AgentExecutionError("agent_operation_input_invalid")
         root_binding = _exact_binding_from_immutable(root.immutable_input, workflow)
+        if workflow.anywhere_rule is not None:
+            _source_signal_id_for_binding(root.immutable_input, workflow, root_binding)
         if (
             root_binding != binding
             or continuation.evidence_namespace != root.id
@@ -878,9 +1083,12 @@ class AgentExecutionService:
     async def _dispatch_provider(
         self,
         lease: ServerPrivateOperationLease,
+        *,
+        workflow: _Workflow,
+        anywhere_remaining_capacity: int | None,
+        anywhere_existing: tuple[AgentDiscoverySignalRecord, ...],
     ) -> ExactSearchContinuation | ExactPollOutcome | tuple[DiscoverySignal, ...]:
         operation = lease.operation
-        workflow = await self._workflow_for_ids(operation.household_id, operation.run_id)
         if operation.kind is AgentOperationKind.EXACT_START:
             return await self._gateway.start_exact(
                 _start_params(operation.immutable_input, workflow),
@@ -899,6 +1107,27 @@ class AgentExecutionService:
                 evidence_namespace=operation.id,
                 request_fingerprint=operation.operation_fingerprint,
             )
+        if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY:
+            if anywhere_remaining_capacity is None or anywhere_remaining_capacity <= 0:
+                raise AgentExecutionError("agent_operation_input_invalid")
+            current_origin = _iata(operation.immutable_input["origin"], "origin")
+            current_source = _text(operation.immutable_input["source_id"], "source_id")
+            excluded_destinations = frozenset(
+                record.destination
+                for record in anywhere_existing
+                if record.origin == current_origin
+                and _text(record.signal_evidence.get("source_id"), "source_id") == current_source
+            )
+            return await self._gateway.discover_anywhere(
+                _anywhere_params(
+                    operation.immutable_input,
+                    workflow,
+                    max_results=anywhere_remaining_capacity,
+                    excluded_destination_airports=excluded_destinations,
+                ),
+                evidence_namespace=operation.id,
+                request_fingerprint=operation.operation_fingerprint,
+            )
         raise AgentExecutionError("agent_operation_kind_unsupported")
 
     async def _persist_provider_outcome(
@@ -909,6 +1138,54 @@ class AgentExecutionService:
         now: datetime,
     ) -> AgentOperationStatus:
         operation = lease.operation
+        if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY:
+            signals = cast(tuple[DiscoverySignal, ...], outcome)
+            if not signals:
+                workflow = await self._workflow(run)
+                existing, _remaining = await self._validated_existing_anywhere_capacity(
+                    run,
+                    workflow,
+                    operation,
+                )
+                current_origin = _iata(operation.immutable_input["origin"], "origin")
+                current_source = _text(operation.immutable_input["source_id"], "source_id")
+                existing_for_binding = tuple(
+                    record
+                    for record in existing
+                    if record.origin == current_origin
+                    and _text(record.signal_evidence.get("source_id"), "source_id")
+                    == current_source
+                )
+                if existing_for_binding:
+                    succeeded = await self._operations.mark_operation_succeeded(
+                        household_id=run.household_id,
+                        operation_id=operation.id,
+                        worker_id=self._worker_id,
+                        result_type=AgentOperationResultType.DISCOVERY_SIGNAL,
+                        result_id=existing_for_binding[0].id,
+                        now=now,
+                    )
+                    return succeeded.status
+                skipped = await self._operations.mark_claimed_operation_skipped(
+                    household_id=run.household_id,
+                    operation_id=operation.id,
+                    worker_id=self._worker_id,
+                    error_code="agent_no_discovery_results",
+                    now=now,
+                )
+                return skipped.status
+            stored_signals = tuple(
+                [await self._append_discovery(run, operation, signal, now) for signal in signals]
+            )
+            succeeded = await self._operations.mark_operation_succeeded(
+                household_id=run.household_id,
+                operation_id=operation.id,
+                worker_id=self._worker_id,
+                result_type=AgentOperationResultType.DISCOVERY_SIGNAL,
+                result_id=stored_signals[0].id,
+                now=now,
+            )
+            return succeeded.status
         if operation.kind is AgentOperationKind.CALENDAR_SEARCH:
             signals = cast(tuple[DiscoverySignal, ...], outcome)
             if not signals:
@@ -1085,6 +1362,27 @@ class AgentExecutionService:
         now: datetime,
     ) -> AgentOperationStatus:
         operation = lease.operation
+        if operation.kind is AgentOperationKind.SCOPE_FREEZE:
+            try:
+                snapshot = await self._freeze_anywhere_scope(run, now)
+            except AgentExecutionError as error:
+                failed = await self._operations.mark_operation_failed(
+                    household_id=run.household_id,
+                    operation_id=operation.id,
+                    worker_id=self._worker_id,
+                    error_code=error.code,
+                    now=now,
+                )
+                return failed.status
+            succeeded = await self._operations.mark_operation_succeeded(
+                household_id=run.household_id,
+                operation_id=operation.id,
+                worker_id=self._worker_id,
+                result_type=AgentOperationResultType.SCOPE_SNAPSHOT,
+                result_id=snapshot.id,
+                now=now,
+            )
+            return succeeded.status
         if operation.kind is AgentOperationKind.RANKING:
             ranking = await self._create_minimal_ranking(run, now)
             succeeded = await self._operations.mark_operation_succeeded(
@@ -1133,6 +1431,67 @@ class AgentExecutionService:
         operations = await self._operations.list_operations(run.household_id, run.id)
         if any(operation.status in _ACTIVE_OPERATION_STATUSES for operation in operations):
             return None
+        workflow = await self._workflow(current)
+        if workflow.anywhere_rule is not None:
+            snapshot = await self._operations.get_scope_snapshot_for_run(
+                current.household_id,
+                current.id,
+            )
+            if snapshot is None:
+                discovery_operations = tuple(
+                    operation
+                    for operation in operations
+                    if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY
+                )
+                has_successful_discovery = any(
+                    operation.status is AgentOperationStatus.SUCCEEDED
+                    for operation in discovery_operations
+                )
+                scope_operations = tuple(
+                    operation
+                    for operation in operations
+                    if operation.kind is AgentOperationKind.SCOPE_FREEZE
+                )
+                if await self._materialize_next_anywhere_discovery(
+                    current,
+                    workflow,
+                    discovery_operations,
+                    now,
+                ):
+                    await self._refresh_stage_statuses(current, now)
+                    return None
+                if has_successful_discovery and not scope_operations:
+                    await self._materialize_scope_freeze(run, now)
+                    await self._refresh_stage_statuses(current, now)
+                    return None
+                if (
+                    has_successful_discovery
+                    and scope_operations
+                    and all(
+                        operation.status is AgentOperationStatus.SUCCEEDED
+                        for operation in scope_operations
+                    )
+                ):
+                    raise AgentExecutionError("agent_scope_snapshot_missing")
+            else:
+                exact_operations = tuple(
+                    operation
+                    for operation in operations
+                    if operation.kind is AgentOperationKind.EXACT_START
+                )
+                if not exact_operations:
+                    await self._materialize_anywhere_exact(run, workflow, now)
+                    return None
+                try:
+                    _validated_anywhere_exact_source_ids(exact_operations, workflow)
+                except AgentExecutionError:
+                    return await self._runs.set_status(
+                        household_id=run.household_id,
+                        run_id=run.id,
+                        status="failed",
+                        changed_at=now,
+                        error_code="agent_operation_input_invalid",
+                    )
         confirmed = await self._evidence.list_confirmed_evidence(run.household_id, run.id)
         if confirmed:
             ranking_operations = tuple(
@@ -1159,6 +1518,74 @@ class AgentExecutionService:
             return await self._finish_from_failures(run, operations, confirmed, now)
         return await self._finish_from_failures(run, operations, confirmed, now)
 
+    async def _materialize_next_anywhere_discovery(
+        self,
+        run: AgentPlanRunRecord,
+        workflow: _Workflow,
+        existing: Sequence[AgentRunOperationRecord],
+        now: datetime,
+    ) -> bool:
+        rule = workflow.anywhere_rule
+        if rule is None:
+            raise AgentExecutionError("agent_plan_snapshot_invalid")
+        existing_bindings: set[tuple[str, str]] = set()
+        for operation in existing:
+            if operation.kind is not AgentOperationKind.SUGGEST_DISCOVERY:
+                raise AgentExecutionError("agent_operation_input_invalid")
+            try:
+                binding = (
+                    _iata(operation.immutable_input["origin"], "origin"),
+                    _text(operation.immutable_input["source_id"], "source_id"),
+                )
+            except (KeyError, TypeError, ValueError):
+                raise AgentExecutionError("agent_operation_input_invalid") from None
+            if binding in existing_bindings:
+                raise AgentExecutionError("agent_operation_input_invalid")
+            existing_bindings.add(binding)
+        stage = await self._stage(
+            run,
+            AgentPlanStageKind.SCOPE,
+            prefix=0x00,
+            now=now,
+        )
+        for ordinal, (origin, source_id) in enumerate(_anywhere_bindings(rule)):
+            if (origin, source_id) in existing_bindings:
+                continue
+            immutable_input = {
+                "origin": origin,
+                "date_from": rule.date_start.isoformat(),
+                "date_to": rule.date_end.isoformat(),
+                "max_destination_seeds": rule.max_destination_seeds,
+                "seed_limit": _anywhere_binding_seed_limit(rule, origin, source_id),
+                "source_id": source_id,
+                "currency": workflow.currency,
+                "adults": 1,
+                "children": 0,
+                "infants": 0,
+            }
+            await self._scheduler.materialize(
+                OperationSpec(
+                    id=_stable_uuid(
+                        run.id,
+                        0x08 + min(ordinal, 0x07),
+                        f"anywhere:{origin}:{source_id}",
+                    ),
+                    household_id=run.household_id,
+                    run_id=run.id,
+                    stage_id=stage.id,
+                    provider_id=_PROVIDER_ID,
+                    kind=AgentOperationKind.SUGGEST_DISCOVERY,
+                    immutable_input=immutable_input,
+                    logical_workflow_input=immutable_input,
+                    consumes_logical_unit=True,
+                    private_continuation=None,
+                    max_attempts=workflow.start_attempts,
+                    created_at=now,
+                )
+            )
+            return True
+        return False
+
     async def _finish_from_failures(
         self,
         run: AgentPlanRunRecord,
@@ -1172,12 +1599,13 @@ class AgentExecutionService:
             operation for operation in operations if operation.status is AgentOperationStatus.FAILED
         )
         if confirmed:
-            material_failures = tuple(
+            workflow = await self._workflow(run)
+            skipped = tuple(
                 operation
-                for operation in failed
-                if operation.error_code != "agent_no_discovery_results"
+                for operation in operations
+                if operation.status is AgentOperationStatus.SKIPPED
             )
-            if material_failures:
+            if failed or skipped or not _expected_coverage_is_confirmed(workflow, operations):
                 return await self._runs.set_status(
                     household_id=run.household_id,
                     run_id=run.id,
@@ -1191,8 +1619,17 @@ class AgentExecutionService:
                 status="completed",
                 changed_at=now,
             )
+        skipped = tuple(
+            operation
+            for operation in operations
+            if operation.status is AgentOperationStatus.SKIPPED
+        )
         error_code = next(
-            (operation.error_code for operation in failed if operation.error_code is not None),
+            (
+                operation.error_code
+                for operation in (*failed, *skipped)
+                if operation.error_code is not None
+            ),
             "agent_no_confirmed_offer",
         )
         return await self._runs.set_status(
@@ -1202,6 +1639,116 @@ class AgentExecutionService:
             changed_at=now,
             error_code=error_code,
         )
+
+    async def _materialize_scope_freeze(
+        self,
+        run: AgentPlanRunRecord,
+        now: datetime,
+    ) -> AgentRunOperationRecord:
+        stage = await self._stage(
+            run,
+            AgentPlanStageKind.SCOPE,
+            prefix=0x00,
+            now=now,
+        )
+        immutable_input = {"phase": "scope_freeze", "version": "anywhere-v1"}
+        return await self._scheduler.materialize(
+            OperationSpec(
+                id=_stable_uuid(run.id, 0x09, "anywhere-scope-freeze-v1"),
+                household_id=run.household_id,
+                run_id=run.id,
+                stage_id=stage.id,
+                provider_id=None,
+                kind=AgentOperationKind.SCOPE_FREEZE,
+                immutable_input=immutable_input,
+                logical_workflow_input=immutable_input,
+                consumes_logical_unit=False,
+                private_continuation=None,
+                max_attempts=1,
+                created_at=now,
+            )
+        )
+
+    async def _freeze_anywhere_scope(
+        self,
+        run: AgentPlanRunRecord,
+        now: datetime,
+    ) -> AgentRunScopeSnapshotRecord:
+        existing = await self._operations.get_scope_snapshot_for_run(run.household_id, run.id)
+        if existing is not None:
+            return existing
+        workflow = await self._workflow(run)
+        rule = workflow.anywhere_rule
+        if rule is None:
+            raise AgentExecutionError("agent_scope_freeze_invalid")
+        candidates = await self._validated_durable_anywhere_records(run, workflow)
+        best_by_destination: dict[str, AgentDiscoverySignalRecord] = {}
+        for signal in candidates:
+            current = best_by_destination.get(signal.destination)
+            if current is None or _stored_discovery_order(signal) < _stored_discovery_order(
+                current
+            ):
+                best_by_destination[signal.destination] = signal
+        ordered = sorted(best_by_destination.values(), key=_stored_discovery_order)
+        selected = tuple(ordered[: min(rule.max_destination_seeds, rule.exact_verification_limit)])
+        if not selected:
+            raise AgentExecutionError("agent_no_discovery_results")
+        payload: dict[str, object] = {
+            "origins": list(rule.origins),
+            "destinations": [signal.destination for signal in selected],
+            "source_signal_ids": [str(signal.id) for signal in selected],
+            "catalog_checksum": rule.catalog_checksum,
+            "taxonomy_version": rule.taxonomy_version,
+            "coverage": rule.coverage,
+        }
+        candidate = NewAgentRunScopeSnapshot(
+            id=_stable_uuid(run.id, 0x0A, "anywhere-scope-snapshot-v1"),
+            household_id=run.household_id,
+            run_id=run.id,
+            fingerprint=_scope_snapshot_fingerprint(payload),
+            snapshot=payload,
+            created_at=now,
+        )
+        try:
+            return await self._operations.append_scope_snapshot(candidate)
+        except AgentOperationConflict as error:
+            if error.code != "agent_run_scope_conflict":
+                raise
+            winner = await self._operations.get_scope_snapshot_for_run(
+                run.household_id,
+                run.id,
+            )
+            if winner is None:
+                raise AgentExecutionError("agent_scope_snapshot_missing") from error
+            return winner
+
+    async def _materialize_anywhere_exact(
+        self,
+        run: AgentPlanRunRecord,
+        workflow: _Workflow,
+        now: datetime,
+    ) -> None:
+        if workflow.anywhere_rule is None or not workflow.anywhere_signals:
+            raise AgentExecutionError("agent_scope_snapshot_invalid")
+        stage = await self._stage(
+            run,
+            AgentPlanStageKind.EXACT_SEARCH,
+            prefix=0x02,
+            now=now,
+        )
+        for ordinal, signal in enumerate(workflow.anywhere_signals):
+            await self._materialize_exact_start(
+                run,
+                stage.id,
+                workflow,
+                origin=signal.origin,
+                destination=signal.destination,
+                departure_date=signal.departure_date,
+                return_date=workflow.return_date,
+                ordinal=ordinal,
+                now=now,
+                source_signal_id=signal.id,
+            )
 
     async def _append_discovery(
         self,
@@ -1226,9 +1773,21 @@ class AgentExecutionService:
                 passengers=signal.passengers,
                 passenger_basis=PriceBasis.PROVIDER_SINGLE_ADULT_TICKET,
                 source_kind=signal.source_kind,
-                freshness=Freshness.LIVE,
+                freshness=(
+                    Freshness.API_CACHED
+                    if signal.source_kind is DiscoverySource.HOT_OFFER
+                    else Freshness.LIVE
+                ),
                 observed_at=signal.observed_at,
-                signal_evidence={"calendar_bucket": signal.departure_date.strftime("%Y-%m")},
+                signal_evidence=(
+                    {
+                        "route_key": f"{signal.origin}-{signal.destination}",
+                        "source_id": _text(operation.immutable_input["source_id"], "source_id"),
+                        "source_version": "aviasales_hot_offers-v1",
+                    }
+                    if signal.source_kind is DiscoverySource.HOT_OFFER
+                    else {"calendar_bucket": signal.departure_date.strftime("%Y-%m")}
+                ),
                 fingerprint=_evidence_fingerprint(signal.id),
                 created_at=max(now, signal.observed_at),
             )
@@ -1305,6 +1864,8 @@ class AgentExecutionService:
                 run,
                 stage.id,
                 workflow,
+                origin=signal.origin,
+                destination=signal.destination,
                 departure_date=signal.departure_date,
                 return_date=signal.return_date,
                 ordinal=ordinal,
@@ -1317,13 +1878,22 @@ class AgentExecutionService:
         stage_id: UUID,
         workflow: _Workflow,
         *,
+        origin: str | None = None,
+        destination: str | None = None,
         departure_date: date,
         return_date: date | None,
         ordinal: int,
         now: datetime,
+        source_signal_id: UUID | None = None,
     ) -> AgentRunOperationRecord:
+        if origin is None:
+            origin = workflow.origin
+        if destination is None:
+            destination = workflow.destination
         logical_input = _exact_logical_input(
             workflow,
+            origin=origin,
+            destination=destination,
             departure_date=departure_date,
             return_date=return_date,
         )
@@ -1332,14 +1902,23 @@ class AgentExecutionService:
                 id=_stable_uuid(
                     run.id,
                     0x20 + min(ordinal, 0x1F),
-                    f"exact-start:{departure_date}:{return_date}",
+                    f"exact-start:{origin}:{destination}:{departure_date}:{return_date}",
                 ),
                 household_id=run.household_id,
                 run_id=run.id,
                 stage_id=stage_id,
                 provider_id=_PROVIDER_ID,
                 kind=AgentOperationKind.EXACT_START,
-                immutable_input={**logical_input, "phase": "start", "round": ordinal},
+                immutable_input={
+                    **logical_input,
+                    "phase": "start",
+                    "round": ordinal,
+                    **(
+                        {"source_signal_id": str(source_signal_id)}
+                        if source_signal_id is not None
+                        else {}
+                    ),
+                },
                 logical_workflow_input=logical_input,
                 consumes_logical_unit=True,
                 private_continuation=None,
@@ -1361,6 +1940,8 @@ class AgentExecutionService:
         workflow = await self._workflow(run)
         logical_input = _exact_logical_input(
             workflow,
+            origin=continuation.expected_origin,
+            destination=continuation.expected_destination,
             departure_date=continuation.expected_departure_date,
             return_date=continuation.expected_return_date,
         )
@@ -1723,17 +2304,13 @@ class AgentExecutionService:
             trip_capability_key = "one_way" if trip_shape is TripShape.ONE_WAY else "round_trip"
             if _text(capability[trip_capability_key], trip_capability_key) != "supported":
                 raise ValueError("trip shape capability is unsupported")
-            intent_routes = tuple(
-                _supported_intent_route(_mapping(value, "intent leg")) for value in plan_legs
-            )
-            frozen_routes = tuple(
-                _supported_frozen_route(_mapping(value, "scope leg")) for value in scope_legs
-            )
-            if intent_routes != frozen_routes:
-                raise ValueError("intent and frozen routes differ")
-
             first_scope_leg = _mapping(scope_legs[0], "scope leg")
             first_plan_leg = _mapping(plan_legs[0], "intent leg")
+            origin_codes = _finite_frozen_airport_codes(
+                first_scope_leg,
+                first_plan_leg,
+                "origin",
+            )
             scope_constraint = _constraint_from_snapshot(
                 _mapping(first_scope_leg["date_constraint"], "date constraint")
             )
@@ -1748,15 +2325,103 @@ class AgentExecutionService:
             ):
                 raise ValueError("top-level and leg date modes differ")
             departure, departure_end = _constraint_bounds(scope_constraint)
-            origin, destination = frozen_routes[0]
+            coverage = _text(scope["coverage"], "scope coverage")
+            adults = _positive_int(intent.get("adults", 1), "adults")
+            children = _non_negative_int(intent.get("children", 0), "children")
+            infants = _non_negative_int(intent.get("infants", 0), "infants")
+            currency = _currency(intent.get("currency", "RUB"))
+            anywhere_rule: _AnywhereRule | None = None
+            anywhere_signals: tuple[AgentDiscoverySignalRecord, ...] = ()
+            raw_anywhere = first_scope_leg.get("anywhere")
+            if raw_anywhere is not None:
+                if (
+                    first_scope_leg.get("destination") is not None
+                    or first_scope_leg.get("reciprocal_anywhere_return", False) is not False
+                ):
+                    raise ValueError("outbound anywhere scope is invalid")
+                anywhere_rule = _anywhere_rule_from_snapshot(
+                    _mapping(raw_anywhere, "anywhere rule"),
+                    first_plan_leg=first_plan_leg,
+                    origin_codes=origin_codes,
+                    date_start=departure,
+                    date_end=departure_end,
+                    coverage=coverage,
+                )
+                snapshot = await self._operations.get_scope_snapshot_for_run(household_id, run_id)
+                if snapshot is not None:
+                    anywhere_signals = await self._validated_anywhere_scope_snapshot(
+                        snapshot,
+                        run=run,
+                        rule=anywhere_rule,
+                        currency=currency,
+                    )
+                route_pairs = tuple(
+                    dict.fromkeys(
+                        _RoutePair(signal.origin, signal.destination) for signal in anywhere_signals
+                    )
+                )
+                origin = origin_codes[0]
+                destination = (
+                    anywhere_signals[0].destination
+                    if anywhere_signals
+                    else anywhere_rule.eligible_destination_countries[0][0]
+                )
+                destination_codes: tuple[str, ...] = ()
+            else:
+                destination_codes = _finite_frozen_airport_codes(
+                    first_scope_leg,
+                    first_plan_leg,
+                    "destination",
+                )
+                route_pairs = tuple(
+                    _RoutePair(origin_code, destination_code)
+                    for origin_code, destination_code in finite_route_pairs(
+                        origin_codes,
+                        destination_codes,
+                    )
+                )
+                origin, destination = route_pairs[0].origin, route_pairs[0].destination
             return_date: date | None = None
             if trip_shape is TripShape.ROUND_TRIP:
                 second_plan_leg = _mapping(plan_legs[1], "return intent leg")
                 second_scope_leg = _mapping(scope_legs[1], "return scope leg")
-                if intent_routes[1] != (destination, origin):
+                if _intent_scope_identity(first_plan_leg, "origin") != _intent_scope_identity(
+                    second_plan_leg, "destination"
+                ) or _intent_scope_identity(
+                    first_plan_leg, "destination"
+                ) != _intent_scope_identity(second_plan_leg, "origin"):
                     raise ValueError("round-trip intent legs must be reciprocal")
-                if frozen_routes[1] != (destination, origin):
-                    raise ValueError("round-trip frozen legs must be reciprocal")
+                if anywhere_rule is not None:
+                    if (
+                        second_scope_leg.get("reciprocal_anywhere_return") is not True
+                        or second_scope_leg.get("origin") is not None
+                        or second_scope_leg.get("anywhere") is not None
+                    ):
+                        raise ValueError("anywhere return placeholder is invalid")
+                    return_destination_codes = _finite_frozen_airport_codes(
+                        second_scope_leg,
+                        second_plan_leg,
+                        "destination",
+                    )
+                    if set(return_destination_codes) != set(origin_codes):
+                        raise ValueError("anywhere return destination is not reciprocal")
+                else:
+                    if second_scope_leg.get("reciprocal_anywhere_return", False) is not False:
+                        raise ValueError("finite return leg cannot be an anywhere placeholder")
+                    return_origin_codes = _finite_frozen_airport_codes(
+                        second_scope_leg,
+                        second_plan_leg,
+                        "origin",
+                    )
+                    return_destination_codes = _finite_frozen_airport_codes(
+                        second_scope_leg,
+                        second_plan_leg,
+                        "destination",
+                    )
+                    if set(return_origin_codes) != set(destination_codes) or set(
+                        return_destination_codes
+                    ) != set(origin_codes):
+                        raise ValueError("round-trip frozen legs must be reciprocal")
                 return_scope_constraint = _constraint_from_snapshot(
                     _mapping(second_scope_leg["date_constraint"], "return date constraint")
                 )
@@ -1788,26 +2453,36 @@ class AgentExecutionService:
             ):
                 raise ValueError("http estimate is inconsistent")
             approved_date_surface = (departure_end - departure).days + 1
-            if scope_constraint.mode is DateMode.EXACT:
-                if calendar_estimate != 0 or exact_estimate != 1:
+            if anywhere_rule is not None:
+                discovery_query_work = len(anywhere_rule.origins) * len(
+                    anywhere_rule.discovery_source_ids
+                )
+                if (
+                    calendar_estimate
+                    != max(anywhere_rule.max_destination_seeds, discovery_query_work)
+                    or exact_estimate != anywhere_rule.exact_verification_limit
+                ):
+                    raise ValueError("anywhere workflow estimates are inconsistent")
+            elif scope_constraint.mode is DateMode.EXACT:
+                if calendar_estimate != 0 or exact_estimate != len(route_pairs):
                     raise ValueError("exact workflow estimates are inconsistent")
-            elif (
-                calendar_estimate != approved_date_surface
-                or exact_estimate != approved_date_surface
-            ):
+            elif calendar_estimate != approved_date_surface * len(
+                route_pairs
+            ) or exact_estimate != approved_date_surface * len(route_pairs):
                 raise ValueError("calendar workflow estimates are inconsistent")
             effective_strategies = requested_strategies or (RouteStrategy.THROUGH_TICKET,)
             workflow = _Workflow(
                 origin=origin,
                 destination=destination,
+                route_pairs=route_pairs,
                 date_mode=scope_constraint.mode.value,
                 departure_date=departure,
                 departure_end_date=departure_end,
                 return_date=return_date,
-                adults=_positive_int(intent.get("adults", 1), "adults"),
-                children=_non_negative_int(intent.get("children", 0), "children"),
-                infants=_non_negative_int(intent.get("infants", 0), "infants"),
-                currency=_currency(intent.get("currency", "RUB")),
+                adults=adults,
+                children=children,
+                infants=infants,
+                currency=currency,
                 one_way=trip_shape is TripShape.ONE_WAY,
                 strategies=effective_strategies,
                 exact_limit=exact_estimate,
@@ -1819,12 +2494,84 @@ class AgentExecutionService:
                     cost.get("requests_per_minute"),
                     "requests_per_minute",
                 ),
+                anywhere_rule=anywhere_rule,
+                anywhere_signals=anywhere_signals,
             )
         except (KeyError, IndexError, TypeError, ValueError):
             workflow = None
         if workflow is None:
             raise AgentExecutionError("agent_plan_snapshot_invalid")
         return workflow
+
+    async def _validated_anywhere_scope_snapshot(
+        self,
+        snapshot: AgentRunScopeSnapshotRecord,
+        *,
+        run: AgentPlanRunRecord,
+        rule: _AnywhereRule,
+        currency: str,
+    ) -> tuple[AgentDiscoverySignalRecord, ...]:
+        payload = snapshot.snapshot
+        origins = tuple(
+            _iata(value, "snapshot origin")
+            for value in _sequence(payload["origins"], "snapshot origins")
+        )
+        destinations = tuple(
+            _iata(value, "snapshot destination")
+            for value in _sequence(payload["destinations"], "snapshot destinations")
+        )
+        source_ids = tuple(
+            UUID(_text(value, "snapshot source signal id"))
+            for value in _sequence(payload["source_signal_ids"], "snapshot source signal ids")
+        )
+        if (
+            snapshot.household_id != run.household_id
+            or snapshot.run_id != run.id
+            or not _durable_scope_snapshot(snapshot, run)
+            or origins != rule.origins
+            or not destinations
+            or len(destinations) != len(set(destinations))
+            or len(destinations) > rule.exact_verification_limit
+            or len(source_ids) != len(destinations)
+            or len(source_ids) != len(set(source_ids))
+            or _text(payload["catalog_checksum"], "snapshot catalog checksum")
+            != rule.catalog_checksum
+            or _text(payload["taxonomy_version"], "snapshot taxonomy version")
+            != rule.taxonomy_version
+            or _text(payload["coverage"], "snapshot coverage") != rule.coverage
+            or snapshot.fingerprint != _scope_snapshot_fingerprint(payload)
+        ):
+            raise ValueError("anywhere scope snapshot is not rule-bound")
+        eligible = dict(rule.eligible_destination_countries)
+        stored = await self._evidence.list_discovery_signals(snapshot.household_id, snapshot.run_id)
+        stored_by_id = {signal.id: signal for signal in stored}
+        selected: list[AgentDiscoverySignalRecord] = []
+        for source_id, destination in zip(source_ids, destinations, strict=True):
+            signal = stored_by_id.get(source_id)
+            if (
+                signal is None
+                or signal.household_id != snapshot.household_id
+                or signal.run_id != snapshot.run_id
+                or signal.provider_id != _PROVIDER_ID
+                or signal.origin not in origins
+                or signal.destination != destination
+                or signal.destination not in eligible
+                or not rule.date_start <= signal.departure_date <= rule.date_end
+                or signal.return_date is not None
+                or signal.amount_minor is None
+                or signal.currency != currency
+                or signal.passengers != 1
+                or signal.passenger_basis is not PriceBasis.PROVIDER_SINGLE_ADULT_TICKET
+                or signal.source_kind is not DiscoverySource.HOT_OFFER
+                or signal.freshness is not Freshness.API_CACHED
+                or _text(signal.signal_evidence.get("source_id"), "source_id")
+                not in rule.discovery_source_ids
+                or signal.fingerprint != _evidence_fingerprint(signal.id)
+                or not _durable_provider_observation(signal, run)
+            ):
+                raise ValueError("anywhere scope source signal is not rule-bound")
+            selected.append(signal)
+        return tuple(selected)
 
     def _now(self) -> datetime:
         now = self._clock()
@@ -1850,6 +2597,126 @@ def _constraint_bounds(constraint: DateConstraint) -> tuple[date, date]:
     return constraint.start_date, constraint.end_date or constraint.start_date
 
 
+def _anywhere_rule_from_snapshot(
+    value: Mapping[str, object],
+    *,
+    first_plan_leg: Mapping[str, object],
+    origin_codes: tuple[str, ...],
+    date_start: date,
+    date_end: date,
+    coverage: str,
+) -> _AnywhereRule:
+    if _intent_scope_identity(first_plan_leg, "destination") != (
+        LocationScopeKind.ANYWHERE.value,
+        None,
+    ):
+        raise ValueError("anywhere rule differs from intent")
+    origins = tuple(
+        _iata(item, "anywhere origin")
+        for item in _sequence(value["origin_airports"], "anywhere origins")
+    )
+    rule_date_start = date.fromisoformat(_text(value["date_start"], "anywhere date_start"))
+    rule_date_end = date.fromisoformat(_text(value["date_end"], "anywhere date_end"))
+    allowed = _country_codes(value.get("allowed_country_codes", ()), "allowed countries")
+    excluded = _country_codes(value.get("excluded_country_codes", ()), "excluded countries")
+    sources = tuple(
+        _text(item, "anywhere discovery source")
+        for item in _sequence(value["discovery_source_ids"], "anywhere discovery sources")
+    )
+    max_destination_seeds = _positive_int(
+        value["max_destination_seeds"],
+        "max_destination_seeds",
+    )
+    exact_verification_limit = _positive_int(
+        value["exact_verification_limit"],
+        "exact_verification_limit",
+    )
+    raw_eligible = value["eligible_destination_countries"]
+    if isinstance(raw_eligible, Mapping):
+        eligible_items = tuple(raw_eligible.items())
+    else:
+        eligible_items = tuple(
+            (
+                _mapping(item, "eligible destination")["code"],
+                _mapping(item, "eligible destination")["country_code"],
+            )
+            for item in _sequence(raw_eligible, "eligible destinations")
+        )
+    eligible = tuple(
+        (
+            _iata(code, "eligible destination code"),
+            _country_code(country_code, "eligible destination country"),
+        )
+        for code, country_code in eligible_items
+    )
+    eligible_codes = tuple(code for code, _country in eligible)
+    if (
+        origins != origin_codes
+        or len(set(origins)) != len(origins)
+        or rule_date_start != date_start
+        or rule_date_end != date_end
+        or inclusive_month_count(rule_date_start, rule_date_end) > MAX_ANYWHERE_DISCOVERY_MONTHS
+        or set(allowed) & set(excluded)
+        or sources != ("aviasales_hot_offers",)
+        or exact_verification_limit > max_destination_seeds
+        or max_destination_seeds < len(origins) * len(sources)
+        or coverage not in {"quick", "full"}
+        or not eligible
+        or len(set(eligible_codes)) != len(eligible_codes)
+        or any(code in origins for code in eligible_codes)
+        or any(allowed and country not in allowed for _code, country in eligible)
+        or any(country in excluded for _code, country in eligible)
+    ):
+        raise ValueError("anywhere rule is not a bounded immutable rule")
+    return _AnywhereRule(
+        origins=origins,
+        date_start=rule_date_start,
+        date_end=rule_date_end,
+        discovery_source_ids=sources,
+        max_destination_seeds=max_destination_seeds,
+        exact_verification_limit=exact_verification_limit,
+        catalog_checksum=_text(value["catalog_checksum"], "anywhere catalog checksum"),
+        taxonomy_version=_text(value["taxonomy_version"], "anywhere taxonomy version"),
+        coverage=coverage,
+        eligible_destination_countries=eligible,
+    )
+
+
+def _country_codes(value: object, field_name: str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise TypeError(f"{field_name} must be an ordered collection")
+    codes = tuple(_country_code(item, field_name) for item in value)
+    if len(codes) != len(set(codes)):
+        raise ValueError(f"{field_name} must be unique")
+    return codes
+
+
+def _country_code(value: object, field_name: str) -> str:
+    code = _text(value, field_name).upper()
+    if len(code) != 2 or not code.isascii() or not code.isalpha():
+        raise ValueError(f"{field_name} must be an ISO alpha-2 code")
+    return code
+
+
+def _scope_snapshot_fingerprint(value: Mapping[str, object]) -> str:
+    encoded = json.dumps(
+        _mutable_json(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return _fingerprint(encoded)
+
+
+def _mutable_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _mutable_json(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_mutable_json(item) for item in value]
+    return value
+
+
 def _validated_provider_outcome(
     *,
     run: AgentPlanRunRecord,
@@ -1858,6 +2725,8 @@ def _validated_provider_outcome(
     workflow: _Workflow,
     outcome: object,
     observed_by: datetime,
+    anywhere_remaining_capacity: int | None = None,
+    anywhere_existing_candidate_bindings: frozenset[tuple[str, str, str]] = frozenset(),
 ) -> ExactSearchContinuation | ExactPollOutcome | tuple[DiscoverySignal, ...]:
     try:
         if operation.kind is AgentOperationKind.EXACT_START:
@@ -1888,6 +2757,21 @@ def _validated_provider_outcome(
                 operation=operation,
                 workflow=workflow,
                 observed_by=observed_by,
+            )
+
+        if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY:
+            if type(outcome) is not tuple or not all(
+                isinstance(signal, DiscoverySignal) for signal in outcome
+            ):
+                raise TypeError("anywhere discovery returned an invalid outcome")
+            return _validated_anywhere_signals(
+                cast(tuple[DiscoverySignal, ...], outcome),
+                run=run,
+                operation=operation,
+                workflow=workflow,
+                observed_by=observed_by,
+                remaining_capacity=anywhere_remaining_capacity,
+                existing_candidate_bindings=anywhere_existing_candidate_bindings,
             )
 
         if operation.kind is AgentOperationKind.EXACT_POLL:
@@ -1923,7 +2807,8 @@ def _validated_calendar_signals(
     workflow: _Workflow,
     observed_by: datetime,
 ) -> tuple[DiscoverySignal, ...]:
-    requested_date = _calendar_params(operation.immutable_input, workflow).depart_from
+    params = _calendar_params(operation.immutable_input, workflow)
+    requested_date = params.depart_from
     best_by_date: dict[tuple[date, date | None], DiscoverySignal] = {}
     id_bindings: dict[UUID, tuple[date, date | None]] = {}
     for signal in signals:
@@ -1938,8 +2823,8 @@ def _validated_calendar_signals(
         ):
             raise ValueError("calendar signal is not request-bound")
         if (
-            signal.origin != workflow.origin
-            or signal.destination != workflow.destination
+            signal.origin != params.origin.code
+            or signal.destination != params.destination.code
             or signal.departure_date != requested_date
             or signal.return_date != workflow.return_date
         ):
@@ -1965,10 +2850,86 @@ def _validated_calendar_signals(
     )
 
 
+def _validated_anywhere_signals(
+    signals: tuple[DiscoverySignal, ...],
+    *,
+    run: AgentPlanRunRecord,
+    operation: AgentRunOperationRecord,
+    workflow: _Workflow,
+    observed_by: datetime,
+    remaining_capacity: int | None,
+    existing_candidate_bindings: frozenset[tuple[str, str, str]],
+) -> tuple[DiscoverySignal, ...]:
+    params = _anywhere_params(operation.immutable_input, workflow)
+    rule = workflow.anywhere_rule
+    if rule is None:
+        raise ValueError("anywhere discovery requires a frozen rule")
+    eligible = dict(rule.eligible_destination_countries)
+    if type(remaining_capacity) is not int or remaining_capacity < 1:
+        raise ValueError("anywhere discovery requires positive remaining capacity")
+    source_id = _text(operation.immutable_input["source_id"], "source_id")
+    best_by_destination: dict[str, DiscoverySignal] = {}
+    id_bindings: dict[UUID, tuple[str, str, date, date | None]] = {}
+    for signal in signals:
+        binding = (
+            signal.origin,
+            signal.destination,
+            signal.departure_date,
+            signal.return_date,
+        )
+        if (
+            signal.id != _hot_offer_discovery_signal_id(operation.id, signal)
+            or signal.provider_id != _PROVIDER_ID
+            or signal.origin != params.origin.code
+            or signal.observed_amount.currency != workflow.currency
+            or signal.passengers != 1
+            or signal.source_kind is not DiscoverySource.HOT_OFFER
+            or not _provider_response_observation(signal.observed_at, run, observed_by)
+        ):
+            raise ValueError("anywhere discovery signal is not request-bound")
+        previous_binding = id_bindings.setdefault(signal.id, binding)
+        if previous_binding != binding:
+            raise ValueError("anywhere discovery identity is ambiguous")
+        if (
+            signal.destination not in eligible
+            or not (params.date_from <= signal.departure_date <= params.date_to)
+            or signal.return_date is not None
+            or (signal.origin, source_id, signal.destination) in existing_candidate_bindings
+        ):
+            continue
+        existing = best_by_destination.get(signal.destination)
+        if existing is None or _calendar_signal_order(signal) < _calendar_signal_order(existing):
+            best_by_destination[signal.destination] = signal
+    return tuple(
+        sorted(
+            best_by_destination.values(),
+            key=lambda signal: (
+                signal.observed_amount.minor_units,
+                -signal.observed_at.timestamp(),
+                signal.destination,
+                str(signal.id),
+            ),
+        )[:remaining_capacity]
+    )
+
+
 def _calendar_signal_order(signal: DiscoverySignal) -> tuple[int, float, str]:
     return (
         signal.observed_amount.minor_units,
         -signal.observed_at.timestamp(),
+        str(signal.id),
+    )
+
+
+def _stored_discovery_order(
+    signal: AgentDiscoverySignalRecord,
+) -> tuple[int, float, str, str, str, str]:
+    return (
+        signal.amount_minor if signal.amount_minor is not None else 2**63 - 1,
+        -signal.observed_at.timestamp(),
+        signal.destination,
+        signal.origin,
+        _text(signal.signal_evidence.get("source_id"), "source_id"),
         str(signal.id),
     )
 
@@ -1987,6 +2948,26 @@ def _calendar_discovery_signal_id(
             signal.return_date.isoformat() if signal.return_date is not None else "",
             str(signal.observed_amount.minor_units),
             signal.observed_amount.currency,
+        )
+    )
+    return uuid5(evidence_namespace, f"discovery|{identity}")
+
+
+def _hot_offer_discovery_signal_id(
+    evidence_namespace: UUID,
+    signal: DiscoverySignal,
+) -> UUID:
+    identity = "|".join(
+        (
+            _PROVIDER_ID,
+            "hot_offer",
+            signal.origin,
+            signal.destination,
+            signal.departure_date.isoformat(),
+            signal.return_date.isoformat() if signal.return_date is not None else "",
+            str(signal.observed_amount.minor_units),
+            signal.observed_amount.currency,
+            str(signal.passengers),
         )
     )
     return uuid5(evidence_namespace, f"discovery|{identity}")
@@ -2054,6 +3035,49 @@ def _live_observation(
     return lower_bound <= normalized <= response_time + _PROVIDER_CLOCK_SKEW
 
 
+def _provider_response_observation(
+    observed_at: datetime,
+    run: AgentPlanRunRecord,
+    observed_by: datetime,
+) -> bool:
+    """Bind cached provider evidence to this response without claiming price liveness."""
+
+    normalized = observed_at.astimezone(UTC)
+    response_time = observed_by.astimezone(UTC)
+    lower_bound = max(
+        run.created_at.astimezone(UTC),
+        response_time - _PROVIDER_CLOCK_SKEW,
+    )
+    return lower_bound <= normalized <= response_time + _PROVIDER_CLOCK_SKEW
+
+
+def _durable_provider_observation(
+    record: AgentDiscoverySignalRecord,
+    run: AgentPlanRunRecord,
+) -> bool:
+    """Revalidate stored evidence against its durable ingest time, not wall clock time."""
+
+    observed_at = record.observed_at.astimezone(UTC)
+    created_at = record.created_at.astimezone(UTC)
+    run_start = run.created_at.astimezone(UTC)
+    run_deadline = run.deadline_at.astimezone(UTC)
+    lower_bound = max(run_start, created_at - _PROVIDER_CLOCK_SKEW)
+    return (
+        run_start <= created_at <= run_deadline + _PROVIDER_CLOCK_SKEW
+        and lower_bound <= observed_at <= created_at + _PROVIDER_CLOCK_SKEW
+    )
+
+
+def _durable_scope_snapshot(
+    snapshot: AgentRunScopeSnapshotRecord,
+    run: AgentPlanRunRecord,
+) -> bool:
+    if snapshot.created_at.tzinfo is None or snapshot.created_at.utcoffset() is None:
+        return False
+    created_at = snapshot.created_at.astimezone(UTC)
+    return run.created_at.astimezone(UTC) <= created_at <= run.deadline_at.astimezone(UTC)
+
+
 def _confirmed_segments_are_bound(evidence: ConfirmedOfferEvidence) -> bool:
     directions = _confirmed_directions(evidence)
     if directions is None:
@@ -2116,8 +3140,7 @@ def _discovery_matches_workflow(
     workflow: _Workflow,
 ) -> bool:
     return (
-        signal.origin == workflow.origin
-        and signal.destination == workflow.destination
+        _RoutePair(signal.origin, signal.destination) in workflow.route_pairs
         and workflow.departure_date <= signal.departure_date <= workflow.departure_end_date
         and signal.return_date == workflow.return_date
         and (signal.return_date is None or signal.departure_date <= signal.return_date)
@@ -2125,6 +3148,62 @@ def _discovery_matches_workflow(
         and signal.passengers == 1
         and signal.passenger_basis is PriceBasis.PROVIDER_SINGLE_ADULT_TICKET
     )
+
+
+def _expected_coverage_is_confirmed(
+    workflow: _Workflow,
+    operations: Sequence[AgentRunOperationRecord],
+) -> bool:
+    if workflow.anywhere_rule is not None:
+        expected = {
+            _ExactBinding(
+                origin=signal.origin,
+                destination=signal.destination,
+                departure_date=signal.departure_date,
+                return_date=workflow.return_date,
+                adults=workflow.adults,
+                children=workflow.children,
+                infants=workflow.infants,
+                passengers=workflow.passengers,
+                currency=workflow.currency,
+            )
+            for signal in workflow.anywhere_signals
+        }
+    else:
+        expected = {
+            _ExactBinding(
+                origin=route_pair.origin,
+                destination=route_pair.destination,
+                departure_date=workflow.departure_date + timedelta(days=offset),
+                return_date=workflow.return_date,
+                adults=workflow.adults,
+                children=workflow.children,
+                infants=workflow.infants,
+                passengers=workflow.passengers,
+                currency=workflow.currency,
+            )
+            for route_pair in workflow.route_pairs
+            for offset in range((workflow.departure_end_date - workflow.departure_date).days + 1)
+        }
+    confirmed_root_ids = {
+        operation.logical_root_operation_id
+        for operation in operations
+        if operation.kind is AgentOperationKind.EXACT_POLL
+        and operation.status is AgentOperationStatus.SUCCEEDED
+        and operation.result_type is AgentOperationResultType.CONFIRMED_OFFER
+        and operation.logical_root_operation_id is not None
+    }
+    confirmed: set[_ExactBinding] = set()
+    for operation in operations:
+        if operation.kind is not AgentOperationKind.EXACT_START:
+            continue
+        if operation.id not in confirmed_root_ids:
+            continue
+        try:
+            confirmed.add(_exact_binding_from_immutable(operation.immutable_input, workflow))
+        except (AgentExecutionError, KeyError, TypeError, ValueError):
+            return False
+    return bool(expected) and expected <= confirmed
 
 
 def _evidence_allowed_by_strategy(
@@ -2198,58 +3277,65 @@ def _continuous_segments(segments: Sequence[FlightSegmentSummary]) -> bool:
     return all(previous.destination == current.origin for previous, current in pairwise(segments))
 
 
-def _supported_intent_route(leg: Mapping[str, object]) -> tuple[str, str]:
-    return (
-        _supported_intent_airport(leg, "origin"),
-        _supported_intent_airport(leg, "destination"),
-    )
-
-
-def _supported_intent_airport(leg: Mapping[str, object], key: str) -> str:
+def _intent_scope_identity(leg: Mapping[str, object], key: str) -> tuple[str, str | None]:
     location = _mapping(leg[key], f"intent {key}")
     kind = LocationScopeKind(_text(location["kind"], f"intent {key} kind"))
-    if kind is not LocationScopeKind.AIRPORT:
+    raw_value = location.get("value")
+    value = _text(raw_value, f"intent {key} value") if raw_value is not None else None
+    if kind is LocationScopeKind.ANYWHERE:
+        if value is not None:
+            raise ValueError(f"intent {key} anywhere value must be null")
+    elif value is None:
+        raise ValueError(f"intent {key} value is required")
+    return kind.value, value
+
+
+def _finite_frozen_airport_codes(
+    leg: Mapping[str, object],
+    intent_leg: Mapping[str, object],
+    key: str,
+) -> tuple[str, ...]:
+    if leg.get("anywhere") is not None and key == "destination":
         raise AgentExecutionError("agent_scope_unsupported")
-    return _iata(location["value"], f"intent {key}")
-
-
-def _supported_frozen_route(leg: Mapping[str, object]) -> tuple[str, str]:
-    if leg.get("anywhere") is not None:
-        raise AgentExecutionError("agent_scope_unsupported")
-    return (
-        _supported_frozen_airport(leg, "origin"),
-        _supported_frozen_airport(leg, "destination"),
-    )
-
-
-def _supported_frozen_airport(leg: Mapping[str, object], key: str) -> str:
     location = _mapping(leg[key], f"frozen {key}")
     requested = _mapping(location["requested_scope"], f"frozen {key} requested scope")
     kind = LocationScopeKind(_text(requested["kind"], f"frozen {key} requested kind"))
-    codes = _sequence(location["airport_codes"], f"frozen {key} airport codes")
-    nearby_radius_km = _non_negative_int(
+    raw_value = requested.get("value")
+    requested_value = (
+        _text(raw_value, f"frozen {key} requested value") if raw_value is not None else None
+    )
+    if kind is LocationScopeKind.ANYWHERE:
+        raise AgentExecutionError("agent_scope_unsupported")
+    if (kind.value, requested_value) != _intent_scope_identity(intent_leg, key):
+        raise ValueError(f"frozen {key} requested scope differs from intent")
+    codes = tuple(
+        _iata(value, f"frozen {key} airport code")
+        for value in _sequence(location["airport_codes"], f"frozen {key} airport codes")
+    )
+    if not codes or len(set(codes)) != len(codes):
+        raise ValueError(f"frozen {key} airport codes must be non-empty and unique")
+    _non_negative_int(
         location.get("nearby_radius_km", 0),
         f"frozen {key} nearby radius",
     )
-    if kind is not LocationScopeKind.AIRPORT or len(codes) != 1 or nearby_radius_km != 0:
-        raise AgentExecutionError("agent_scope_unsupported")
-    code = _iata(codes[0], f"frozen {key}")
-    if _iata(requested["value"], f"frozen {key} requested value") != code:
+    _text(location["catalog_checksum"], f"frozen {key} catalog checksum")
+    _text(location["taxonomy_version"], f"frozen {key} taxonomy version")
+    _text(location["commercial_provenance"], f"frozen {key} commercial provenance")
+    if kind is LocationScopeKind.AIRPORT and requested_value not in codes:
         raise ValueError(f"frozen {key} requested scope differs from airport codes")
-    return code
+    return codes
 
 
 def _start_params(
     immutable_input: Mapping[str, object],
     workflow: _Workflow,
 ) -> SearchStartParams:
-    departure = _text(immutable_input["departure_date"], "departure_date")
-    return_value = immutable_input.get("return_date")
+    binding = _exact_binding_from_immutable(immutable_input, workflow)
     return SearchStartParams(
-        origin=ProviderLocation(LocationScopeKind.AIRPORT, workflow.origin),
-        destination=ProviderLocation(LocationScopeKind.AIRPORT, workflow.destination),
-        departure_date=departure,
-        return_date=_text(return_value, "return_date") if return_value is not None else None,
+        origin=ProviderLocation(LocationScopeKind.AIRPORT, binding.origin),
+        destination=ProviderLocation(LocationScopeKind.AIRPORT, binding.destination),
+        departure_date=binding.departure_date.isoformat(),
+        return_date=binding.return_date.isoformat() if binding.return_date is not None else None,
         adults=workflow.adults,
         children=workflow.children,
         infants=workflow.infants,
@@ -2268,10 +3354,11 @@ def _calendar_params(
     return_date = (
         date.fromisoformat(_text(return_raw, "return_date")) if return_raw is not None else None
     )
+    origin = _iata(immutable_input["origin"], "origin")
+    destination = _iata(immutable_input["destination"], "destination")
     if (
         immutable_input.get("phase") != "calendar"
-        or _iata(immutable_input["origin"], "origin") != workflow.origin
-        or _iata(immutable_input["destination"], "destination") != workflow.destination
+        or _RoutePair(origin, destination) not in workflow.route_pairs
         or not workflow.departure_date <= departure_date <= workflow.departure_end_date
         or return_date != workflow.return_date
         or _positive_int(immutable_input["passengers"], "passengers") != workflow.passengers
@@ -2279,8 +3366,8 @@ def _calendar_params(
     ):
         raise AgentExecutionError("agent_operation_input_invalid")
     return CalendarSearchParams(
-        origin=ProviderLocation(LocationScopeKind.AIRPORT, workflow.origin),
-        destination=ProviderLocation(LocationScopeKind.AIRPORT, workflow.destination),
+        origin=ProviderLocation(LocationScopeKind.AIRPORT, origin),
+        destination=ProviderLocation(LocationScopeKind.AIRPORT, destination),
         depart_from=departure_date,
         depart_to=departure_date,
         one_way=workflow.one_way,
@@ -2288,6 +3375,94 @@ def _calendar_params(
         adults=1,
         children=0,
         infants=0,
+    )
+
+
+def _anywhere_bindings(rule: _AnywhereRule) -> tuple[tuple[str, str], ...]:
+    bindings = tuple(
+        (origin, source_id) for origin in rule.origins for source_id in rule.discovery_source_ids
+    )
+    if not bindings or rule.max_destination_seeds < len(bindings):
+        raise AgentExecutionError("agent_plan_snapshot_invalid")
+    return bindings
+
+
+def _anywhere_binding_seed_limit(
+    rule: _AnywhereRule,
+    origin: str,
+    source_id: str,
+) -> int:
+    bindings = _anywhere_bindings(rule)
+    try:
+        ordinal = bindings.index((origin, source_id))
+    except ValueError as error:
+        raise AgentExecutionError("agent_operation_input_invalid") from error
+    base, remainder = divmod(rule.max_destination_seeds, len(bindings))
+    limit = base + (1 if ordinal < remainder else 0)
+    if limit <= 0:
+        raise AgentExecutionError("agent_plan_snapshot_invalid")
+    return limit
+
+
+def _anywhere_params(
+    immutable_input: Mapping[str, object],
+    workflow: _Workflow,
+    *,
+    max_results: int | None = None,
+    excluded_destination_airports: frozenset[str] = frozenset(),
+) -> AnywhereDiscoveryParams:
+    rule = workflow.anywhere_rule
+    if rule is None:
+        raise AgentExecutionError("agent_operation_input_invalid")
+    try:
+        origin = _iata(immutable_input["origin"], "origin")
+        date_from = date.fromisoformat(_text(immutable_input["date_from"], "date_from"))
+        date_to = date.fromisoformat(_text(immutable_input["date_to"], "date_to"))
+        source_id = _text(immutable_input["source_id"], "source_id")
+        max_destination_seeds = _positive_int(
+            immutable_input["max_destination_seeds"],
+            "max_destination_seeds",
+        )
+        seed_limit = _positive_int(immutable_input["seed_limit"], "seed_limit")
+        adults = _positive_int(immutable_input.get("adults", 1), "adults")
+        children = _non_negative_int(immutable_input.get("children", 0), "children")
+        infants = _non_negative_int(immutable_input.get("infants", 0), "infants")
+        currency = _currency(immutable_input["currency"])
+    except (KeyError, TypeError, ValueError):
+        raise AgentExecutionError("agent_operation_input_invalid") from None
+    if (
+        origin not in rule.origins
+        or date_from != rule.date_start
+        or date_to != rule.date_end
+        or source_id not in rule.discovery_source_ids
+        or max_destination_seeds != rule.max_destination_seeds
+        or seed_limit != _anywhere_binding_seed_limit(rule, origin, source_id)
+        or (adults, children, infants) != (1, 0, 0)
+        or currency != workflow.currency
+    ):
+        raise AgentExecutionError("agent_operation_input_invalid")
+    effective_max_results = seed_limit if max_results is None else max_results
+    allowed_destinations = frozenset(code for code, _country in rule.eligible_destination_countries)
+    if (
+        type(effective_max_results) is not int
+        or effective_max_results <= 0
+        or effective_max_results > seed_limit
+        or not isinstance(excluded_destination_airports, frozenset)
+        or not excluded_destination_airports <= allowed_destinations
+    ):
+        raise AgentExecutionError("agent_operation_input_invalid")
+    return AnywhereDiscoveryParams(
+        origin=ProviderLocation(LocationScopeKind.AIRPORT, origin),
+        date_from=date_from,
+        date_to=date_to,
+        currency=currency,
+        max_results=effective_max_results,
+        allowed_destination_airports=allowed_destinations,
+        excluded_destination_airports=excluded_destination_airports,
+        one_way=True,
+        adults=adults,
+        children=children,
+        infants=infants,
     )
 
 
@@ -2316,8 +3491,7 @@ def _exact_binding_from_immutable(
             currency=_currency(immutable_input["currency"]),
         )
         valid = (
-            candidate.origin == workflow.origin
-            and candidate.destination == workflow.destination
+            _RoutePair(candidate.origin, candidate.destination) in workflow.route_pairs
             and workflow.departure_date <= candidate.departure_date <= workflow.departure_end_date
             and candidate.return_date == workflow.return_date
             and candidate.adults == workflow.adults
@@ -2338,15 +3512,78 @@ def _exact_binding_from_immutable(
     return binding
 
 
+def _source_signal_id_for_binding(
+    immutable_input: Mapping[str, object],
+    workflow: _Workflow,
+    binding: _ExactBinding,
+) -> UUID:
+    raw_source_signal_id = immutable_input.get("source_signal_id")
+    if not isinstance(raw_source_signal_id, str):
+        raise AgentExecutionError("agent_operation_input_invalid")
+    try:
+        source_signal_id = UUID(raw_source_signal_id)
+    except ValueError as error:
+        raise AgentExecutionError("agent_operation_input_invalid") from error
+    if str(source_signal_id) != raw_source_signal_id:
+        raise AgentExecutionError("agent_operation_input_invalid")
+    matching_signals = tuple(
+        signal for signal in workflow.anywhere_signals if signal.id == source_signal_id
+    )
+    if len(matching_signals) != 1:
+        raise AgentExecutionError("agent_operation_input_invalid")
+    signal = matching_signals[0]
+    if (
+        signal.origin != binding.origin
+        or signal.destination != binding.destination
+        or signal.departure_date != binding.departure_date
+        or signal.return_date is not None
+        or binding.return_date != workflow.return_date
+    ):
+        raise AgentExecutionError("agent_operation_input_invalid")
+    return source_signal_id
+
+
+def _validated_anywhere_exact_source_ids(
+    operations: Sequence[AgentRunOperationRecord],
+    workflow: _Workflow,
+) -> frozenset[UUID]:
+    expected_source_ids = frozenset(signal.id for signal in workflow.anywhere_signals)
+    if (
+        workflow.anywhere_rule is None
+        or not expected_source_ids
+        or len(expected_source_ids) != len(workflow.anywhere_signals)
+        or len(operations) != len(expected_source_ids)
+    ):
+        raise AgentExecutionError("agent_operation_input_invalid")
+    actual_source_ids: set[UUID] = set()
+    for operation in operations:
+        if operation.kind is not AgentOperationKind.EXACT_START:
+            raise AgentExecutionError("agent_operation_input_invalid")
+        binding = _exact_binding_from_immutable(operation.immutable_input, workflow)
+        source_signal_id = _source_signal_id_for_binding(
+            operation.immutable_input,
+            workflow,
+            binding,
+        )
+        if source_signal_id in actual_source_ids:
+            raise AgentExecutionError("agent_operation_input_invalid")
+        actual_source_ids.add(source_signal_id)
+    if frozenset(actual_source_ids) != expected_source_ids:
+        raise AgentExecutionError("agent_operation_input_invalid")
+    return frozenset(actual_source_ids)
+
+
 def _exact_logical_input(
     workflow: _Workflow,
     *,
+    origin: str,
+    destination: str,
     departure_date: date,
     return_date: date | None,
 ) -> dict[str, object]:
     return {
-        "origin": workflow.origin,
-        "destination": workflow.destination,
+        "origin": origin,
+        "destination": destination,
         "departure_date": departure_date.isoformat(),
         "return_date": return_date.isoformat() if return_date is not None else None,
         "adults": workflow.adults,

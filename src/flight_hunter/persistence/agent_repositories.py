@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from flight_hunter.domain.agent_evidence import DiscoverySource, ProtectionStatus
+from flight_hunter.domain.money import MAX_MONEY_MINOR_UNITS
 from flight_hunter.domain.offers import Freshness, PriceBasis
 from flight_hunter.persistence.models import (
     agent_composed_route_candidates_table,
@@ -918,6 +919,28 @@ class AgentPlanRepository:
         )
         return _revision_record(row) if row is not None else None
 
+    async def get_revisions_by_ids(
+        self,
+        household_id: UUID,
+        revision_ids: Sequence[UUID],
+    ) -> Mapping[UUID, AgentPlanRevisionRecord]:
+        ids = _bounded_uuid_ids(revision_ids, "revision_ids")
+        if not ids:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(agent_search_plan_revisions_table)
+                .where(agent_search_plan_revisions_table.c.household_id == str(household_id))
+                .where(
+                    agent_search_plan_revisions_table.c.id.in_(
+                        tuple(str(revision_id) for revision_id in ids)
+                    )
+                )
+            )
+        ).mappings()
+        records = tuple(_revision_record(row) for row in rows)
+        return {record.id: record for record in records}
+
     async def get_revision_for_update(
         self,
         household_id: UUID,
@@ -1472,19 +1495,24 @@ class AgentRunRepository:
         self,
         household_id: UUID,
         plan_id: UUID,
+        *,
+        limit: int = 100,
     ) -> tuple[AgentPlanRunRecord, ...]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
         rows = (
             await self._session.execute(
                 select(agent_plan_runs_table)
                 .where(agent_plan_runs_table.c.household_id == str(household_id))
                 .where(agent_plan_runs_table.c.plan_id == str(plan_id))
                 .order_by(
-                    agent_plan_runs_table.c.created_at.asc(),
-                    agent_plan_runs_table.c.id.asc(),
+                    agent_plan_runs_table.c.created_at.desc(),
+                    agent_plan_runs_table.c.id.desc(),
                 )
+                .limit(limit)
             )
         ).mappings()
-        return tuple(_run_record(row) for row in rows)
+        return tuple(reversed(tuple(_run_record(row) for row in rows)))
 
     async def get_latest_run(
         self,
@@ -2133,6 +2161,34 @@ class AgentOperationRepository:
         ).mappings()
         return tuple(_operation_record(row) for row in rows)
 
+    async def list_operations_for_runs(
+        self,
+        household_id: UUID,
+        run_ids: Sequence[UUID],
+    ) -> Mapping[UUID, tuple[AgentRunOperationRecord, ...]]:
+        ids = _bounded_uuid_ids(run_ids, "run_ids")
+        grouped: dict[UUID, list[AgentRunOperationRecord]] = {run_id: [] for run_id in ids}
+        if not ids:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(agent_run_operations_table)
+                .where(agent_run_operations_table.c.household_id == str(household_id))
+                .where(
+                    agent_run_operations_table.c.run_id.in_(tuple(str(run_id) for run_id in ids))
+                )
+                .order_by(
+                    agent_run_operations_table.c.run_id.asc(),
+                    agent_run_operations_table.c.created_at.asc(),
+                    agent_run_operations_table.c.id.asc(),
+                )
+            )
+        ).mappings()
+        for row in rows:
+            record = _operation_record(row)
+            grouped[record.run_id].append(record)
+        return {run_id: tuple(records) for run_id, records in grouped.items()}
+
     async def claim_next_operation(
         self,
         *,
@@ -2406,7 +2462,7 @@ class AgentOperationRepository:
         error_code: str,
         now: datetime,
     ) -> AgentRunOperationRecord:
-        """Release a live lease after its owner observes that the run became inactive."""
+        """Release a live lease for an inactive run or a typed empty discovery result."""
 
         _validate_operation_completion(worker_id, error_code, now)
         normalized_now = _utc_datetime(now)
@@ -2415,8 +2471,13 @@ class AgentOperationRepository:
         if row is None:
             raise AgentOperationConflict("agent_operation_not_found")
         inactive_error = _inactive_run_error(row, normalized_now)
-        if inactive_error is None or inactive_error != error_code:
+        empty_discovery = (
+            error_code == "agent_no_discovery_results"
+            and row["operation_kind"] == AgentOperationKind.SUGGEST_DISCOVERY.value
+        )
+        if inactive_error is None and not empty_discovery:
             raise AgentOperationConflict("agent_operation_skip_reason_invalid")
+        effective_error = inactive_error or error_code
         result = await self._session.execute(
             update(agent_run_operations_table)
             .where(agent_run_operations_table.c.id == str(operation_id))
@@ -2431,7 +2492,7 @@ class AgentOperationRepository:
                 next_retry_at=None,
                 result_type=None,
                 result_id=None,
-                error_code=error_code,
+                error_code=effective_error,
                 updated_at=normalized_now,
                 completed_at=normalized_now,
             )
@@ -2676,6 +2737,35 @@ class AgentOperationRepository:
             .one_or_none()
         )
         return _scope_snapshot_record(row) if row is not None else None
+
+    async def get_scope_snapshot_for_run(
+        self,
+        household_id: UUID,
+        run_id: UUID,
+    ) -> AgentRunScopeSnapshotRecord | None:
+        return await self._get_scope_snapshot_by_run(household_id, run_id)
+
+    async def get_scope_snapshots_for_runs(
+        self,
+        household_id: UUID,
+        run_ids: Sequence[UUID],
+    ) -> Mapping[UUID, AgentRunScopeSnapshotRecord]:
+        ids = _bounded_uuid_ids(run_ids, "run_ids")
+        if not ids:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(agent_run_scope_snapshots_table)
+                .where(agent_run_scope_snapshots_table.c.household_id == str(household_id))
+                .where(
+                    agent_run_scope_snapshots_table.c.run_id.in_(
+                        tuple(str(run_id) for run_id in ids)
+                    )
+                )
+            )
+        ).mappings()
+        records = tuple(_scope_snapshot_record(row) for row in rows)
+        return {record.run_id: record for record in records}
 
     async def get_circuit_state(self, provider_id: str) -> AgentCircuitStateRecord | None:
         row = (
@@ -3594,7 +3684,11 @@ class AgentOperationRepository:
         if stage_scoped:
             statement = statement.where(table.c.stage_id == str(source["stage_id"]))
         if (
-            kind is AgentOperationKind.CALENDAR_SEARCH
+            kind
+            in {
+                AgentOperationKind.CALENDAR_SEARCH,
+                AgentOperationKind.SUGGEST_DISCOVERY,
+            }
             and result_type is AgentOperationResultType.DISCOVERY_SIGNAL
         ) or (
             kind is AgentOperationKind.EXACT_POLL
@@ -3943,6 +4037,34 @@ class AgentEvidenceRepository:
             )
         ).mappings()
         return tuple(_discovery_signal_record(row) for row in rows)
+
+    async def list_discovery_signals_for_runs(
+        self,
+        household_id: UUID,
+        run_ids: Sequence[UUID],
+    ) -> Mapping[UUID, tuple[AgentDiscoverySignalRecord, ...]]:
+        ids = _bounded_uuid_ids(run_ids, "run_ids")
+        grouped: dict[UUID, list[AgentDiscoverySignalRecord]] = {run_id: [] for run_id in ids}
+        if not ids:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(agent_discovery_signals_table)
+                .where(agent_discovery_signals_table.c.household_id == str(household_id))
+                .where(
+                    agent_discovery_signals_table.c.run_id.in_(tuple(str(run_id) for run_id in ids))
+                )
+                .order_by(
+                    agent_discovery_signals_table.c.run_id.asc(),
+                    agent_discovery_signals_table.c.observed_at.asc(),
+                    agent_discovery_signals_table.c.id.asc(),
+                )
+            )
+        ).mappings()
+        for row in rows:
+            record = _discovery_signal_record(row)
+            grouped[record.run_id].append(record)
+        return {run_id: tuple(records) for run_id, records in grouped.items()}
 
     async def append_confirmed_evidence(
         self,
@@ -4822,13 +4944,18 @@ _INDEPENDENT_OPERATION_KINDS = frozenset(
     }
 )
 _LOGICAL_ROOT_OPERATION_KINDS = frozenset(
-    {AgentOperationKind.CALENDAR_SEARCH, AgentOperationKind.EXACT_START}
+    {
+        AgentOperationKind.CALENDAR_SEARCH,
+        AgentOperationKind.EXACT_START,
+        AgentOperationKind.SUGGEST_DISCOVERY,
+    }
 )
 _NETWORK_OPERATION_KINDS = frozenset(
     {
         AgentOperationKind.CALENDAR_SEARCH,
         AgentOperationKind.EXACT_START,
         AgentOperationKind.EXACT_POLL,
+        AgentOperationKind.SUGGEST_DISCOVERY,
     }
 )
 _OPERATION_RESULT_MATRIX: dict[AgentOperationKind, frozenset[AgentOperationResultType]] = {
@@ -4838,7 +4965,7 @@ _OPERATION_RESULT_MATRIX: dict[AgentOperationKind, frozenset[AgentOperationResul
     AgentOperationKind.EXACT_POLL: frozenset(
         {AgentOperationResultType.OPERATION, AgentOperationResultType.CONFIRMED_OFFER}
     ),
-    AgentOperationKind.SUGGEST_DISCOVERY: frozenset(),
+    AgentOperationKind.SUGGEST_DISCOVERY: frozenset({AgentOperationResultType.DISCOVERY_SIGNAL}),
     AgentOperationKind.COMPARISON: frozenset(),
     AgentOperationKind.COMPOSITION: frozenset({AgentOperationResultType.COMPOSED_CANDIDATE}),
     AgentOperationKind.RANKING: frozenset({AgentOperationResultType.RANKING_SNAPSHOT}),
@@ -4864,6 +4991,12 @@ _OPERATION_INPUT_KEYS = frozenset(
         "date",
         "departure_date",
         "return_date",
+        "date_from",
+        "date_to",
+        "max_destination_seeds",
+        "seed_limit",
+        "source_id",
+        "source_signal_id",
         "passengers",
         "adults",
         "children",
@@ -4913,7 +5046,9 @@ _SCOPE_SNAPSHOT_KEYS = frozenset(
         "coverage",
     }
 )
-_DISCOVERY_EVIDENCE_KEYS = frozenset({"value", "calendar_bucket", "route_key", "source_version"})
+_DISCOVERY_EVIDENCE_KEYS = frozenset(
+    {"value", "calendar_bucket", "route_key", "source_id", "source_version"}
+)
 _CONFIRMED_ITINERARY_KEYS = frozenset(
     {
         "value",
@@ -4952,6 +5087,17 @@ _COMPOSED_ITINERARY_KEYS = frozenset(
 _RANKING_KEYS = frozenset({"value", "ordered", "version", "profile", "scores", "reasons"})
 
 
+def _bounded_uuid_ids(values: Sequence[UUID], field_name: str) -> tuple[UUID, ...]:
+    if isinstance(values, (str, bytes, bytearray)) or not isinstance(values, Sequence):
+        raise TypeError(f"{field_name} must be an ordered UUID collection")
+    if not all(isinstance(value, UUID) for value in values):
+        raise TypeError(f"{field_name} must contain UUID values")
+    unique = tuple(dict.fromkeys(values))
+    if len(unique) > 100:
+        raise ValueError(f"{field_name} cannot contain more than 100 values")
+    return unique
+
+
 def canonical_sanitized_json(value: Mapping[str, object]) -> str:
     sanitized = _sanitize_json_value(value, path="$", inspect_keys=True)
     return json.dumps(
@@ -4973,6 +5119,8 @@ def _sanitize_json_value(
         return value
     if isinstance(value, str):
         stripped = value.strip()
+        if path == "$.catalog_checksum" and _SHA256_RE.fullmatch(stripped):
+            return stripped
         if re.match(r"^(?:[a-z][a-z0-9+.-]*:|//)", stripped, flags=re.IGNORECASE):
             raise ValueError(f"unsafe field at {path}: URI values are not allowed")
         if re.search(r"\b[^\s@]+@[^\s@]+\.[^\s@]+\b", stripped):
@@ -5084,18 +5232,28 @@ def _validate_context_keys(
 
 def _validate_typed_context_values(value: object, *, context: str, path: str) -> None:
     if isinstance(value, Mapping):
+        if "date_from" in value and "date_to" in value:
+            date_from = _canonical_context_date(value["date_from"], f"{path}.date_from")
+            date_to = _canonical_context_date(value["date_to"], f"{path}.date_to")
+            if date_to < date_from:
+                raise ValueError(f"{path}.date_to cannot precede date_from")
         for key, item in value.items():
             item_path = f"{path}.{key}"
             if key in {"origin", "destination"}:
                 if not isinstance(item, str) or not re.fullmatch(r"[A-Z0-9]{3}", item):
                     raise ValueError(f"{item_path} must be a normalized IATA code")
-            elif key in {"date", "departure_date", "return_date"} and item is not None:
-                if not isinstance(item, str):
-                    raise TypeError(f"{item_path} must be an ISO date string")
-                try:
-                    date.fromisoformat(item)
-                except ValueError as error:
-                    raise ValueError(f"{item_path} must be an ISO date string") from error
+            elif (
+                key
+                in {
+                    "date",
+                    "departure_date",
+                    "return_date",
+                    "date_from",
+                    "date_to",
+                }
+                and item is not None
+            ):
+                _canonical_context_date(item, item_path)
             elif key in {
                 "poll_round",
                 "round",
@@ -5108,6 +5266,21 @@ def _validate_typed_context_values(value: object, *, context: str, path: str) ->
             }:
                 if type(item) is not int or item < 0:
                     raise ValueError(f"{item_path} must be a non-negative integer")
+            elif key in {"max_destination_seeds", "seed_limit"}:
+                if type(item) is not int or item <= 0:
+                    raise ValueError(f"{item_path} must be a positive integer")
+            elif key == "source_id":
+                if not isinstance(item, str) or not re.fullmatch(r"[a-z][a-z0-9_]{2,79}", item):
+                    raise ValueError(f"{item_path} must be a stable source id")
+            elif key == "source_signal_id":
+                if not isinstance(item, str):
+                    raise TypeError(f"{item_path} must be a canonical UUID string")
+                try:
+                    parsed_source_signal_id = UUID(item)
+                except ValueError as error:
+                    raise ValueError(f"{item_path} must be a canonical UUID string") from error
+                if str(parsed_source_signal_id) != item:
+                    raise ValueError(f"{item_path} must be a canonical UUID string")
             elif key in {"route", "airports", "origins", "destinations"}:
                 if not isinstance(item, Sequence) or isinstance(item, (str, bytes, bytearray)):
                     raise TypeError(f"{item_path} must be an ordered code collection")
@@ -5128,6 +5301,18 @@ def _validate_typed_context_values(value: object, *, context: str, path: str) ->
             _validate_typed_context_values(item, context=context, path=f"{path}[{index}]")
 
 
+def _canonical_context_date(value: object, path: str) -> date:
+    if not isinstance(value, str):
+        raise TypeError(f"{path} must be an ISO date string")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError(f"{path} must be an ISO date string") from error
+    if parsed.isoformat() != value:
+        raise ValueError(f"{path} must be a canonical ISO date string")
+    return parsed
+
+
 def _permit_digest(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -5138,7 +5323,11 @@ def _expected_attempt_kind(operation: Mapping[Any, Any]) -> AttemptKind:
     kind = AgentOperationKind(str(operation["operation_kind"]))
     if kind is AgentOperationKind.EXACT_POLL:
         return AttemptKind.POLL
-    if kind in {AgentOperationKind.CALENDAR_SEARCH, AgentOperationKind.EXACT_START}:
+    if kind in {
+        AgentOperationKind.CALENDAR_SEARCH,
+        AgentOperationKind.EXACT_START,
+        AgentOperationKind.SUGGEST_DISCOVERY,
+    }:
         return AttemptKind.START
     raise AgentOperationConflict("agent_operation_not_networked")
 
@@ -5204,8 +5393,6 @@ def _validate_new_operation(operation: NewAgentRunOperation) -> tuple[str, str |
     ):
         raise TypeError("operation ownership ids must be UUID values")
     kind = AgentOperationKind(operation.kind)
-    if kind is AgentOperationKind.SUGGEST_DISCOVERY:
-        raise AgentOperationConflict("agent_operation_kind_not_budgeted")
     if operation.logical_root_operation_id is not None and not isinstance(
         operation.logical_root_operation_id, UUID
     ):
@@ -5237,6 +5424,11 @@ def _validate_new_operation(operation: NewAgentRunOperation) -> tuple[str, str |
         "logical_operation_fingerprint",
     )
     _require_aware(operation.created_at, "created_at")
+    if (
+        kind is AgentOperationKind.SUGGEST_DISCOVERY
+        and "seed_limit" not in operation.immutable_input
+    ):
+        raise ValueError("suggest discovery operation requires seed_limit")
     immutable_input_json = canonical_operation_input_json(operation.immutable_input)
     private_continuation_json = (
         _canonical_private_continuation_json(operation.private_continuation)
@@ -5503,8 +5695,8 @@ def _validate_money_fields(amount_minor: int | None, currency: str | None) -> No
         if currency is not None:
             raise ValueError("currency requires amount_minor")
         return
-    if type(amount_minor) is not int or amount_minor < 0:
-        raise ValueError("amount_minor must be a non-negative integer or None")
+    if type(amount_minor) is not int or amount_minor < 0 or amount_minor > MAX_MONEY_MINOR_UNITS:
+        raise ValueError("amount_minor must fit the non-negative persistence range or be None")
     if not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency):
         raise ValueError("currency must be an uppercase ISO code")
 

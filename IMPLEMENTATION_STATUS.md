@@ -142,15 +142,35 @@ Alembic has the single `0024_agent_execution_ledger` head. Accepted executor
 hardening is `c0d7de6`; deterministic clean-environment gates are `98147bc`.
 No live provider call was made and the user's local database was untouched.
 
-Task 10 pending slice plan: complete deterministic QUICK and FULL finite-scope
-coverage plus nearby, country, region and bounded-anywhere execution. Freeze all
-finite airport codes before approval; record taxonomy/catalog versions and
-nearby distances; atomically freeze the first successful anywhere destination
-snapshot; collapse aliases; and expose an honest per-pair coverage report with
-attempted, succeeded, failed and skipped reasons. Prove that later catalog/feed
-changes cannot alter an approved run, unknown ground cost stays unknown, and no
-silently skipped pair can be reported as full. All provider work remains
-fixture-only for this slice.
+Task 10 implementation candidate on 2026-07-16 is hardened and awaiting a new
+independent manifest review. QUICK and FULL execute every frozen finite
+airport/date pair for airport, city, country, region and nearby scopes; aliases
+collapse, same-airport pairs are excluded, taxonomy/catalog versions and nearby
+distances are frozen before approval, and unknown ground cost remains unknown.
+Bounded ANYWHERE discovery queries every approved origin/source binding, stores
+typed Aviasales hot-offer signals, and then atomically freezes one immutable
+ordered destination/source-signal snapshot before exact searches. Later catalog
+or feed changes cannot expand the approved run. Public run views expose an
+honest per-pair coverage report; corrupt projections fail closed, and incomplete
+FULL coverage remains `partial` with stable reasons. Migration
+`0025_agent_anywhere_discovery` is the candidate single head. The exact
+four-file Task 10 plan gate passes 231 tests; provider, persistence and worker
+regressions pass 382 tests; all 1,362 unit tests and all 4 integration tests pass.
+Fresh full mypy passes all 118 source files, Ruff reports 288 formatted files
+and all checks passing, the security scan reports zero findings, the 10 focused
+ops/release/Compose tests pass, `docker compose config --quiet` passes with a
+process-only validation secret, and Alembic has the single `0025` head.
+
+The rejected pre-hardening freeze is superseded. Its four Important findings
+are fixed test-first: curl now returns libcurl's real write-error sentinel on
+overflow; hot-offer date/catalog/existing-destination filters run before the
+durable remaining-capacity quota; ANYWHERE discovery is capped at 12 inclusive
+months at planning/scope/snapshot/client boundaries; and all money entering the
+agent path fits the shared signed SQL `Integer` ceiling. The bounded parser still
+validates every in-bounds row and constructs only the deterministic selected
+top-K. No live provider call was made and no user database was opened or
+migrated. Task 10 is not accepted or committed until both independent re-review
+gates accept the same new manifest.
 
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic

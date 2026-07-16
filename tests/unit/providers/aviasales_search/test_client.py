@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import copy
 import json
 import traceback
 from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import pytest
+from curl_cffi.curl import CURL_WRITEFUNC_ERROR
 
+import flight_hunter.providers.aviasales_search.client as client_module
 from flight_hunter.domain.agent_search import LocationScopeKind
+from flight_hunter.domain.money import MAX_MONEY_MINOR_UNITS
 from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchAuthFailed,
     AviasalesSearchBlocked,
@@ -25,6 +30,9 @@ from flight_hunter.providers.aviasales_search.client import (
 from flight_hunter.providers.aviasales_search.schemas import ProviderLocation
 
 FIXTURE = Path("tests/fixtures/provider/aviasales_search/raw_chunk_mow_led.json")
+HOT_OFFERS_FIXTURE = Path(
+    "tests/fixtures/provider/aviasales_search/hot_offers_nested_apk_contract.json"
+)
 RESULTS_HOST = "results-fixture.aviasales.ru"
 
 
@@ -40,8 +48,10 @@ class _FakeResponse:
         self._payload = payload
         self.content = b"x" if payload is not None else b""
         self.headers = headers or {}
+        self.json_calls = 0
 
     def json(self) -> Any:
+        self.json_calls += 1
         return self._payload
 
     @property
@@ -515,36 +525,428 @@ def test_suggest_places_uses_suggest_host_and_sanitizes_items() -> None:
     assert transport.get_calls[0]["params"]["marker"] == "mobile_app.token"
 
 
-def test_hot_offers_uses_explore_host_and_returns_typed_summary() -> None:
+def test_hot_offers_uses_verified_nested_contract_and_exact_departure_months() -> None:
     transport = _FakeTransport(
-        gets=[
-            _FakeResponse(
-                payload={
-                    "tickets": [
-                        {
-                            "origin": "MOW",
-                            "destination": "LED",
-                            "departure_date": "2026-09-15",
-                            "return_date": None,
-                            "price": {"value": 1234},
-                            "currency": "rub",
-                        }
-                    ]
-                }
-            )
-        ]
+        gets=[_FakeResponse(payload=json.loads(HOT_OFFERS_FIXTURE.read_text(encoding="utf-8")))]
     )
     client = _client(transport)
 
-    offers = client.hot_offers(origin="mow", currency="rub")
+    offers = client.hot_offers(
+        origin="svo",
+        origin_type="airport",
+        currency="rub",
+        date_from=date(2026, 9, 15),
+        date_to=date(2026, 11, 2),
+    )
 
-    assert offers[0].origin == "MOW"
-    assert offers[0].destination == "LED"
+    assert len(offers) == 2
+    assert offers[0].origin == "SVO"
+    assert offers[0].destination == "CDG"
+    assert offers[0].departure_date == "2026-09-15"
     assert offers[0].price_minor_units == 123_400
     assert offers[0].currency == "RUB"
+    assert offers[1].departure_date == "2026-09-16"
+    assert offers[1].destination == "ORY"
+    assert offers[1].price_minor_units == 99_900
+    assert not hasattr(offers[0], "signature")
+    assert "fixture-hot-offer-signature" not in repr(offers)
     assert transport.get_calls[0]["url"] == (
         "https://explore-api.aviasales.ru/v1/hot_offers/list.json"
     )
+    assert transport.get_calls[0]["params"] == {
+        "origin": "SVO",
+        "origin_type": "airport",
+        "market": "RU",
+        "passport_country": "RU",
+        "language": "ru",
+        "currency": "rub",
+        "one_way": "true",
+        "sort_type": "price",
+        "with_baggage": "false",
+        "direct": "false",
+        "depart_months[]": ["2026-09", "2026-10", "2026-11"],
+        "marker": "mobile_app.token",
+    }
+
+
+def test_hot_offers_rejects_oversized_body_before_json_decode() -> None:
+    response = _FakeResponse(payload=json.loads(HOT_OFFERS_FIXTURE.read_text(encoding="utf-8")))
+    response.content = b"x" * (client_module._HOT_OFFERS_MAX_RESPONSE_BYTES + 1)
+    client = _client(_FakeTransport(gets=[response]))
+
+    with pytest.raises(AviasalesSearchSchemaError):
+        client.hot_offers(origin="SVO", max_results=1)
+
+    assert response.json_calls == 0
+
+
+@pytest.mark.parametrize(
+    "collection",
+    (
+        "directions",
+        "direction_tags",
+        "tags_order",
+        "filters_order",
+        "entity_airports",
+        "segments",
+        "flight_legs",
+        "transfers",
+        "technical_stops",
+    ),
+)
+def test_hot_offers_rejects_oversized_nested_collections(collection: str) -> None:
+    payload: dict[str, Any] = json.loads(HOT_OFFERS_FIXTURE.read_text(encoding="utf-8"))
+    direction = payload["directions"][0]
+    price = direction["ticket"]["price"]
+    segment = price["segments"][0]
+    flight_leg = segment["flightLegs"][0]
+    if collection == "directions":
+        payload["directions"] = [direction] * (client_module._HOT_OFFERS_MAX_DIRECTIONS + 1)
+    elif collection == "direction_tags":
+        direction["tags"] = ["tag"] * (client_module._HOT_OFFERS_MAX_TAGS + 1)
+    elif collection == "tags_order":
+        payload["tags_order"] = ["tag"] * (client_module._HOT_OFFERS_MAX_TAGS + 1)
+    elif collection == "filters_order":
+        payload["filters_order"] = ["filter"] * (client_module._HOT_OFFERS_MAX_FILTERS + 1)
+    elif collection == "entity_airports":
+        payload["entities_info"] = {
+            "airports": {
+                f"airport-{index}": {}
+                for index in range(client_module._HOT_OFFERS_MAX_ENTITY_ITEMS + 1)
+            }
+        }
+    elif collection == "segments":
+        price["segments"] = [segment] * (client_module._HOT_OFFERS_MAX_SEGMENTS + 1)
+    elif collection == "flight_legs":
+        segment["flightLegs"] = [flight_leg] * (client_module._HOT_OFFERS_MAX_FLIGHT_LEGS + 1)
+    elif collection == "transfers":
+        segment["transfers"] = ["transfer"] * (client_module._HOT_OFFERS_MAX_TRANSFERS + 1)
+    else:
+        flight_leg["technicalStops"] = ["stop"] * (
+            client_module._HOT_OFFERS_MAX_TECHNICAL_STOPS + 1
+        )
+
+    with pytest.raises(AviasalesSearchSchemaError):
+        _client(_FakeTransport(gets=[_FakeResponse(payload=payload)])).hot_offers(
+            origin="SVO",
+            max_results=1,
+        )
+
+
+def test_hot_offers_caps_returned_objects_but_validates_the_full_payload() -> None:
+    payload: dict[str, Any] = json.loads(HOT_OFFERS_FIXTURE.read_text(encoding="utf-8"))
+    client = _client(_FakeTransport(gets=[_FakeResponse(payload=copy.deepcopy(payload))]))
+
+    assert len(client.hot_offers(origin="SVO", max_results=1)) == 1
+
+    payload["directions"][0]["sale_ticket"]["price"]["segments"] = []
+    with pytest.raises(AviasalesSearchSchemaError):
+        _client(_FakeTransport(gets=[_FakeResponse(payload=payload)])).hot_offers(
+            origin="SVO",
+            max_results=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "filters",
+    (
+        {
+            "date_from": date(2026, 9, 16),
+            "date_to": date(2026, 9, 16),
+        },
+        {
+            "date_from": date(2026, 9, 15),
+            "date_to": date(2026, 9, 16),
+            "allowed_destination_airports": frozenset({"ORY"}),
+        },
+        {
+            "date_from": date(2026, 9, 15),
+            "date_to": date(2026, 9, 16),
+            "allowed_destination_airports": frozenset({"CDG", "ORY"}),
+            "excluded_destination_airports": frozenset({"CDG"}),
+        },
+    ),
+)
+def test_hot_offers_applies_approved_filters_before_consuming_result_limit(
+    filters: dict[str, object],
+) -> None:
+    payload = json.loads(HOT_OFFERS_FIXTURE.read_text(encoding="utf-8"))
+    client = _client(_FakeTransport(gets=[_FakeResponse(payload=payload)]))
+
+    offers = client.hot_offers(origin="SVO", max_results=1, **filters)  # type: ignore[arg-type]
+
+    assert [(offer.destination, offer.departure_date) for offer in offers] == [
+        ("ORY", "2026-09-16")
+    ]
+
+
+def test_hot_offers_keeps_only_cheapest_eligible_row_per_destination() -> None:
+    payload: dict[str, Any] = json.loads(HOT_OFFERS_FIXTURE.read_text(encoding="utf-8"))
+    sale_price = payload["directions"][0]["sale_ticket"]["price"]
+    sale_price["segments"][0]["flightLegs"][0]["destination"] = "CDG"
+    client = _client(_FakeTransport(gets=[_FakeResponse(payload=payload)]))
+
+    offers = client.hot_offers(
+        origin="SVO",
+        date_from=date(2026, 9, 15),
+        date_to=date(2026, 9, 16),
+        max_results=2,
+        allowed_destination_airports=frozenset({"CDG"}),
+    )
+
+    assert [(offer.destination, offer.price_minor_units) for offer in offers] == [("CDG", 99_900)]
+
+
+def test_hot_offers_rejects_price_above_persistence_ceiling() -> None:
+    payload: dict[str, Any] = json.loads(HOT_OFFERS_FIXTURE.read_text(encoding="utf-8"))
+    payload["directions"][0]["ticket"]["price"]["value"] = (MAX_MONEY_MINOR_UNITS // 100) + 1
+
+    with pytest.raises(AviasalesSearchSchemaError):
+        _client(_FakeTransport(gets=[_FakeResponse(payload=payload)])).hot_offers(
+            origin="SVO",
+            max_results=1,
+        )
+
+
+def test_curl_transport_aborts_download_above_the_byte_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "private-bounded-download-sentinel"
+
+    def oversized_get(_url: str, **kwargs: Any) -> object:
+        callback = kwargs["content_callback"]
+        assert callback(b"1234") == 4
+        assert callback(b"56789") == CURL_WRITEFUNC_ERROR
+        raise client_module.cc.RequestsError(sentinel)
+
+    monkeypatch.setattr(client_module.cc, "get", oversized_get)
+    transport = CurlCffiTransport(max_response_bytes=8)
+
+    with pytest.raises(AviasalesSearchSchemaError) as raised:
+        transport.get(
+            "https://explore-api.aviasales.ru/v1/hot_offers/list.json",
+            params={},
+            headers={},
+            timeout=1.0,
+        )
+
+    _assert_private_sentinel_absent(raised.value, sentinel)
+
+
+def test_curl_transport_reconstructs_a_response_from_bounded_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def successful_get(_url: str, **kwargs: Any) -> client_module.cc.Response:
+        callback = kwargs["content_callback"]
+        assert callback(b'{"ok":') == 6
+        assert callback(b"true}") == 5
+        return client_module.cc.Response()
+
+    monkeypatch.setattr(client_module.cc, "get", successful_get)
+
+    response = CurlCffiTransport(max_response_bytes=11).get(
+        "https://explore-api.aviasales.ru/v1/hot_offers/list.json",
+        params={},
+        headers={},
+        timeout=1.0,
+    )
+
+    assert response.content == b'{"ok":true}'
+    assert response.json() == {"ok": True}
+
+
+def test_transport_schema_failure_is_not_retried_or_reclassified() -> None:
+    class _SchemaTransport(_FakeTransport):
+        def get(
+            self,
+            url: str,
+            *,
+            params: Mapping[str, Any],
+            headers: Mapping[str, str],
+            timeout: float,
+        ) -> _FakeResponse:
+            self.get_calls.append(
+                {"url": url, "params": dict(params), "headers": dict(headers), "timeout": timeout}
+            )
+            raise AviasalesSearchSchemaError()
+
+    transport = _SchemaTransport()
+    client = AviasalesSearchClient(
+        signature="sig",
+        marker="mobile_app.token",
+        transport=transport,
+        timeout=5.0,
+        max_retries=2,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    with pytest.raises(AviasalesSearchSchemaError):
+        client.hot_offers(origin="SVO", max_results=1)
+
+    assert len(transport.get_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            "tickets": [
+                {
+                    "origin": "SVO",
+                    "destination": "CDG",
+                    "departure_date": "2026-09-15",
+                    "price": {"value": 1234},
+                    "currency": "rub",
+                }
+            ]
+        },
+        {
+            "origin": {},
+            "directions": [{"destination_iata": "CDG", "ticket": {"price": {}}}],
+            "sale_info": None,
+            "entities_info": {},
+            "tags_order": None,
+            "filters_order": [],
+        },
+    ),
+)
+def test_hot_offers_rejects_flat_or_malformed_nested_payload(payload: object) -> None:
+    client = _client(_FakeTransport(gets=[_FakeResponse(payload=payload)]))
+
+    with pytest.raises(AviasalesSearchSchemaError) as raised:
+        client.hot_offers(
+            origin="SVO",
+            currency="RUB",
+            date_from=date(2026, 9, 1),
+            date_to=date(2026, 9, 30),
+        )
+
+    assert str(raised.value) == AviasalesSearchSchemaError.code
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ("empty_segments", "empty_flight_legs", "missing_flight_leg_field", "city_mismatch"),
+)
+def test_hot_offers_rejects_missing_or_malformed_airport_itinerary(corruption: str) -> None:
+    payload: dict[str, Any] = json.loads(HOT_OFFERS_FIXTURE.read_text(encoding="utf-8"))
+    direction = payload["directions"][0]
+    price = direction["ticket"]["price"]
+    if corruption == "empty_segments":
+        price["segments"] = []
+    elif corruption == "empty_flight_legs":
+        price["segments"][0]["flightLegs"] = []
+    elif corruption == "missing_flight_leg_field":
+        del price["segments"][0]["flightLegs"][0]["destination"]
+    else:
+        direction["destination_iata"] = "LON"
+    client = _client(_FakeTransport(gets=[_FakeResponse(payload=payload)]))
+
+    with pytest.raises(AviasalesSearchSchemaError):
+        client.hot_offers(
+            origin="SVO",
+            currency="RUB",
+            date_from=date(2026, 9, 1),
+            date_to=date(2026, 9, 30),
+        )
+
+
+def _hot_offer_with_connection(*, continuous: bool) -> dict[str, Any]:
+    payload: dict[str, Any] = json.loads(HOT_OFFERS_FIXTURE.read_text(encoding="utf-8"))
+    segment = payload["directions"][0]["ticket"]["price"]["segments"][0]
+    first_leg = segment["flightLegs"][0]
+    first_leg["destination"] = "BEG"
+    first_leg["localArrivalTime"] = "11:00"
+    segment["flightLegs"].append(
+        {
+            "localArrivalDate": "2026-09-15",
+            "localArrivalTime": "13:30",
+            "localDepartDate": "2026-09-15",
+            "localDepartTime": "12:00",
+            "origin": "BEG" if continuous else "VIE",
+            "destination": "CDG",
+            "carrier": "FH",
+            "technicalStops": [],
+            "flightNumber": "202",
+            "aircraftCode": "320",
+            "durationSeconds": 5400,
+            "equipmentType": "aircraft",
+        }
+    )
+    return payload
+
+
+def test_hot_offers_derives_first_and_last_airports_across_connection_legs() -> None:
+    client = _client(
+        _FakeTransport(gets=[_FakeResponse(payload=_hot_offer_with_connection(continuous=True))])
+    )
+
+    offer = client.hot_offers(
+        origin="SVO",
+        currency="RUB",
+        date_from=date(2026, 9, 1),
+        date_to=date(2026, 9, 30),
+    )[0]
+
+    assert (offer.origin, offer.destination) == ("SVO", "CDG")
+
+
+def test_hot_offers_rejects_discontinuous_connection_legs() -> None:
+    client = _client(
+        _FakeTransport(gets=[_FakeResponse(payload=_hot_offer_with_connection(continuous=False))])
+    )
+
+    with pytest.raises(AviasalesSearchSchemaError):
+        client.hot_offers(
+            origin="SVO",
+            currency="RUB",
+            date_from=date(2026, 9, 1),
+            date_to=date(2026, 9, 30),
+        )
+
+
+@pytest.mark.parametrize(
+    ("date_from", "date_to", "error_type"),
+    (
+        (date(2026, 10, 1), date(2026, 9, 30), ValueError),
+        ("2026-09-01", date(2026, 9, 30), TypeError),
+    ),
+)
+def test_hot_offers_rejects_invalid_approved_bounds_before_transport(
+    date_from: object,
+    date_to: object,
+    error_type: type[Exception],
+) -> None:
+    transport = _FakeTransport()
+
+    with pytest.raises(error_type):
+        _client(transport).hot_offers(
+            origin="SVO",
+            date_from=date_from,  # type: ignore[arg-type]
+            date_to=date_to,  # type: ignore[arg-type]
+        )
+
+    assert transport.get_calls == []
+
+
+def test_hot_offers_rejects_more_than_twelve_departure_months_before_transport() -> None:
+    transport = _FakeTransport()
+
+    with pytest.raises(ValueError, match="months"):
+        _client(transport).hot_offers(
+            origin="SVO",
+            date_from=date(2026, 1, 1),
+            date_to=date(2027, 1, 1),
+        )
+
+    assert transport.get_calls == []
+
+
+def test_hot_offer_month_generation_handles_latest_representable_month() -> None:
+    assert client_module._hot_offer_departure_months(
+        date_from=date(9999, 12, 1),
+        date_to=date(9999, 12, 31),
+    ) == ("9999-12",)
 
 
 def test_calendar_prices_uses_explore_calendar_and_filters_invalid_rows() -> None:

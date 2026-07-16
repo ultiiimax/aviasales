@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -258,11 +258,16 @@ def create_agent_router(
     @router.get("/{plan_id}/runs", response_model=AgentRunListResponse)
     async def list_runs(
         plan_id: UUID,
+        limit: int = Query(default=100, ge=1, le=100),
         auth: AuthSession = Depends(require_bearer_session),
     ) -> AgentRunListResponse:
         async with session_factory() as session:
             try:
-                views = await service(session).list_runs(auth.household_id, plan_id)
+                views = await service(session).list_runs(
+                    auth.household_id,
+                    plan_id,
+                    limit=limit,
+                )
             except AgentLifecycleError as error:
                 raise _route_lifecycle_error(error) from error
         return AgentRunListResponse(runs=[AgentRunResponse.from_view(view) for view in views])

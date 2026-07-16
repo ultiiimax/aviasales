@@ -12,11 +12,16 @@ from hashlib import sha256
 from importlib.resources import files
 from typing import Literal, Protocol, cast
 
-from flight_hunter.domain.agent_search import LocationScope, LocationScopeKind
-from flight_hunter.geo.airports import Airport, AirportCatalogSnapshot, distance_km
+from flight_hunter.domain.agent_search import (
+    MAX_ANYWHERE_DISCOVERY_MONTHS,
+    LocationScope,
+    LocationScopeKind,
+    inclusive_month_count,
+)
+from flight_hunter.geo.airports import Airport, AirportCatalogSnapshot, distance_km_raw
 
 _COUNTRY_CODE_RE = re.compile(r"^[A-Z]{2}$")
-_DISCOVERY_SOURCE_IDS = ("aviasales_calendar", "aviasales_hot_offers")
+_DISCOVERY_SOURCE_IDS = ("aviasales_hot_offers",)
 _ASSIGNED_ISO_COUNTRY_COUNT = 250
 _REJECTED_NON_ISO_COUNTRY_CODES = frozenset({"AC", "CP", "DG", "EA", "IC", "TA", "XK"})
 
@@ -63,6 +68,87 @@ class FrozenAirportScope:
     commercial_provenance: str
     coverage: CoverageMode
     nearby_radius_km: int
+    airport_candidates: tuple[ScopeAirportCandidate, ...]
+    catalog_airport_countries: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeAirportCandidate:
+    airport: Airport
+    discovery_evidence_count: int
+    commercial_relevance: int
+    nearby_distance_km: int | None
+    ground_transfer_cost_minor: int | None
+    ground_transfer_currency: str | None
+    added_by_nearby: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.airport, Airport):
+            raise TypeError("airport must be an Airport")
+        for field_name in ("discovery_evidence_count", "commercial_relevance"):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{field_name} must be a non-negative integer")
+        if self.nearby_distance_km is not None and (
+            type(self.nearby_distance_km) is not int or self.nearby_distance_km < 0
+        ):
+            raise ValueError("nearby_distance_km must be a non-negative integer or None")
+        if self.ground_transfer_cost_minor is not None and (
+            type(self.ground_transfer_cost_minor) is not int or self.ground_transfer_cost_minor < 0
+        ):
+            raise ValueError("ground_transfer_cost_minor must be non-negative or None")
+        if (self.ground_transfer_cost_minor is None) != (self.ground_transfer_currency is None):
+            raise ValueError("ground transfer amount and currency must be known together")
+        if self.ground_transfer_currency is not None:
+            normalized_currency = self.ground_transfer_currency.strip().upper()
+            if not re.fullmatch(r"^[A-Z]{3}$", normalized_currency):
+                raise ValueError("ground_transfer_currency must be an ISO currency")
+            object.__setattr__(self, "ground_transfer_currency", normalized_currency)
+        if type(self.added_by_nearby) is not bool:
+            raise TypeError("added_by_nearby must be a boolean")
+
+    @property
+    def ground_cost_uncertain(self) -> bool:
+        return self.added_by_nearby and self.ground_transfer_cost_minor is None
+
+
+def quick_scope_key(candidate: ScopeAirportCandidate) -> tuple[int, int, int, str]:
+    if not isinstance(candidate, ScopeAirportCandidate):
+        raise TypeError("candidate must be a ScopeAirportCandidate")
+    return (
+        -candidate.discovery_evidence_count,
+        -candidate.commercial_relevance,
+        candidate.nearby_distance_km or 0,
+        candidate.airport.iata_code,
+    )
+
+
+def finite_route_pairs(
+    origin_airports: tuple[str, ...],
+    destination_airports: tuple[str, ...],
+) -> tuple[tuple[str, str], ...]:
+    origins = _ordered_iata_codes(origin_airports, "origin_airports")
+    destinations = _ordered_iata_codes(destination_airports, "destination_airports")
+    pairs = tuple(
+        (origin, destination)
+        for origin in origins
+        for destination in destinations
+        if origin != destination
+    )
+    if not pairs:
+        raise ValueError("finite route surface cannot be empty")
+    return pairs
+
+
+def _ordered_iata_codes(values: tuple[str, ...], field_name: str) -> tuple[str, ...]:
+    if isinstance(values, str):
+        raise TypeError(f"{field_name} must be an ordered collection")
+    normalized = tuple(value.strip().upper() for value in values)
+    if not normalized or any(not re.fullmatch(r"^[A-Z]{3}$", value) for value in normalized):
+        raise ValueError(f"{field_name} must contain IATA codes")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(f"{field_name} must contain unique IATA codes")
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +163,7 @@ class AnywhereDiscoveryRule:
     exact_verification_limit: int
     catalog_checksum: str
     taxonomy_version: str
+    eligible_destination_countries: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,17 +307,17 @@ class ScopeResolver:
                 taxonomy_version=self._taxonomy_version_for(scope.kind),
             )
 
-        expanded = _expand_nearby(selected, searchable, nearby_radius_km)
-        ordered = tuple(sorted(expanded, key=lambda airport: airport.iata_code))
+        candidates = _scope_airport_candidates(selected, searchable, nearby_radius_km)
+        ordered = tuple(sorted(candidates, key=lambda item: item.airport.iata_code))
         if normalized_coverage is CoverageMode.QUICK:
             assert quick_limit is not None
-            ordered = ordered[:quick_limit]
+            ordered = tuple(sorted(ordered, key=quick_scope_key)[:quick_limit])
         provenances = tuple(
             sorted(
                 {
-                    airport.commercial_provenance
-                    for airport in ordered
-                    if airport.commercial_provenance is not None
+                    candidate.airport.commercial_provenance
+                    for candidate in ordered
+                    if candidate.airport.commercial_provenance is not None
                 }
             )
         )
@@ -239,12 +326,16 @@ class ScopeResolver:
         )
         return FrozenAirportScope(
             requested_scope=scope,
-            airport_codes=tuple(airport.iata_code for airport in ordered),
+            airport_codes=tuple(candidate.airport.iata_code for candidate in ordered),
             catalog_checksum=snapshot.checksum,
             taxonomy_version=self._taxonomy_version_for(scope.kind),
             commercial_provenance=commercial_provenance,
             coverage=normalized_coverage,
             nearby_radius_km=nearby_radius_km,
+            airport_candidates=ordered,
+            catalog_airport_countries=tuple(
+                (airport.iata_code, airport.country_code) for airport in searchable
+            ),
         )
 
     def build_anywhere_rule(
@@ -264,6 +355,12 @@ class ScopeResolver:
             raise TypeError("anywhere date bounds must be dates")
         if date_end < date_start:
             raise ValueError("date_end cannot be before date_start")
+        month_count = inclusive_month_count(date_start, date_end)
+        if month_count > MAX_ANYWHERE_DISCOVERY_MONTHS:
+            raise ValueError(
+                "anywhere discovery cannot span more than "
+                f"{MAX_ANYWHERE_DISCOVERY_MONTHS} inclusive months"
+            )
         allowed = self._normalized_country_codes(allowed_country_codes)
         excluded = self._normalized_country_codes(excluded_country_codes)
         if set(allowed) & set(excluded):
@@ -274,6 +371,18 @@ class ScopeResolver:
             raise ValueError("exact_verification_limit must be a positive integer")
         if exact_verification_limit > max_destination_seeds:
             raise ValueError("exact_verification_limit cannot exceed max_destination_seeds")
+        origin_codes = set(frozen_origins.airport_codes)
+        binding_count = len(origin_codes) * len(_DISCOVERY_SOURCE_IDS)
+        max_destination_seeds = max(max_destination_seeds, binding_count)
+        eligible_destination_countries = tuple(
+            (code, country_code)
+            for code, country_code in frozen_origins.catalog_airport_countries
+            if code not in origin_codes
+            and (not allowed or country_code in allowed)
+            and country_code not in excluded
+        )
+        if not eligible_destination_countries:
+            raise ValueError("anywhere rule has no eligible catalog destinations")
         return AnywhereDiscoveryRule(
             origin_airports=frozen_origins.airport_codes,
             date_start=date_start,
@@ -285,6 +394,7 @@ class ScopeResolver:
             exact_verification_limit=exact_verification_limit,
             catalog_checksum=frozen_origins.catalog_checksum,
             taxonomy_version=self.taxonomy_version,
+            eligible_destination_countries=eligible_destination_countries,
         )
 
     def _select_base_airports(
@@ -386,22 +496,50 @@ def _validate_nearby_radius(nearby_radius_km: int) -> None:
         raise ValueError("nearby_radius_km must be a non-negative integer")
 
 
-def _expand_nearby(
+def _scope_airport_candidates(
     selected: tuple[Airport, ...],
     searchable: tuple[Airport, ...],
     radius_km: int,
-) -> tuple[Airport, ...]:
+) -> tuple[ScopeAirportCandidate, ...]:
+    selected_by_code = {airport.iata_code: airport for airport in selected}
+    distances: dict[str, int] = {code: 0 for code in selected_by_code}
+    added_codes: set[str] = set()
     if radius_km == 0:
-        return selected
-    selected_codes = {airport.iata_code for airport in selected}
-    expanded = list(selected)
-    for candidate in searchable:
-        if candidate.iata_code in selected_codes:
-            continue
-        if any(distance_km(origin, candidate) <= radius_km for origin in selected):
-            expanded.append(candidate)
-            selected_codes.add(candidate.iata_code)
-    return tuple(expanded)
+        expanded = tuple(selected_by_code.values())
+    else:
+        expanded_values = list(selected_by_code.values())
+        expanded_codes = set(selected_by_code)
+        for candidate in searchable:
+            if candidate.iata_code in expanded_codes:
+                continue
+            candidate_distance = min(distance_km_raw(origin, candidate) for origin in selected)
+            if candidate_distance <= radius_km:
+                expanded_values.append(candidate)
+                expanded_codes.add(candidate.iata_code)
+                added_codes.add(candidate.iata_code)
+                distances[candidate.iata_code] = round(candidate_distance)
+        expanded = tuple(expanded_values)
+    return tuple(
+        ScopeAirportCandidate(
+            airport=airport,
+            discovery_evidence_count=0,
+            commercial_relevance=_commercial_relevance(airport),
+            nearby_distance_km=distances.get(airport.iata_code),
+            ground_transfer_cost_minor=None,
+            ground_transfer_currency=None,
+            added_by_nearby=airport.iata_code in added_codes,
+        )
+        for airport in expanded
+    )
+
+
+def _commercial_relevance(airport: Airport) -> int:
+    # Airport size is frozen catalog evidence; no provider popularity is invented.
+    if airport.airport_type.value == "large_airport":
+        return 2
+    if airport.airport_type.value == "medium_airport":
+        return 1
+    return 0
 
 
 def _airport_matches_city_text(airport: Airport, normalized_query: str) -> bool:

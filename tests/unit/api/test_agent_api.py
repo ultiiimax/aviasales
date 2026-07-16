@@ -332,6 +332,7 @@ async def test_bounded_plan_exposes_sanitized_frozen_plan_card_summary(
                 "destination_airports": ["CDG"],
                 "anywhere": False,
                 "frozen": True,
+                "reciprocal_anywhere_return": False,
                 "nearby_radius_km": 0,
                 "date_mode": "flexible",
                 "date_start": "2026-10-09",

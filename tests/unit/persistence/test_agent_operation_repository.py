@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import event, func, insert, select, update
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -48,9 +48,11 @@ from flight_hunter.persistence.agent_repositories import (
     NewAgentRankingSnapshot,
     NewAgentRunScopeSnapshot,
     ServerPrivateCircuitPermit,
+    canonical_operation_input_json,
 )
 from flight_hunter.persistence.database import create_database_engine
 from flight_hunter.persistence.models import (
+    agent_plan_execution_approvals_table,
     agent_plan_runs_table,
     agent_provider_circuit_state_table,
     agent_provider_http_attempts_table,
@@ -71,6 +73,38 @@ OPERATION_ID = UUID("77777777-7777-7777-7777-777777777777")
 EVIDENCE_RESULT_ID = UUID("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
 SESSION_ID = UUID("12121212-1212-1212-1212-121212121212")
 NOW = datetime(2026, 7, 14, 10, 0, tzinfo=UTC)
+
+
+def test_exact_source_signal_id_has_a_canonical_uuid_contract() -> None:
+    source_signal_id = UUID("12345678-1234-5678-9234-567812345678")
+
+    encoded = canonical_operation_input_json(
+        {
+            "origin": "LED",
+            "destination": "CDG",
+            "source_signal_id": str(source_signal_id),
+        }
+    )
+
+    assert encoded == (
+        '{"destination":"CDG","origin":"LED",'
+        '"source_signal_id":"12345678-1234-5678-9234-567812345678"}'
+    )
+
+
+@pytest.mark.parametrize(
+    "source_signal_id",
+    (
+        "",
+        "not-a-uuid",
+        "12345678-1234-5678-9234-567812345678 ",
+        "abcdefab-cdef-4abc-8def-abcdefabcdef".upper(),
+        123,
+    ),
+)
+def test_exact_source_signal_id_rejects_noncanonical_uuid(source_signal_id: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        canonical_operation_input_json({"source_signal_id": source_signal_id})
 
 
 @pytest.mark.anyio
@@ -964,6 +998,205 @@ async def test_review_operation_stage_scope_and_private_state_are_household_scop
 
 
 @pytest.mark.anyio
+async def test_bulk_projection_reads_are_household_scoped_and_reject_oversized_ids_before_sql(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "bulk-projection-household.db")
+    await _seed_operation(sessions)
+    snapshot_id = UUID("99999999-9999-9999-9999-999999999998")
+    async with sessions() as session:
+        operations = AgentOperationRepository(session)
+        await operations.append_scope_snapshot(
+            NewAgentRunScopeSnapshot(
+                id=snapshot_id,
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                fingerprint="sha256:" + "b" * 64,
+                snapshot={"destinations": ["CDG"]},
+                created_at=NOW,
+            )
+        )
+        await AgentEvidenceRepository(session).append_discovery_signal(_discovery_result())
+        await session.commit()
+
+    async with sessions() as session:
+        plans = AgentPlanRepository(session)
+        operations = AgentOperationRepository(session)
+        evidence = AgentEvidenceRepository(session)
+
+        assert await plans.get_revisions_by_ids(OTHER_HOUSEHOLD_ID, (REVISION_ID,)) == {}
+        assert await operations.list_operations_for_runs(OTHER_HOUSEHOLD_ID, (RUN_ID,)) == {
+            RUN_ID: ()
+        }
+        assert (
+            await operations.get_scope_snapshots_for_runs(
+                OTHER_HOUSEHOLD_ID,
+                (RUN_ID,),
+            )
+            == {}
+        )
+        assert await evidence.list_discovery_signals_for_runs(
+            OTHER_HOUSEHOLD_ID,
+            (RUN_ID,),
+        ) == {RUN_ID: ()}
+
+        oversized = tuple(UUID(int=index + 1) for index in range(101))
+        queries = 0
+
+        def count_query(*_args: object) -> None:
+            nonlocal queries
+            queries += 1
+
+        event.listen(engine.sync_engine, "before_cursor_execute", count_query)
+        try:
+            with pytest.raises(ValueError, match="more than 100"):
+                await plans.get_revisions_by_ids(HOUSEHOLD_ID, oversized)
+            with pytest.raises(ValueError, match="more than 100"):
+                await operations.list_operations_for_runs(HOUSEHOLD_ID, oversized)
+            with pytest.raises(ValueError, match="more than 100"):
+                await operations.get_scope_snapshots_for_runs(HOUSEHOLD_ID, oversized)
+            with pytest.raises(ValueError, match="more than 100"):
+                await evidence.list_discovery_signals_for_runs(HOUSEHOLD_ID, oversized)
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", count_query)
+
+    assert queries == 0
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_list_runs_selects_newest_hundred_then_returns_that_page_in_ascending_order(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "run-list-newest-hundred.db")
+    await _seed_run_and_stage(sessions)
+    expected_run_ids: list[UUID] = []
+
+    async with sessions() as session:
+        revision = await AgentPlanRepository(session).get_revision(HOUSEHOLD_ID, REVISION_ID)
+        assert revision is not None
+        approval_rows: list[dict[str, object]] = []
+        run_rows: list[dict[str, object]] = []
+        for index in range(1, 101):
+            approval_id = UUID(int=0x1000 + index)
+            run_id = UUID(int=0x2000 + index)
+            created_at = NOW + timedelta(seconds=index)
+            expected_run_ids.append(run_id)
+            approval_rows.append(
+                {
+                    "id": str(approval_id),
+                    "household_id": str(HOUSEHOLD_ID),
+                    "plan_id": str(PLAN_ID),
+                    "revision_id": str(REVISION_ID),
+                    "approved_by_user_id": str(USER_ID),
+                    "revision_content_hash": revision.content_hash,
+                    "approved_by_session_id": str(SESSION_ID),
+                    "approved_budget_json": "{}",
+                    "approved_strategies_json": "[]",
+                    "risk_warning_versions_json": "{}",
+                    "approved_at": created_at,
+                    "expires_at": created_at + timedelta(hours=1),
+                    "consumed_at": created_at,
+                    "run_id": str(run_id),
+                }
+            )
+            run_rows.append(
+                {
+                    "id": str(run_id),
+                    "household_id": str(HOUSEHOLD_ID),
+                    "plan_id": str(PLAN_ID),
+                    "revision_id": str(REVISION_ID),
+                    "approval_id": str(approval_id),
+                    "execute_idempotency_key": f"newest-page:{index}",
+                    "status": "completed",
+                    "created_at": created_at,
+                    "deadline_at": created_at + timedelta(minutes=10),
+                    "started_at": created_at,
+                    "cancel_requested_at": None,
+                    "finished_at": created_at + timedelta(seconds=1),
+                    "error_code": None,
+                    "error_message": None,
+                    "logical_operation_budget": 0,
+                    "logical_operations_consumed": 0,
+                    "http_attempt_budget": 0,
+                    "http_attempts_consumed": 0,
+                }
+            )
+        await session.execute(insert(agent_plan_execution_approvals_table), approval_rows)
+        await session.execute(insert(agent_plan_runs_table), run_rows)
+        await session.commit()
+
+    async with sessions() as session:
+        page = await AgentRunRepository(session).list_runs(
+            HOUSEHOLD_ID,
+            PLAN_ID,
+            limit=100,
+        )
+
+    assert tuple(run.id for run in page) == tuple(expected_run_ids)
+    assert RUN_ID not in {run.id for run in page}
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_scope_snapshot_accepts_canonical_catalog_checksum(tmp_path: Path) -> None:
+    engine, sessions = await _session_factory(tmp_path, "scope-checksum.db")
+    await _seed_run_and_stage(sessions)
+    checksum = "sha256:" + "a" * 64
+
+    async with sessions() as session:
+        stored = await AgentOperationRepository(session).append_scope_snapshot(
+            NewAgentRunScopeSnapshot(
+                id=EVIDENCE_RESULT_ID,
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                fingerprint="sha256:" + "b" * 64,
+                snapshot={
+                    "origins": ["LED"],
+                    "destinations": ["CDG"],
+                    "catalog_checksum": checksum,
+                },
+                created_at=NOW,
+            )
+        )
+
+    assert stored.snapshot["catalog_checksum"] == checksum
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "checksum",
+    ("https://example.invalid/catalog", "sha256:ABC", "sha256:" + "A" * 64),
+)
+async def test_scope_snapshot_rejects_unsafe_or_noncanonical_catalog_checksum(
+    tmp_path: Path,
+    checksum: str,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "bad-scope-checksum.db")
+    await _seed_run_and_stage(sessions)
+
+    async with sessions() as session:
+        with pytest.raises(ValueError):
+            await AgentOperationRepository(session).append_scope_snapshot(
+                NewAgentRunScopeSnapshot(
+                    id=EVIDENCE_RESULT_ID,
+                    household_id=HOUSEHOLD_ID,
+                    run_id=RUN_ID,
+                    fingerprint="sha256:" + "b" * 64,
+                    snapshot={
+                        "origins": ["LED"],
+                        "destinations": ["CDG"],
+                        "catalog_checksum": checksum,
+                    },
+                    created_at=NOW,
+                )
+            )
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_stage_progress_and_stage_listing_are_derived_from_operation_rows(
     tmp_path: Path,
 ) -> None:
@@ -1322,30 +1555,298 @@ async def test_review_provider_neutral_operations_are_independent_and_consume_no
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("consumes", (False, True))
-async def test_review_suggest_discovery_is_rejected_until_it_has_an_approved_budget_category(
+async def test_suggest_discovery_is_a_budgeted_network_root_with_typed_result(
     tmp_path: Path,
-    consumes: bool,
 ) -> None:
-    engine, sessions = await _session_factory(tmp_path, f"suggest-budget-{consumes}.db")
+    engine, sessions = await _session_factory(tmp_path, "suggest-root.db")
     await _seed_run_and_stage(sessions, logical_budget=1, http_budget=1)
+    discovery_input = {
+        "origin": "LED",
+        "date_from": "2026-09-01",
+        "date_to": "2026-09-07",
+        "max_destination_seeds": 12,
+        "seed_limit": 12,
+        "source_id": "aviasales_hot_offers",
+        "currency": "RUB",
+        "adults": 1,
+        "children": 0,
+        "infants": 0,
+    }
 
     async with sessions() as session:
-        with pytest.raises(AgentOperationConflict) as captured:
+        repository = AgentOperationRepository(session)
+        operation = await OperationScheduler(repository).materialize(
+            replace(
+                _operation_spec(
+                    kind=AgentOperationKind.SUGGEST_DISCOVERY,
+                    immutable_input=discovery_input,
+                    logical_input=discovery_input,
+                    consumes_logical_unit=True,
+                ),
+                private_continuation=None,
+                logical_root_operation_id=None,
+            )
+        )
+        await session.commit()
+        assert operation.kind is AgentOperationKind.SUGGEST_DISCOVERY
+        assert operation.provider_id == "aviasales_search"
+        assert operation.consumes_logical_unit
+        assert operation.logical_root_operation_id is None
+
+    async with sessions() as session:
+        repository = AgentOperationRepository(session)
+        lease = await repository.claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-suggest",
+            now=NOW + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+        assert lease is not None and lease.operation.id == OPERATION_ID
+        await session.commit()
+
+    permit = await _issue_permit(
+        sessions,
+        operation_id=OPERATION_ID,
+        worker_id="worker-suggest",
+        now=NOW + timedelta(seconds=2),
+    )
+    async with sessions() as session:
+        repository = AgentOperationRepository(session)
+        reservation = await repository.reserve_http_attempt(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            worker_id="worker-suggest",
+            provider_id="aviasales_search",
+            attempt_kind=AttemptKind.START,
+            provider_rpm=20,
+            now=NOW + timedelta(seconds=3),
+            circuit_permit=permit,
+        )
+        assert reservation.status is AttemptReservationStatus.RESERVED
+        assert reservation.reservation_id is not None
+        signal = await AgentEvidenceRepository(session).append_discovery_signal(
+            replace(
+                _discovery_result(),
+                source_kind=DiscoverySource.HOT_OFFER,
+                freshness=Freshness.API_CACHED,
+            )
+        )
+        completed = await repository.mark_operation_succeeded(
+            household_id=HOUSEHOLD_ID,
+            operation_id=OPERATION_ID,
+            worker_id="worker-suggest",
+            result_type=AgentOperationResultType.DISCOVERY_SIGNAL,
+            result_id=signal.id,
+            now=NOW + timedelta(seconds=4),
+        )
+        await session.commit()
+
+        run = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
+        assert run is not None
+        assert run.logical_operations_consumed == 1
+        assert run.http_attempts_consumed == 1
+        assert completed.result_type is AgentOperationResultType.DISCOVERY_SIGNAL
+        assert completed.result_id == signal.id
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_suggest_discovery_counts_retry_as_retry_without_new_logical_unit(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "suggest-retry.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=2)
+    discovery_input = {
+        "origin": "LED",
+        "date_from": "2026-09-01",
+        "date_to": "2026-09-07",
+        "max_destination_seeds": 12,
+        "seed_limit": 12,
+        "source_id": "aviasales_hot_offers",
+        "currency": "RUB",
+    }
+    async with sessions() as session:
+        await OperationScheduler(AgentOperationRepository(session)).materialize(
+            replace(
+                _operation_spec(
+                    kind=AgentOperationKind.SUGGEST_DISCOVERY,
+                    immutable_input=discovery_input,
+                    logical_input=discovery_input,
+                ),
+                private_continuation=None,
+            )
+        )
+        await session.commit()
+
+    await _lease_operation(sessions, worker_id="worker-suggest")
+    async with sessions() as session:
+        await AgentOperationRepository(session).schedule_retry(
+            household_id=HOUSEHOLD_ID,
+            operation_id=OPERATION_ID,
+            worker_id="worker-suggest",
+            next_retry_at=NOW + timedelta(seconds=10),
+            error_code="provider_transport_error",
+            now=NOW + timedelta(seconds=1),
+        )
+        await session.commit()
+    async with sessions() as session:
+        lease = await AgentOperationRepository(session).claim_next_operation(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            worker_id="worker-suggest-retry",
+            now=NOW + timedelta(seconds=10),
+            lease_seconds=30,
+        )
+        await session.commit()
+        assert lease is not None and lease.operation.attempt_count == 2
+
+    permit = await _issue_permit(
+        sessions,
+        operation_id=OPERATION_ID,
+        worker_id="worker-suggest-retry",
+        now=NOW + timedelta(seconds=11),
+    )
+    async with sessions() as session:
+        repository = AgentOperationRepository(session)
+        with pytest.raises(AgentOperationConflict) as wrong_kind:
+            await repository.reserve_http_attempt(
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                operation_id=OPERATION_ID,
+                worker_id="worker-suggest-retry",
+                provider_id="aviasales_search",
+                attempt_kind=AttemptKind.START,
+                provider_rpm=20,
+                now=NOW + timedelta(seconds=12),
+                circuit_permit=permit,
+            )
+        assert wrong_kind.value.code == "agent_attempt_kind_invalid"
+        retry = await repository.reserve_http_attempt(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            worker_id="worker-suggest-retry",
+            provider_id="aviasales_search",
+            attempt_kind=AttemptKind.RETRY,
+            provider_rpm=20,
+            now=NOW + timedelta(seconds=12),
+            circuit_permit=permit,
+        )
+        await session.commit()
+        assert retry.status is AttemptReservationStatus.RESERVED
+        run = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
+        assert run is not None
+        assert run.logical_operations_consumed == 1
+        assert run.http_attempts_consumed == 1
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "invalid_field",
+    (
+        {"date_from": "not-a-date"},
+        {"date_to": 20260907},
+        {"date_from": "2026-09-08", "date_to": "2026-09-07"},
+        {"max_destination_seeds": -1},
+        {"max_destination_seeds": 0},
+        {"source_id": ""},
+    ),
+)
+async def test_suggest_discovery_rejects_invalid_frozen_input_before_budget_use(
+    tmp_path: Path,
+    invalid_field: dict[str, object],
+) -> None:
+    engine, sessions = await _session_factory(
+        tmp_path,
+        "suggest-invalid-" + next(iter(invalid_field)) + ".db",
+    )
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=1)
+    discovery_input: dict[str, object] = {
+        "origin": "LED",
+        "date_from": "2026-09-01",
+        "date_to": "2026-09-07",
+        "max_destination_seeds": 12,
+        "seed_limit": 12,
+        "source_id": "aviasales_hot_offers",
+        "currency": "RUB",
+    }
+    discovery_input.update(invalid_field)
+
+    async with sessions() as session:
+        with pytest.raises((TypeError, ValueError)):
             await OperationScheduler(AgentOperationRepository(session)).materialize(
                 replace(
                     _operation_spec(
                         kind=AgentOperationKind.SUGGEST_DISCOVERY,
-                        consumes_logical_unit=consumes,
+                        immutable_input=discovery_input,
+                        logical_input=discovery_input,
+                    ),
+                    private_continuation=None,
+                )
+            )
+        run = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
+        assert run is not None
+        assert run.logical_operations_consumed == 0
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_suggest_discovery_uses_approved_logical_budget_category(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "suggest-budget.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=1)
+    discovery_input = {
+        "origin": "LED",
+        "date_from": "2026-09-01",
+        "date_to": "2026-09-07",
+        "max_destination_seeds": 1,
+        "seed_limit": 1,
+        "source_id": "aviasales_hot_offers",
+        "currency": "RUB",
+        "adults": 1,
+        "children": 0,
+        "infants": 0,
+    }
+
+    async with sessions() as session:
+        stored = await OperationScheduler(AgentOperationRepository(session)).materialize(
+            replace(
+                _operation_spec(
+                    kind=AgentOperationKind.SUGGEST_DISCOVERY,
+                    immutable_input=discovery_input,
+                    logical_input=discovery_input,
+                    consumes_logical_unit=True,
+                ),
+                logical_root_operation_id=None,
+            )
+        )
+        assert stored.kind is AgentOperationKind.SUGGEST_DISCOVERY
+
+        run = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
+        assert run is not None
+        assert run.logical_operations_consumed == 1
+
+        with pytest.raises(AgentOperationConflict) as wrong_shape:
+            await OperationScheduler(AgentOperationRepository(session)).materialize(
+                replace(
+                    _operation_spec(
+                        operation_id=UUID("88888888-7777-7777-7777-777777777777"),
+                        kind=AgentOperationKind.SUGGEST_DISCOVERY,
+                        immutable_input={"origin": "LED", "date": "2026-09-02"},
+                        logical_input={"origin": "LED", "date": "2026-09-02"},
+                        consumes_logical_unit=False,
                     ),
                     logical_root_operation_id=None,
                 )
             )
-        assert captured.value.code == "agent_operation_kind_not_budgeted"
-
-        run = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
-        assert run is not None
-        assert run.logical_operations_consumed == 0
+        assert wrong_shape.value.code == "agent_logical_operation_shape_invalid"
 
     await engine.dispose()
 
@@ -1453,6 +1954,61 @@ async def test_review_cancelled_owner_can_cas_skip_its_live_lease_before_io(
 
 
 @pytest.mark.anyio
+async def test_empty_discovery_skip_atomically_prefers_inactive_run_reason(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "empty-discovery-cancel-race.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=1)
+    discovery_input = {
+        "origin": "LED",
+        "date_from": "2026-09-01",
+        "date_to": "2026-09-07",
+        "max_destination_seeds": 1,
+        "seed_limit": 1,
+        "source_id": "aviasales_hot_offers",
+        "currency": "RUB",
+        "adults": 1,
+        "children": 0,
+        "infants": 0,
+    }
+    async with sessions() as session:
+        await OperationScheduler(AgentOperationRepository(session)).materialize(
+            replace(
+                _operation_spec(
+                    kind=AgentOperationKind.SUGGEST_DISCOVERY,
+                    immutable_input=discovery_input,
+                    logical_input=discovery_input,
+                ),
+                private_continuation=None,
+                logical_root_operation_id=None,
+            )
+        )
+        await session.commit()
+    await _lease_operation(
+        sessions,
+        worker_id="worker-empty",
+        now=NOW + timedelta(seconds=1),
+    )
+    async with sessions() as session:
+        await _transition_run_state(session, "cancel_requested")
+        await session.commit()
+    async with sessions() as session:
+        skipped = await AgentOperationRepository(session).mark_claimed_operation_skipped(
+            household_id=HOUSEHOLD_ID,
+            operation_id=OPERATION_ID,
+            worker_id="worker-empty",
+            error_code="agent_no_discovery_results",
+            now=NOW + timedelta(seconds=3),
+        )
+        await session.commit()
+
+    assert skipped.status is AgentOperationStatus.SKIPPED
+    assert skipped.error_code == "agent_run_cancelled"
+    assert skipped.attempt_count == 1
+    await engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_review_inactive_run_reconciles_expired_lease_and_rejects_stale_owner(
     tmp_path: Path,
 ) -> None:
@@ -1528,9 +2084,15 @@ async def test_review_run_has_exactly_one_immutable_scope_snapshot(
         await session.commit()
 
     async with sessions() as session:
+        repository = AgentOperationRepository(session)
         assert (
             await session.execute(select(func.count()).select_from(agent_run_scope_snapshots_table))
         ).scalar_one() == 1
+        by_run = await repository.get_scope_snapshot_for_run(HOUSEHOLD_ID, RUN_ID)
+        assert by_run is not None
+        assert by_run.id == first_id
+        assert by_run.snapshot == {"airports": ("LED",), "destinations": ("CDG",)}
+        assert await repository.get_scope_snapshot_for_run(OTHER_HOUSEHOLD_ID, RUN_ID) is None
 
     await engine.dispose()
 

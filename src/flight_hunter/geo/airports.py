@@ -96,23 +96,32 @@ def freeze_airport_catalog(airports: tuple[Airport, ...]) -> AirportCatalogSnaps
     codes = tuple(airport.iata_code for airport in ordered)
     if len(set(codes)) != len(codes):
         raise ValueError("airport catalog cannot contain duplicate IATA codes")
-    payload = [
-        {
-            "iata": airport.iata_code,
-            "country": airport.country_code,
-            "type": airport.airport_type.value,
-            "scheduled_service": airport.scheduled_service,
-            "active": airport.active,
-        }
-        for airport in ordered
-    ]
+    payload = {
+        "version": "airport-catalog-snapshot-v2",
+        "airports": [
+            {
+                "iata": airport.iata_code,
+                "name": airport.name,
+                "municipality": airport.municipality,
+                "country": airport.country_code,
+                "latitude": airport.latitude,
+                "longitude": airport.longitude,
+                "type": airport.airport_type.value,
+                "scheduled_service": airport.scheduled_service,
+                "active": airport.active,
+                "keywords": list(airport.keywords),
+                "commercial_provenance": airport.commercial_provenance,
+            }
+            for airport in ordered
+        ],
+    }
     checksum = sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return AirportCatalogSnapshot(airports=ordered, checksum=checksum)
 
 
-def distance_km(origin: Airport, destination: Airport) -> int:
+def distance_km_raw(origin: Airport, destination: Airport) -> float:
     origin_latitude = math.radians(origin.latitude)
     destination_latitude = math.radians(destination.latitude)
     latitude_delta = math.radians(destination.latitude - origin.latitude)
@@ -125,7 +134,11 @@ def distance_km(origin: Airport, destination: Airport) -> int:
         * math.sin(longitude_delta / 2) ** 2
     )
     angular_distance = 2 * math.atan2(math.sqrt(haversine), math.sqrt(1 - haversine))
-    return round(_EARTH_RADIUS_KM * angular_distance)
+    return _EARTH_RADIUS_KM * angular_distance
+
+
+def distance_km(origin: Airport, destination: Airport) -> int:
+    return round(distance_km_raw(origin, destination))
 
 
 @dataclass(frozen=True, slots=True)

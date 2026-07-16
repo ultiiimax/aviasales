@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 
-from flight_hunter.domain.agent_evidence import ConfirmationState, ProtectionStatus
+import pytest
+
+from flight_hunter.domain.agent_evidence import (
+    ConfirmationState,
+    DiscoverySource,
+    ProtectionStatus,
+)
 from flight_hunter.domain.money import Money
 from flight_hunter.domain.offers import Freshness, PriceBasis
-from flight_hunter.providers.aviasales_search.client import CalendarPrice
+from flight_hunter.providers.aviasales_search.client import CalendarPrice, HotOffer
 from flight_hunter.providers.aviasales_search.mapper import map_parsed_ticket, stable_ticket_id
 from flight_hunter.providers.aviasales_search.schemas import (
     ParsedProposal,
@@ -182,3 +188,147 @@ def test_calendar_discovery_uuid_is_idempotent_only_within_operation_namespace()
     assert first.id == repeated.id
     assert first.id != other_operation.id
     assert first.passengers == 1
+
+
+def test_hot_offer_mapper_binds_every_sanitized_field_to_approved_request() -> None:
+    from flight_hunter.providers.aviasales_search import mapper
+
+    observed_at = datetime(2026, 7, 14, 21, 0, tzinfo=UTC)
+    offer = HotOffer(
+        origin="SVO",
+        destination="CDG",
+        departure_date="2026-09-15",
+        return_date=None,
+        price_minor_units=123_400,
+        currency="RUB",
+    )
+
+    signal = mapper.map_hot_offer_to_discovery(
+        offer,
+        expected_origin="SVO",
+        date_from=date(2026, 9, 14),
+        date_to=date(2026, 9, 16),
+        expected_currency="RUB",
+        one_way=True,
+        observed_at=observed_at,
+        evidence_namespace=EVIDENCE_NAMESPACE,
+    )
+    repeated = mapper.map_hot_offer_to_discovery(
+        offer,
+        expected_origin="SVO",
+        date_from=date(2026, 9, 14),
+        date_to=date(2026, 9, 16),
+        expected_currency="RUB",
+        one_way=True,
+        observed_at=observed_at,
+        evidence_namespace=EVIDENCE_NAMESPACE,
+    )
+    other_operation = mapper.map_hot_offer_to_discovery(
+        offer,
+        expected_origin="SVO",
+        date_from=date(2026, 9, 14),
+        date_to=date(2026, 9, 16),
+        expected_currency="RUB",
+        one_way=True,
+        observed_at=observed_at,
+        evidence_namespace=OTHER_EVIDENCE_NAMESPACE,
+    )
+
+    assert signal == repeated
+    assert signal.id != other_operation.id
+    assert signal.source_kind is DiscoverySource.HOT_OFFER
+    assert signal.observed_amount == Money(123_400, "RUB")
+    assert signal.passengers == 1
+    assert signal.observed_at == observed_at
+
+
+@pytest.mark.parametrize(
+    "override",
+    (
+        {"origin": "LED"},
+        {"destination": "PARIS"},
+        {"destination": "SVO"},
+        {"departure_date": None},
+        {"departure_date": "2026-09-17"},
+        {"return_date": "2026-09-20"},
+        {"price_minor_units": None},
+        {"price_minor_units": -1},
+        {"currency": "USD"},
+    ),
+)
+def test_hot_offer_mapper_rejects_missing_invalid_or_provider_mismatched_rows(
+    override: dict[str, object],
+) -> None:
+    from dataclasses import replace
+
+    from flight_hunter.providers.aviasales_search import mapper
+
+    offer = replace(
+        HotOffer(
+            origin="SVO",
+            destination="CDG",
+            departure_date="2026-09-15",
+            return_date=None,
+            price_minor_units=123_400,
+            currency="RUB",
+        ),
+        **override,
+    )
+
+    with pytest.raises((TypeError, ValueError)):
+        mapper.map_hot_offer_to_discovery(
+            offer,
+            expected_origin="SVO",
+            date_from=date(2026, 9, 14),
+            date_to=date(2026, 9, 16),
+            expected_currency="RUB",
+            one_way=True,
+            observed_at=datetime(2026, 7, 14, 21, 0, tzinfo=UTC),
+            evidence_namespace=EVIDENCE_NAMESPACE,
+        )
+
+
+def test_hot_offer_mapper_rejects_naive_observation_time() -> None:
+    from flight_hunter.providers.aviasales_search import mapper
+
+    with pytest.raises(ValueError, match="timezone"):
+        mapper.map_hot_offer_to_discovery(
+            HotOffer(
+                origin="SVO",
+                destination="CDG",
+                departure_date="2026-09-15",
+                return_date=None,
+                price_minor_units=123_400,
+                currency="RUB",
+            ),
+            expected_origin="SVO",
+            date_from=date(2026, 9, 14),
+            date_to=date(2026, 9, 16),
+            expected_currency="RUB",
+            one_way=True,
+            observed_at=datetime(2026, 7, 14, 21, 0),
+            evidence_namespace=EVIDENCE_NAMESPACE,
+        )
+
+
+def test_hot_offer_mapper_rejects_non_datetime_observation_time() -> None:
+    from flight_hunter.providers.aviasales_search import mapper
+
+    with pytest.raises(TypeError, match="datetime"):
+        mapper.map_hot_offer_to_discovery(
+            HotOffer(
+                origin="SVO",
+                destination="CDG",
+                departure_date="2026-09-15",
+                return_date=None,
+                price_minor_units=123_400,
+                currency="RUB",
+            ),
+            expected_origin="SVO",
+            date_from=date(2026, 9, 14),
+            date_to=date(2026, 9, 16),
+            expected_currency="RUB",
+            one_way=True,
+            observed_at="not-a-datetime",  # type: ignore[arg-type]
+            evidence_namespace=EVIDENCE_NAMESPACE,
+        )

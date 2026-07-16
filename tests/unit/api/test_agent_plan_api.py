@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
@@ -11,6 +11,8 @@ from sqlalchemy import insert, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from flight_hunter.api.agent_routes import ERROR_STATUS, _status_for_error
+from flight_hunter.api.agent_schemas import AgentPlanSelections
+from flight_hunter.application import agent_lifecycle as agent_lifecycle_module
 from flight_hunter.application.agent_lifecycle import _public_run_error
 from flight_hunter.persistence.agent_repositories import (
     AgentPlanRepository,
@@ -76,6 +78,112 @@ async def test_complete_and_incomplete_posts_return_typed_plan_cards_without_pro
 
 
 @pytest.mark.anyio
+async def test_same_only_route_returns_typed_draft_instead_of_internal_error(
+    agent_api_harness: _Harness,
+) -> None:
+    response = agent_api_harness.client.post(
+        "/api/v1/agent/search-plans",
+        headers=agent_api_harness.auth_headers,
+        json={
+            "text": "CDG → CDG",
+            "coverage": "quick",
+            "selections": {"departure_date": "2026-09-10"},
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["state"] == "draft"
+    assert payload["executable"] is False
+    assert tuple(item["code"] for item in payload["clarifications"]) == ("same_origin_destination",)
+
+
+@pytest.mark.anyio
+async def test_every_public_clarification_action_has_patchable_typed_selections(
+    agent_api_harness: _Harness,
+) -> None:
+    missing_date = _create_plan(agent_api_harness, with_date=False)
+    oversized_quick = agent_api_harness.client.post(
+        "/api/v1/agent/search-plans",
+        headers=agent_api_harness.auth_headers,
+        json={
+            "text": "LED → CDG",
+            "coverage": "quick",
+            "selections": {
+                "date_mode": "flexible",
+                "departure_date": "2026-09-10",
+                "flex_days": 30,
+            },
+        },
+    )
+    assert missing_date.status_code == oversized_quick.status_code == 201
+    actions = tuple(
+        action
+        for response in (missing_date, oversized_quick)
+        for clarification in response.json()["clarifications"]
+        for action in clarification["actions"]
+    )
+
+    assert {action["action_id"] for action in actions} == {
+        "use_rolling_90_days",
+        "narrow_scope_or_dates",
+    }
+    for action in actions:
+        AgentPlanSelections.model_validate(action["selections"])
+
+
+@pytest.mark.anyio
+async def test_immutable_scope_snapshot_binds_candidate_ordering_and_nearby_metadata(
+    agent_api_harness: _Harness,
+) -> None:
+    response = agent_api_harness.client.post(
+        "/api/v1/agent/search-plans",
+        headers=agent_api_harness.auth_headers,
+        json={
+            "text": "Проверь аэропорты рядом",
+            "coverage": "full",
+            "preset_id": "nearby_airports",
+            "selections": {
+                "origin": "LED",
+                "destination": "CDG",
+                "departure_date": "2026-09-10",
+                "nearby_radius_km": 80,
+            },
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["summary"]["scope"][0]["nearby_radius_km"] == 80
+
+    async with agent_api_harness.session_factory() as session:
+        revision = await AgentPlanRepository(session).get_revision(
+            UUID(agent_api_harness.household_id),
+            UUID(response.json()["revision_id"]),
+        )
+
+    assert revision is not None
+    scope = json.loads(revision.scope_snapshot_json)
+    for role in ("origin", "destination"):
+        frozen = scope["legs"][0][role]
+        candidates = frozen["airport_candidates"]
+        assert [candidate["code"] for candidate in candidates] == frozen["airport_codes"]
+        assert all(
+            set(candidate)
+            == {
+                "code",
+                "discovery_evidence_count",
+                "commercial_relevance",
+                "nearby_distance_km",
+                "ground_transfer_cost_minor",
+                "ground_transfer_currency",
+                "ground_cost_uncertain",
+            }
+            for candidate in candidates
+        )
+        assert all(candidate["ground_transfer_cost_minor"] is None for candidate in candidates)
+        assert all(candidate["ground_transfer_currency"] is None for candidate in candidates)
+
+
+@pytest.mark.anyio
 async def test_patch_creates_an_immutable_successor_and_get_returns_latest(
     agent_api_harness: _Harness,
 ) -> None:
@@ -102,6 +210,28 @@ async def test_patch_creates_an_immutable_successor_and_get_returns_latest(
     assert fetched.status_code == 200
     assert fetched.json()["revision_id"] == patched.json()["revision_id"]
     assert agent_api_harness.provider.calls == 0
+
+
+@pytest.mark.anyio
+async def test_run_list_limit_is_publicly_bounded_to_one_hundred(
+    agent_api_harness: _Harness,
+) -> None:
+    plan = _create_plan(agent_api_harness).json()
+    run = _execute(agent_api_harness, plan, "list-limit-run")
+    assert run.status_code == 202
+
+    bounded = agent_api_harness.client.get(
+        f"/api/v1/agent/search-plans/{plan['plan_id']}/runs?limit=1",
+        headers=agent_api_harness.auth_headers,
+    )
+    invalid = agent_api_harness.client.get(
+        f"/api/v1/agent/search-plans/{plan['plan_id']}/runs?limit=101",
+        headers=agent_api_harness.auth_headers,
+    )
+
+    assert bounded.status_code == 200
+    assert len(bounded.json()["runs"]) == 1
+    assert invalid.status_code == 422
 
 
 @pytest.mark.anyio
@@ -196,6 +326,279 @@ async def test_execute_requires_real_bearer_and_never_trusts_legacy_household_he
     assert accepted_body["http_attempts_consumed"] == 0
     assert accepted_body["cancellation_requested"] is False
     assert agent_api_harness.provider.calls == 0
+
+
+@pytest.mark.anyio
+async def test_queued_run_exposes_frozen_pair_coverage_without_private_ids(
+    agent_api_harness: _Harness,
+) -> None:
+    plan = _create_plan(agent_api_harness).json()
+    response = _execute(agent_api_harness, plan, "coverage-queued")
+
+    assert response.status_code == 202
+    coverage = response.json()["coverage_report"]
+    assert coverage["coverage"] == "quick"
+    assert coverage["completion"] == "pending"
+    assert coverage["frozen_input"]["origins"] == ["LED"]
+    assert coverage["frozen_input"]["destinations"] == ["CDG"]
+    assert coverage["frozen_input"]["date_start"] == "2026-09-10"
+    assert coverage["frozen_input"]["date_end"] == "2026-09-10"
+    assert coverage["planned"] == 1
+    assert coverage["attempted"] == 0
+    assert coverage["succeeded"] == 0
+    assert coverage["failed"] == 0
+    assert coverage["skipped"] == 0
+    assert coverage["pairs"] == [
+        {
+            "origin": "LED",
+            "destination": "CDG",
+            "departure_date": "2026-09-10",
+            "return_date": None,
+            "status": "planned",
+            "reason": "agent_pair_not_attempted",
+        }
+    ]
+    serialized = json.dumps(coverage, sort_keys=True)
+    assert "operation_id" not in serialized
+    assert "signal_id" not in serialized
+    assert "snapshot_id" not in serialized
+
+
+@pytest.mark.anyio
+async def test_queued_anywhere_run_exposes_pending_discovery_coverage(
+    agent_api_harness: _Harness,
+) -> None:
+    created = agent_api_harness.client.post(
+        "/api/v1/agent/search-plans",
+        headers=agent_api_harness.auth_headers,
+        json={
+            "text": "LED → anywhere",
+            "coverage": "quick",
+            "selections": {"departure_date": "2026-09-10"},
+        },
+    )
+    assert created.status_code == 201
+    plan = created.json()
+    assert plan["state"] == "awaiting_approval"
+
+    response = _execute(agent_api_harness, plan, "coverage-anywhere-queued")
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["coverage_error_code"] is None
+    coverage = body["coverage_report"]
+    assert coverage["completion"] == "pending"
+    assert coverage["frozen_input"]["origins"] == ["LED"]
+    assert coverage["frozen_input"]["destinations"] == []
+    assert coverage["planned"] == 0
+    assert coverage["pairs"] == []
+    assert coverage["reason_counts"] == {}
+    assert coverage["discovery_phase"] == {
+        "status": "pending",
+        "terminal_reason": None,
+        "source_ids": ["aviasales_hot_offers"],
+        "max_destination_seeds": 40,
+        "exact_verification_limit": 20,
+    }
+
+
+@pytest.mark.anyio
+async def test_flexible_anywhere_dates_do_not_multiply_single_seed_query_work(
+    agent_api_harness: _Harness,
+) -> None:
+    response = agent_api_harness.client.post(
+        "/api/v1/agent/search-plans",
+        headers=agent_api_harness.auth_headers,
+        json={
+            "text": "LED → anywhere",
+            "coverage": "quick",
+            "selections": {
+                "date_mode": "flexible",
+                "departure_date": "2026-09-10",
+                "flex_days": 30,
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["state"] == "awaiting_approval"
+    assert body["estimate"]["calendar_searches"] == 40
+    assert body["estimate"]["exact_searches"] == 20
+    assert body["estimate"]["logical_operations"] == 60
+
+
+@pytest.mark.anyio
+async def test_tampered_scope_projection_is_sanitized_and_never_breaks_run_endpoints(
+    agent_api_harness: _Harness,
+) -> None:
+    plan = _create_plan(agent_api_harness).json()
+    run = _execute(agent_api_harness, plan, "tampered-coverage").json()
+    canary = "provider_ref=private-diagnostic"
+    async with agent_api_harness.session_factory() as session:
+        await session.execute(
+            update(agent_search_plan_revisions_table)
+            .where(agent_search_plan_revisions_table.c.id == plan["revision_id"])
+            .values(
+                scope_snapshot_json=json.dumps(
+                    {
+                        "coverage": "quick",
+                        "legs": [{"origin": {"airport_codes": ["LED"]}}],
+                        "diagnostic": canary,
+                    }
+                )
+            )
+        )
+        await session.commit()
+
+    fetched = agent_api_harness.client.get(
+        f"/api/v1/agent/search-plans/{plan['plan_id']}/runs/{run['run_id']}",
+        headers=agent_api_harness.auth_headers,
+    )
+    listed = agent_api_harness.client.get(
+        f"/api/v1/agent/search-plans/{plan['plan_id']}/runs",
+        headers=agent_api_harness.auth_headers,
+    )
+
+    assert fetched.status_code == listed.status_code == 200
+    assert fetched.json()["coverage_report"] is None
+    assert listed.json()["runs"][0]["coverage_report"] is None
+    assert fetched.json()["coverage_error_code"] == "agent_coverage_projection_invalid"
+    assert listed.json()["runs"][0]["coverage_error_code"] == ("agent_coverage_projection_invalid")
+    assert canary not in fetched.text
+    assert canary not in listed.text
+
+
+@pytest.mark.anyio
+async def test_oversized_date_projection_is_bounded_and_sanitized(
+    agent_api_harness: _Harness,
+) -> None:
+    plan = _create_plan(agent_api_harness).json()
+    run = _execute(agent_api_harness, plan, "oversized-date-coverage").json()
+    async with agent_api_harness.session_factory() as session:
+        revision = await AgentPlanRepository(session).get_revision(
+            UUID(agent_api_harness.household_id),
+            UUID(plan["revision_id"]),
+        )
+        assert revision is not None
+        scope = json.loads(revision.scope_snapshot_json)
+        scope["legs"][0]["date_constraint"] = {
+            "mode": "range",
+            "start_date": "0001-01-01",
+            "end_date": "9999-12-31",
+            "flex_days": 0,
+        }
+        await session.execute(
+            update(agent_search_plan_revisions_table)
+            .where(agent_search_plan_revisions_table.c.id == plan["revision_id"])
+            .values(scope_snapshot_json=json.dumps(scope))
+        )
+        await session.commit()
+
+    fetched = agent_api_harness.client.get(
+        f"/api/v1/agent/search-plans/{plan['plan_id']}/runs/{run['run_id']}",
+        headers=agent_api_harness.auth_headers,
+    )
+
+    assert fetched.status_code == 200
+    assert fetched.json()["coverage_report"] is None
+    assert fetched.json()["coverage_error_code"] == "agent_coverage_projection_invalid"
+
+
+@pytest.mark.anyio
+async def test_oversized_cartesian_projection_is_rejected_before_pair_allocation(
+    agent_api_harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _create_plan(agent_api_harness).json()
+    run = _execute(agent_api_harness, plan, "oversized-cartesian-coverage").json()
+    codes = [
+        f"{first}{second}{third}"
+        for first in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        for second in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        for third in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    ]
+    async with agent_api_harness.session_factory() as session:
+        revision = await AgentPlanRepository(session).get_revision(
+            UUID(agent_api_harness.household_id),
+            UUID(plan["revision_id"]),
+        )
+        assert revision is not None
+        scope = json.loads(revision.scope_snapshot_json)
+        origin = scope["legs"][0]["origin"]
+        destination = scope["legs"][0]["destination"]
+        origin["airport_codes"] = codes[:200]
+        destination["airport_codes"] = codes[200:400]
+        origin.pop("airport_candidates", None)
+        destination.pop("airport_candidates", None)
+        await session.execute(
+            update(agent_search_plan_revisions_table)
+            .where(agent_search_plan_revisions_table.c.id == plan["revision_id"])
+            .values(scope_snapshot_json=json.dumps(scope))
+        )
+        await session.commit()
+
+    def unexpected_pair_allocation(*_args: object, **_kwargs: object) -> tuple[()]:
+        raise AssertionError("finite route pairs must not allocate above the approved budget")
+
+    monkeypatch.setattr(
+        agent_lifecycle_module,
+        "finite_route_pairs",
+        unexpected_pair_allocation,
+    )
+    fetched = agent_api_harness.client.get(
+        f"/api/v1/agent/search-plans/{plan['plan_id']}/runs/{run['run_id']}",
+        headers=agent_api_harness.auth_headers,
+    )
+
+    assert fetched.status_code == 200
+    assert fetched.json()["coverage_report"] is None
+    assert fetched.json()["coverage_error_code"] == "agent_coverage_projection_invalid"
+
+
+@pytest.mark.anyio
+async def test_terminal_run_reports_unmaterialized_frozen_pair_as_skipped(
+    agent_api_harness: _Harness,
+) -> None:
+    plan = _create_plan(agent_api_harness).json()
+    run = _execute(agent_api_harness, plan, "terminal-missing-pair").json()
+    async with agent_api_harness.session_factory() as session:
+        stored = await AgentRunRepository(session).get_run(
+            UUID(agent_api_harness.household_id),
+            UUID(run["run_id"]),
+        )
+        assert stored is not None
+        await session.execute(
+            update(agent_plan_runs_table)
+            .where(agent_plan_runs_table.c.id == run["run_id"])
+            .values(
+                status="failed",
+                started_at=stored.created_at + timedelta(seconds=1),
+                finished_at=stored.created_at + timedelta(seconds=2),
+                error_code="agent_no_confirmed_offer",
+            )
+        )
+        await session.commit()
+
+    fetched = agent_api_harness.client.get(
+        f"/api/v1/agent/search-plans/{plan['plan_id']}/runs/{run['run_id']}",
+        headers=agent_api_harness.auth_headers,
+    )
+
+    assert fetched.status_code == 200
+    coverage = fetched.json()["coverage_report"]
+    assert coverage["completion"] == "partial"
+    assert (coverage["planned"], coverage["attempted"], coverage["skipped"]) == (1, 0, 1)
+    assert coverage["pairs"] == [
+        {
+            "origin": "LED",
+            "destination": "CDG",
+            "departure_date": "2026-09-10",
+            "return_date": None,
+            "status": "skipped",
+            "reason": "agent_pair_not_materialized",
+        }
+    ]
 
 
 @pytest.mark.anyio

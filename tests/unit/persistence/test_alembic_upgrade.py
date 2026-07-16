@@ -156,7 +156,9 @@ def test_review_agent_ledger_core_metadata_has_budget_checks_and_indexes() -> No
     )
     assert logical_root_fk.target_fullname == "agent_run_operations.id"
     assert logical_root_fk.ondelete == "CASCADE"
-    assert "suggest_discovery" not in operation_checks["ck_agent_run_operation_kind"]
+    assert "suggest_discovery" in operation_checks["ck_agent_run_operation_kind"]
+    assert "suggest_discovery" in operation_checks["ck_agent_run_operation_provider"]
+    assert "suggest_discovery" in operation_checks["ck_agent_run_operation_logical_shape"]
     assert "logical_root_operation_id" in operation_checks["ck_agent_run_operation_logical_shape"]
     assert "circuit_permit_token_digest" in operation_checks["ck_agent_run_operation_permit_shape"]
     assert "operation" in operation_checks["ck_agent_run_operation_result_type"]
@@ -679,7 +681,7 @@ def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> N
     assert "ck_agent_run_operation_logical_shape" in operation_table_sql[0]
     assert "ck_agent_run_operation_permit_shape" in operation_table_sql[0]
     assert "'operation'" in operation_table_sql[0]
-    assert "'suggest_discovery'" not in operation_table_sql[0]
+    assert "'suggest_discovery'" in operation_table_sql[0]
     assert any(
         row[2] == "agent_run_operations"
         and row[3] == "logical_root_operation_id"
@@ -842,6 +844,201 @@ def test_0023_to_0024_preserves_agent_lifecycle_rows_with_zero_historical_budget
             "select status, logical_operation_budget, logical_operations_consumed, "
             "http_attempt_budget, http_attempts_consumed from agent_plan_runs"
         ).fetchone() == ("queued", 0, 0, 0, 0)
+
+
+def test_0024_to_head_preserves_operation_rows_foreign_keys_and_indexes(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "agent-0024-operation-upgrade.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path.as_posix()}")
+    command.upgrade(config, "0024_agent_execution_ledger")
+    now = "2026-07-14T10:00:00+00:00"
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "insert into agent_search_plans (id, household_id, created_by_user_id, created_at) "
+            "values (?, ?, ?, ?)",
+            ("plan", "household", "user", now),
+        )
+        connection.execute(
+            "insert into agent_search_plan_revisions ("
+            "id, plan_id, household_id, revision_number, state, plan_json, "
+            "scope_snapshot_json, capability_snapshot_json, cost_model_snapshot_json, "
+            "parser_version, planner_version, estimated_calendar_searches, "
+            "estimated_exact_searches, estimated_logical_operations, "
+            "estimated_http_attempts, estimated_deadline_seconds, content_hash, "
+            "created_at, expires_at, consumed_at) values "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "revision",
+                "plan",
+                "household",
+                1,
+                "consumed",
+                "{}",
+                "{}",
+                "{}",
+                "{}",
+                "parser-v1",
+                "planner-v1",
+                0,
+                1,
+                1,
+                1,
+                600,
+                "sha256:" + "a" * 64,
+                now,
+                "2026-07-14T11:00:00+00:00",
+                now,
+            ),
+        )
+        connection.execute(
+            "insert into agent_plan_execution_approvals ("
+            "id, household_id, plan_id, revision_id, approved_by_user_id, "
+            "revision_content_hash, approved_by_session_id, approved_budget_json, "
+            "approved_strategies_json, risk_warning_versions_json, approved_at, expires_at, "
+            "consumed_at, run_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "approval",
+                "household",
+                "plan",
+                "revision",
+                "user",
+                "sha256:" + "a" * 64,
+                "session",
+                '{"logical_operations":1,"http_attempts":1}',
+                '["direct"]',
+                "{}",
+                now,
+                "2026-07-14T10:30:00+00:00",
+                now,
+                "run",
+            ),
+        )
+        connection.execute(
+            "insert into agent_plan_runs ("
+            "id, household_id, plan_id, revision_id, approval_id, execute_idempotency_key, "
+            "status, created_at, deadline_at, logical_operation_budget, "
+            "logical_operations_consumed, http_attempt_budget, http_attempts_consumed) "
+            "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "run",
+                "household",
+                "plan",
+                "revision",
+                "approval",
+                "execute:0024",
+                "running",
+                now,
+                "2026-07-14T10:10:00+00:00",
+                1,
+                1,
+                1,
+                0,
+            ),
+        )
+        connection.execute(
+            "insert into agent_plan_stages ("
+            "id, household_id, run_id, stage_kind, status, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, ?, ?)",
+            ("stage", "household", "run", "exact_search", "pending", now, now),
+        )
+        connection.execute(
+            "insert into agent_run_operations ("
+            "id, household_id, run_id, stage_id, provider_id, operation_kind, "
+            "operation_fingerprint, logical_operation_fingerprint, "
+            "logical_root_operation_id, handoff_predecessor_operation_id, "
+            "consumes_logical_unit, immutable_input_json, private_continuation_json, "
+            "status, attempt_count, max_attempts, http_attempts_consumed, "
+            "created_at, updated_at) values "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "operation",
+                "household",
+                "run",
+                "stage",
+                "aviasales_search",
+                "exact_start",
+                "sha256:" + "b" * 64,
+                "sha256:" + "c" * 64,
+                None,
+                None,
+                1,
+                '{"origin":"LED","destination":"CDG"}',
+                None,
+                "pending",
+                0,
+                3,
+                0,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+        indexes_before = {
+            row[1] for row in connection.execute("pragma index_list(agent_run_operations)")
+        }
+        foreign_keys_before = {
+            (row[2], row[3], row[4], row[6])
+            for row in connection.execute("pragma foreign_key_list(agent_run_operations)")
+        }
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "select operation_kind, provider_id, consumes_logical_unit, immutable_input_json "
+            "from agent_run_operations where id = ?",
+            ("operation",),
+        ).fetchone() == (
+            "exact_start",
+            "aviasales_search",
+            1,
+            '{"origin":"LED","destination":"CDG"}',
+        )
+        assert {
+            row[1] for row in connection.execute("pragma index_list(agent_run_operations)")
+        } == indexes_before
+        assert {
+            (row[2], row[3], row[4], row[6])
+            for row in connection.execute("pragma foreign_key_list(agent_run_operations)")
+        } == foreign_keys_before
+        connection.execute(
+            "insert into agent_run_operations ("
+            "id, household_id, run_id, stage_id, provider_id, operation_kind, "
+            "operation_fingerprint, logical_operation_fingerprint, "
+            "logical_root_operation_id, handoff_predecessor_operation_id, "
+            "consumes_logical_unit, immutable_input_json, private_continuation_json, "
+            "status, attempt_count, max_attempts, http_attempts_consumed, "
+            "created_at, updated_at) values "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "suggest",
+                "household",
+                "run",
+                "stage",
+                "aviasales_search",
+                "suggest_discovery",
+                "sha256:" + "d" * 64,
+                "sha256:" + "e" * 64,
+                None,
+                None,
+                1,
+                '{"origin":"LED","source_id":"aviasales_hot_offers"}',
+                None,
+                "pending",
+                0,
+                3,
+                0,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+        assert connection.execute(
+            "select operation_kind from agent_run_operations where id = ?", ("suggest",)
+        ).fetchone() == ("suggest_discovery",)
 
 
 def test_airport_commercial_migration_backfills_legacy_rows(tmp_path: Path) -> None:

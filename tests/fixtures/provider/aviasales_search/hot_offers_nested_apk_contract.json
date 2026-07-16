@@ -1,0 +1,105 @@
+{
+  "origin": {
+    "translation": {
+      "su": "Fixture origin"
+    },
+    "image_url": null
+  },
+  "directions": [
+    {
+      "destination_iata": "PAR",
+      "ticket": {
+        "price": {
+          "signature": "fixture-hot-offer-signature-regular",
+          "value": 1234.0,
+          "currency": "rub",
+          "duration": 12600,
+          "gate": "fixture-gate",
+          "search_id": "fixture-search-redacted",
+          "origin_city_iata": "MOW",
+          "destination_city_iata": "PAR",
+          "depart_date": "2026-09-15",
+          "return_date": null,
+          "withBaggage": false,
+          "fareKey": "fixture-fare-regular",
+          "segments": [
+            {
+              "localArrivalDate": "2026-09-15",
+              "localArrivalTime": "13:30",
+              "localDepartDate": "2026-09-15",
+              "localDepartTime": "09:00",
+              "flightLegs": [
+                {
+                  "localArrivalDate": "2026-09-15",
+                  "localArrivalTime": "13:30",
+                  "localDepartDate": "2026-09-15",
+                  "localDepartTime": "09:00",
+                  "origin": "SVO",
+                  "destination": "CDG",
+                  "carrier": "FH",
+                  "technicalStops": [],
+                  "flightNumber": "101",
+                  "aircraftCode": "320",
+                  "durationSeconds": 12600,
+                  "equipmentType": "aircraft"
+                }
+              ],
+              "transfers": []
+            }
+          ]
+        },
+        "badge": null
+      },
+      "sale_ticket": {
+        "price": {
+          "signature": "fixture-hot-offer-signature-sale",
+          "value": 999.0,
+          "currency": "rub",
+          "duration": 13200,
+          "gate": "fixture-sale-gate",
+          "search_id": "fixture-search-redacted",
+          "origin_city_iata": "MOW",
+          "destination_city_iata": "PAR",
+          "depart_date": "2026-09-16",
+          "return_date": null,
+          "withBaggage": false,
+          "fareKey": "fixture-fare-sale",
+          "segments": [
+            {
+              "localArrivalDate": "2026-09-16",
+              "localArrivalTime": "14:00",
+              "localDepartDate": "2026-09-16",
+              "localDepartTime": "09:30",
+              "flightLegs": [
+                {
+                  "localArrivalDate": "2026-09-16",
+                  "localArrivalTime": "14:00",
+                  "localDepartDate": "2026-09-16",
+                  "localDepartTime": "09:30",
+                  "origin": "SVO",
+                  "destination": "ORY",
+                  "carrier": "FH",
+                  "technicalStops": [],
+                  "flightNumber": "102",
+                  "aircraftCode": "320",
+                  "durationSeconds": 13200,
+                  "equipmentType": "aircraft"
+                }
+              ],
+              "transfers": []
+            }
+          ]
+        },
+        "badge": {
+          "text": "fixture-sale"
+        }
+      },
+      "tags": [],
+      "tickets_count": 2
+    }
+  ],
+  "sale_info": null,
+  "entities_info": {},
+  "tags_order": null,
+  "filters_order": []
+}

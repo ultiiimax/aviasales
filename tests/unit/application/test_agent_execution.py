@@ -13,7 +13,7 @@ from typing import Literal
 from uuid import UUID, uuid4, uuid5
 
 import pytest
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from flight_hunter.application.agent_intent import IntentParser
@@ -21,7 +21,10 @@ from flight_hunter.application.agent_lifecycle import (
     AgentLifecycleService,
     CreateAgentPlan,
     ExecuteAgentPlan,
+    _coverage_operation_outcomes,
+    _snapshot_anywhere_discovery_phase,
 )
+from flight_hunter.application.agent_operations import CoveragePair
 from flight_hunter.application.agent_planning import AgentPlanBuilder
 from flight_hunter.application.agent_scope import CoverageMode, ScopeResolver
 from flight_hunter.domain.agent_evidence import (
@@ -50,6 +53,7 @@ from flight_hunter.persistence.agent_repositories import (
     AgentRunRepository,
     AgentStageStatus,
     NewAgentConfirmedOfferEvidence,
+    NewAgentDiscoverySignal,
     NewAgentPlan,
     NewAgentPlanApproval,
     NewAgentPlanRevision,
@@ -66,6 +70,7 @@ from flight_hunter.persistence.models import (
     agent_provider_http_attempts_table,
     agent_ranking_snapshots_table,
     agent_run_operations_table,
+    agent_run_scope_snapshots_table,
     agent_search_plan_revisions_table,
     mapper_registry,
 )
@@ -79,6 +84,7 @@ from flight_hunter.providers.aviasales_search.client import (
     SearchStartParams,
 )
 from flight_hunter.providers.aviasales_search.gateway import (
+    AnywhereDiscoveryParams,
     AviasalesSearchPolicyDenied,
     CalendarSearchParams,
     ExactPollOutcome,
@@ -133,6 +139,19 @@ class _ProductionShapeAirportCatalog:
 
 
 @dataclass(slots=True)
+class _MutableApprovalAirportCatalog:
+    airports: tuple[Airport, ...]
+    reads: int = 0
+    forbid_reads: bool = False
+
+    async def catalog_snapshot(self) -> AirportCatalogSnapshot:
+        if self.forbid_reads:
+            raise AssertionError("approved execution must not re-read the mutable airport catalog")
+        self.reads += 1
+        return freeze_airport_catalog(self.airports)
+
+
+@dataclass(slots=True)
 class MutableClock:
     value: datetime = NOW
 
@@ -155,6 +174,13 @@ class CalendarCall:
 
 
 @dataclass(slots=True)
+class AnywhereCall:
+    params: AnywhereDiscoveryParams
+    evidence_namespace: UUID
+    request_fingerprint: str
+
+
+@dataclass(slots=True)
 class ResumableFakeGateway:
     """Fixture gateway with real start + resumable poll semantics."""
 
@@ -165,10 +191,12 @@ class ResumableFakeGateway:
     )
     calendar_behaviors: list[BaseException | None] = field(default_factory=list)
     calendar_results: list[tuple[DiscoverySignal, ...]] = field(default_factory=list)
+    anywhere_results: list[tuple[DiscoverySignal, ...]] = field(default_factory=list)
     exact_amounts: dict[date, int] = field(default_factory=dict)
     start_calls: list[StartCall] = field(default_factory=list)
     poll_calls: list[ExactSearchContinuation] = field(default_factory=list)
     calendar_calls: list[CalendarCall] = field(default_factory=list)
+    anywhere_calls: list[AnywhereCall] = field(default_factory=list)
     advance_on_start_seconds: int = 0
     advance_on_poll_seconds: int = 0
     connecting_evidence: bool = False
@@ -177,7 +205,12 @@ class ResumableFakeGateway:
 
     @property
     def provider_calls(self) -> int:
-        return len(self.start_calls) + len(self.poll_calls) + len(self.calendar_calls)
+        return (
+            len(self.start_calls)
+            + len(self.poll_calls)
+            + len(self.calendar_calls)
+            + len(self.anywhere_calls)
+        )
 
     async def start_exact(
         self,
@@ -257,6 +290,23 @@ class ResumableFakeGateway:
                 if params.depart_from <= signal.departure_date <= params.depart_to
             )
         return ()
+
+    async def discover_anywhere(
+        self,
+        params: AnywhereDiscoveryParams,
+        *,
+        evidence_namespace: UUID,
+        request_fingerprint: str,
+        **_kwargs: object,
+    ) -> tuple[DiscoverySignal, ...]:
+        self.anywhere_calls.append(AnywhereCall(params, evidence_namespace, request_fingerprint))
+        if not self.anywhere_results:
+            return ()
+        result_index = min(len(self.anywhere_calls) - 1, len(self.anywhere_results) - 1)
+        return tuple(
+            replace(signal, id=_anywhere_signal_id(evidence_namespace, signal))
+            for signal in self.anywhere_results[result_index]
+        )
 
     def evidence_for(self, continuation: ExactSearchContinuation) -> ConfirmedOfferEvidence:
         amount = self.exact_amounts.get(continuation.expected_departure_date, 20_000)
@@ -530,6 +580,47 @@ def execution_module() -> ModuleType:
     return importlib.import_module("flight_hunter.application.agent_execution")
 
 
+def test_anywhere_country_codes_reject_unicode_lookalikes(
+    execution_module: ModuleType,
+) -> None:
+    country_code = execution_module._country_code
+
+    with pytest.raises(ValueError, match="ISO alpha-2"):
+        country_code("ФР", "allowed_country_codes")
+
+
+def test_anywhere_snapshot_rejects_unbounded_discovery_horizon(
+    execution_module: ModuleType,
+) -> None:
+    value = {
+        "origin_airports": ["LED"],
+        "date_start": "2026-01-01",
+        "date_end": "2027-01-01",
+        "allowed_country_codes": [],
+        "excluded_country_codes": [],
+        "discovery_source_ids": ["aviasales_hot_offers"],
+        "max_destination_seeds": 40,
+        "exact_verification_limit": 20,
+        "catalog_checksum": "sha256:" + "a" * 64,
+        "taxonomy_version": "v1",
+        "eligible_destination_countries": {"CDG": "FR"},
+    }
+    first_plan_leg = {
+        "origin": {"kind": "airport", "value": "LED"},
+        "destination": {"kind": "anywhere", "value": None},
+    }
+
+    with pytest.raises(ValueError, match="bounded immutable rule"):
+        execution_module._anywhere_rule_from_snapshot(  # type: ignore[attr-defined]
+            value,
+            first_plan_leg=first_plan_leg,
+            origin_codes=("LED",),
+            date_start=date(2026, 1, 1),
+            date_end=date(2027, 1, 1),
+            coverage="quick",
+        )
+
+
 @pytest.mark.anyio
 async def test_exact_run_transitions_queued_running_completed_through_start_and_poll(
     tmp_path: Path,
@@ -634,8 +725,25 @@ async def test_flexible_calendar_shortlists_by_amount_recency_and_stable_tie_bre
             HOUSEHOLD_ID,
             RUN_ID,
         )
+        await session.rollback()
+        run_view = await AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(clock=clock),
+            clock=clock,
+        ).get_run(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
 
-    assert terminal.status == "completed"
+    assert terminal.status == "partial"
+    assert terminal.error_code == "agent_run_partial"
+    assert run_view.coverage_report is not None
+    assert (
+        run_view.coverage_report.planned,
+        run_view.coverage_report.attempted,
+        run_view.coverage_report.succeeded,
+        run_view.coverage_report.failed,
+        run_view.coverage_report.skipped,
+    ) == (5, 5, 3, 2, 0)
+    assert run_view.coverage_report.reason_counts == {"agent_no_discovery_results": 2}
     assert signal_count == 3
     assert {signal.freshness for signal in stored_signals} == {Freshness.LIVE}
     assert evidence_count == 3
@@ -707,8 +815,25 @@ async def test_calendar_duplicate_date_pairs_materialize_one_deterministic_exact
             HOUSEHOLD_ID,
             RUN_ID,
         )
+        await session.rollback()
+        run_view = await AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(clock=clock),
+            clock=clock,
+        ).get_run(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
 
-    assert terminal.status == "completed"
+    assert terminal.status == "partial"
+    assert terminal.error_code == "agent_run_partial"
+    assert run_view.coverage_report is not None
+    assert (
+        run_view.coverage_report.planned,
+        run_view.coverage_report.attempted,
+        run_view.coverage_report.succeeded,
+        run_view.coverage_report.failed,
+        run_view.coverage_report.skipped,
+    ) == (5, 5, 2, 3, 0)
+    assert run_view.coverage_report.reason_counts == {"agent_no_discovery_results": 3}
     assert len(signals) == 2
     assert [call.params.departure_date for call in gateway.start_calls] == [
         "2026-09-10",
@@ -966,34 +1091,18 @@ async def test_reciprocal_round_trip_binds_the_approved_return_date(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "scope_variant",
-    ("country", "city", "region", "anywhere", "nearby", "return_extra"),
-)
-async def test_task9_fails_closed_for_scope_breadth_it_cannot_execute_completely(
+async def test_invalid_or_not_yet_discovered_scope_fails_before_provider_io(
     tmp_path: Path,
     execution_module: ModuleType,
-    scope_variant: Literal[
-        "country",
-        "city",
-        "region",
-        "anywhere",
-        "nearby",
-        "return_extra",
-    ],
 ) -> None:
-    trip_shape: Literal["one_way", "round_trip"] = (
-        "round_trip" if scope_variant == "return_extra" else "one_way"
-    )
-    exact_searches = 4 if scope_variant in {"country", "region"} else 1
-    engine, sessions = await _session_factory(tmp_path, f"unsupported-scope-{scope_variant}.db")
+    engine, sessions = await _session_factory(tmp_path, "invalid-return-scope.db")
     await _seed_run(
         sessions,
         date_mode="exact",
-        exact_searches=exact_searches,
-        logical_budget=exact_searches,
-        trip_shape=trip_shape,
-        scope_variant=scope_variant,
+        exact_searches=1,
+        logical_budget=1,
+        trip_shape="round_trip",
+        scope_variant="return_extra",
     )
     clock = MutableClock()
     gateway = ResumableFakeGateway(clock)
@@ -1018,10 +1127,1443 @@ async def test_task9_fails_closed_for_scope_breadth_it_cannot_execute_completely
         ).scalar_one()
 
     assert step.operation_claimed is False and step.run_status == "failed"
-    assert terminal is not None and terminal.error_code == "agent_scope_unsupported"
+    assert terminal is not None and terminal.error_code == "agent_plan_snapshot_invalid"
     assert terminal.http_attempts_consumed == 0
     assert operations == ()
     assert circuit_rows == reservations == gateway.provider_calls == 0
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("scope_variant", "destinations"),
+    (
+        ("city", {"CDG", "ORY"}),
+        ("region", {"AMS", "CDG", "FRA", "LHR"}),
+        ("nearby", {"CDG", "ORY"}),
+    ),
+)
+async def test_task10_finite_scope_modes_execute_every_frozen_pair(
+    tmp_path: Path,
+    execution_module: ModuleType,
+    scope_variant: Literal["city", "region", "nearby"],
+    destinations: set[str],
+) -> None:
+    exact_searches = len(destinations)
+    engine, sessions = await _session_factory(tmp_path, f"finite-{scope_variant}.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        exact_searches=exact_searches,
+        logical_budget=exact_searches,
+        scope_variant=scope_variant,
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            limit=20,
+        )
+
+    assert terminal.status == "completed"
+    assert {call.params.destination.code for call in gateway.start_calls} == destinations
+    assert len(gateway.poll_calls) == exact_searches
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_task10_full_country_scope_executes_every_frozen_airport_pair(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "full-country-coverage.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        exact_searches=4,
+        logical_budget=4,
+        scope_variant="country",
+        coverage="full",
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            limit=16,
+        )
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    assert terminal.status == "completed"
+    assert {
+        (call.params.origin.code, call.params.destination.code) for call in gateway.start_calls
+    } == {
+        ("LED", "CDG"),
+        ("LED", "LYS"),
+        ("LED", "NCE"),
+        ("LED", "ORY"),
+    }
+    assert len(gateway.poll_calls) == 4
+    assert sum(operation.kind is AgentOperationKind.EXACT_START for operation in operations) == 4
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_task10_full_country_failure_is_partial_with_per_pair_reason(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "full-country-partial.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        exact_searches=4,
+        logical_budget=4,
+        scope_variant="country",
+        coverage="full",
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(
+        clock,
+        start_behaviors=[AviasalesSearchSchemaError()],
+    )
+
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            limit=18,
+        )
+        await session.rollback()
+        view = await AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(clock=clock),
+            clock=clock,
+        ).get_run(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
+
+    assert terminal.status == "partial"
+    assert view.coverage_report is not None
+    report = view.coverage_report
+    assert report.coverage == "full"
+    assert report.completion == "partial"
+    assert (report.planned, report.attempted, report.succeeded, report.failed, report.skipped) == (
+        4,
+        4,
+        3,
+        1,
+        0,
+    )
+    assert report.reason_counts == {"provider_schema": 1}
+    assert (
+        sum(pair.status == "failed" and pair.reason == "provider_schema" for pair in report.pairs)
+        == 1
+    )
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_task10_terminal_run_is_partial_when_frozen_pair_was_never_materialized(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "full-country-missing-root.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        exact_searches=4,
+        logical_budget=4,
+        scope_variant="country",
+        coverage="full",
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async with sessions() as session:
+        service = _service(execution_module, session, gateway, clock)
+        run = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
+        assert run is not None
+        workflow = await service._workflow(run)
+        stage = await service._stage(
+            run,
+            AgentPlanStageKind.EXACT_SEARCH,
+            prefix=0x02,
+            now=clock.value,
+        )
+        first = workflow.route_pairs[0]
+        await service._materialize_exact_start(
+            run,
+            stage.id,
+            workflow,
+            origin=first.origin,
+            destination=first.destination,
+            departure_date=workflow.departure_date,
+            return_date=workflow.return_date,
+            ordinal=0,
+            now=clock.value,
+        )
+        await session.commit()
+
+        terminal = await _run_until_terminal(service, session, limit=8)
+
+    assert terminal.status == "partial"
+    assert terminal.error_code == "agent_run_partial"
+    assert len(gateway.start_calls) == 1
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_task10_anywhere_freezes_first_discovery_snapshot_and_ignores_later_seeds(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-snapshot.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=40,
+        exact_searches=20,
+        logical_budget=60,
+        scope_variant="anywhere",
+    )
+    clock = MutableClock()
+    cdg = replace(
+        _signal(uuid4(), date(2026, 9, 10), 20_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    ory = replace(
+        _signal(uuid4(), date(2026, 9, 10), 10_000),
+        destination="ORY",
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    nce = replace(
+        _signal(uuid4(), date(2026, 9, 10), 5_000),
+        destination="NCE",
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(cdg, ory)])
+
+    async with sessions() as session:
+        service = _service(execution_module, session, gateway, clock)
+        for _ in range(4):
+            await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+            await session.commit()
+        snapshot = await AgentOperationRepository(session).get_scope_snapshot_for_run(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        assert snapshot is not None
+        first_snapshot = dict(snapshot.snapshot)
+        gateway.anywhere_results[:] = [(nce,)]
+        terminal = await _run_until_terminal(service, session, limit=16)
+        repeated = await AgentOperationRepository(session).get_scope_snapshot_for_run(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    assert terminal.status == "completed"
+    assert first_snapshot["destinations"] == ("ORY", "CDG")
+    assert len(first_snapshot["source_signal_ids"]) == 2
+    assert repeated is not None and dict(repeated.snapshot) == first_snapshot
+    assert len(gateway.anywhere_calls) == 1
+    assert {call.params.destination.code for call in gateway.start_calls} == {"CDG", "ORY"}
+    assert "NCE" not in {call.params.destination.code for call in gateway.start_calls}
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_anywhere_exact_start_uses_explicit_frozen_source_signal_id(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-source-binding.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=40,
+        exact_searches=20,
+        logical_budget=60,
+        scope_variant="anywhere",
+    )
+    clock = MutableClock()
+    cdg = replace(
+        _signal(uuid4(), date(2026, 9, 10), 20_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(cdg,)])
+
+    async with sessions() as session:
+        service = _service(execution_module, session, gateway, clock)
+        starts = ()
+        for _ in range(6):
+            await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+            await session.commit()
+            operations = await AgentOperationRepository(session).list_operations(
+                HOUSEHOLD_ID,
+                RUN_ID,
+            )
+            starts = tuple(
+                operation
+                for operation in operations
+                if operation.kind is AgentOperationKind.EXACT_START
+            )
+            if starts:
+                break
+        snapshot = await AgentOperationRepository(session).get_scope_snapshot_for_run(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    assert snapshot is not None
+    assert len(starts) == 1
+    assert (
+        starts[0].immutable_input["source_signal_id"] == snapshot.snapshot["source_signal_ids"][0]
+    )
+    assert "value" not in starts[0].immutable_input
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("tamper", ("missing", "malformed", "foreign"))
+async def test_anywhere_exact_source_tamper_fails_before_additional_permit_or_io(
+    tmp_path: Path,
+    execution_module: ModuleType,
+    tamper: str,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, f"anywhere-source-{tamper}.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=40,
+        exact_searches=20,
+        logical_budget=60,
+        scope_variant="anywhere",
+    )
+    clock = MutableClock()
+    signal = replace(
+        _signal(uuid4(), date(2026, 9, 10), 20_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(signal,)])
+
+    async with sessions() as session:
+        service = _service(execution_module, session, gateway, clock)
+        start = None
+        for _ in range(6):
+            await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+            await session.commit()
+            operations = await AgentOperationRepository(session).list_operations(
+                HOUSEHOLD_ID,
+                RUN_ID,
+            )
+            start = next(
+                (
+                    operation
+                    for operation in operations
+                    if operation.kind is AgentOperationKind.EXACT_START
+                ),
+                None,
+            )
+            if start is not None:
+                break
+        assert start is not None
+        before_calls = gateway.provider_calls
+        before_http = (
+            await session.execute(
+                select(func.count()).select_from(agent_provider_http_attempts_table)
+            )
+        ).scalar_one()
+        tampered = dict(start.immutable_input)
+        if tamper == "missing":
+            tampered.pop("source_signal_id")
+        elif tamper == "malformed":
+            tampered["source_signal_id"] = "not-a-uuid"
+        else:
+            tampered["source_signal_id"] = str(uuid4())
+        await session.execute(
+            update(agent_run_operations_table)
+            .where(agent_run_operations_table.c.id == str(start.id))
+            .values(immutable_input_json=json.dumps(tampered, separators=(",", ":")))
+        )
+        await session.commit()
+
+        terminal = await _run_until_terminal(service, session, limit=8)
+        after_http = (
+            await session.execute(
+                select(func.count()).select_from(agent_provider_http_attempts_table)
+            )
+        ).scalar_one()
+
+    assert terminal.status == "failed"
+    assert terminal.error_code == "agent_operation_input_invalid"
+    assert gateway.provider_calls == before_calls == 1
+    assert after_http == before_http == 1
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_anywhere_poll_revalidates_tampered_root_source_before_new_io(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-poll-root-source.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=40,
+        exact_searches=20,
+        logical_budget=60,
+        scope_variant="anywhere",
+    )
+    clock = MutableClock()
+    signal = replace(
+        _signal(uuid4(), date(2026, 9, 10), 20_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(signal,)])
+
+    async with sessions() as session:
+        service = _service(execution_module, session, gateway, clock)
+        root = None
+        poll = None
+        for _ in range(10):
+            await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+            await session.commit()
+            operations = await AgentOperationRepository(session).list_operations(
+                HOUSEHOLD_ID,
+                RUN_ID,
+            )
+            root = next(
+                (
+                    operation
+                    for operation in operations
+                    if operation.kind is AgentOperationKind.EXACT_START
+                    and operation.status is AgentOperationStatus.SUCCEEDED
+                ),
+                None,
+            )
+            poll = next(
+                (
+                    operation
+                    for operation in operations
+                    if operation.kind is AgentOperationKind.EXACT_POLL
+                    and operation.status is AgentOperationStatus.PENDING
+                ),
+                None,
+            )
+            if root is not None and poll is not None:
+                break
+        assert root is not None and poll is not None
+        tampered = dict(root.immutable_input)
+        tampered["source_signal_id"] = str(uuid4())
+        await session.execute(
+            update(agent_run_operations_table)
+            .where(agent_run_operations_table.c.id == str(root.id))
+            .values(immutable_input_json=json.dumps(tampered, separators=(",", ":")))
+        )
+        await session.commit()
+        calls_before = gateway.provider_calls
+        reservations_before = (
+            await session.execute(
+                select(func.count()).select_from(agent_provider_http_attempts_table)
+            )
+        ).scalar_one()
+
+        terminal = await _run_until_terminal(service, session, limit=6)
+        reservations_after = (
+            await session.execute(
+                select(func.count()).select_from(agent_provider_http_attempts_table)
+            )
+        ).scalar_one()
+
+    assert terminal.status == "failed"
+    assert terminal.error_code == "agent_operation_input_invalid"
+    assert gateway.provider_calls == calls_before == 2
+    assert reservations_after == reservations_before == 2
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("tamper", ("duplicate", "swapped"))
+async def test_anywhere_exact_source_set_tamper_is_rejected_atomically_before_io(
+    tmp_path: Path,
+    execution_module: ModuleType,
+    tamper: str,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, f"anywhere-source-set-{tamper}.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=40,
+        exact_searches=20,
+        logical_budget=60,
+        scope_variant="anywhere",
+    )
+    clock = MutableClock()
+    cdg = replace(
+        _signal(uuid4(), date(2026, 9, 10), 20_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    ory = replace(
+        _signal(uuid4(), date(2026, 9, 10), 10_000),
+        destination="ORY",
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(cdg, ory)])
+
+    async with sessions() as session:
+        service = _service(execution_module, session, gateway, clock)
+        starts: tuple[object, ...] = ()
+        for _ in range(6):
+            await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+            await session.commit()
+            operations = await AgentOperationRepository(session).list_operations(
+                HOUSEHOLD_ID,
+                RUN_ID,
+            )
+            starts = tuple(
+                operation
+                for operation in operations
+                if operation.kind is AgentOperationKind.EXACT_START
+            )
+            if len(starts) == 2:
+                break
+        assert len(starts) == 2
+        first, second = starts
+        first_input = dict(first.immutable_input)  # type: ignore[attr-defined]
+        second_input = dict(second.immutable_input)  # type: ignore[attr-defined]
+        first_source = first_input["source_signal_id"]
+        second_source = second_input["source_signal_id"]
+        if tamper == "duplicate":
+            second_input["source_signal_id"] = first_source
+        else:
+            first_input["source_signal_id"] = second_source
+            second_input["source_signal_id"] = first_source
+        for operation, payload in ((first, first_input), (second, second_input)):
+            await session.execute(
+                update(agent_run_operations_table)
+                .where(agent_run_operations_table.c.id == str(operation.id))  # type: ignore[attr-defined]
+                .values(immutable_input_json=json.dumps(payload, separators=(",", ":")))
+            )
+        await session.commit()
+        before_calls = gateway.provider_calls
+        before_http = (
+            await session.execute(
+                select(func.count()).select_from(agent_provider_http_attempts_table)
+            )
+        ).scalar_one()
+
+        terminal = await _run_until_terminal(service, session, limit=8)
+        after_http = (
+            await session.execute(
+                select(func.count()).select_from(agent_provider_http_attempts_table)
+            )
+        ).scalar_one()
+
+    assert terminal.status == "failed"
+    assert terminal.error_code == "agent_operation_input_invalid"
+    assert gateway.provider_calls == before_calls == 1
+    assert after_http == before_http == 1
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_anywhere_discovery_skips_nonmatching_rows_and_caps_before_persistence(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-provider-cap.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=2,
+        exact_searches=2,
+        logical_budget=4,
+        scope_variant="anywhere",
+        anywhere_max_destination_seeds=2,
+        anywhere_exact_verification_limit=2,
+    )
+    clock = MutableClock()
+    eligible = (
+        replace(
+            _signal(uuid4(), date(2026, 9, 10), 20_000),
+            source_kind=DiscoverySource.HOT_OFFER,
+        ),
+        replace(
+            _signal(uuid4(), date(2026, 9, 10), 15_000),
+            source_kind=DiscoverySource.HOT_OFFER,
+        ),
+        replace(
+            _signal(uuid4(), date(2026, 9, 10), 10_000),
+            destination="ORY",
+            source_kind=DiscoverySource.HOT_OFFER,
+        ),
+        replace(
+            _signal(uuid4(), date(2026, 9, 10), 5_000),
+            destination="NCE",
+            source_kind=DiscoverySource.HOT_OFFER,
+        ),
+    )
+    outside_window = replace(
+        _signal(uuid4(), date(2026, 9, 11), 1_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    ineligible_catalog = replace(
+        _signal(uuid4(), date(2026, 9, 10), 500),
+        destination="FRA",
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(
+        clock,
+        anywhere_results=[(*eligible, outside_window, ineligible_catalog)],
+    )
+
+    async with sessions() as session:
+        step = await _service(execution_module, session, gateway, clock).run_step(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+        )
+        await session.commit()
+        stored = await AgentEvidenceRepository(session).list_discovery_signals(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    assert step.operation_status == AgentOperationStatus.SUCCEEDED.value
+    assert {(signal.destination, signal.amount_minor) for signal in stored} == {
+        ("NCE", 5_000),
+        ("ORY", 10_000),
+    }
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_anywhere_discovery_runs_every_origin_and_freezes_cheapest_duplicate(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-origin-breadth.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=2,
+        exact_searches=1,
+        logical_budget=3,
+        scope_variant="anywhere",
+        anywhere_max_destination_seeds=2,
+        anywhere_exact_verification_limit=1,
+        anywhere_origin_airports=("LED", "SVO"),
+    )
+    clock = MutableClock()
+    led_signal = replace(
+        _signal(uuid4(), date(2026, 9, 10), 18_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    svo_signal = replace(
+        led_signal,
+        id=uuid4(),
+        origin="SVO",
+        observed_amount=Money(12_000, "RUB"),
+        observed_at=NOW + timedelta(minutes=6),
+    )
+    gateway = ResumableFakeGateway(
+        clock,
+        anywhere_results=[(led_signal,), (svo_signal,)],
+    )
+
+    async with sessions() as session:
+        first_step = await _service(execution_module, session, gateway, clock).run_step(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+        )
+        await session.commit()
+        assert first_step.operation_status == AgentOperationStatus.SUCCEEDED.value
+        clock.value += timedelta(minutes=6)
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            limit=16,
+        )
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        signals = await AgentEvidenceRepository(session).list_discovery_signals(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        snapshot = await AgentOperationRepository(session).get_scope_snapshot_for_run(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    suggest = tuple(
+        operation
+        for operation in operations
+        if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY
+    )
+    assert terminal.status == "completed"
+    assert [call.params.origin.code for call in gateway.anywhere_calls] == ["LED", "SVO"]
+    assert [call.params.max_results for call in gateway.anywhere_calls] == [1, 1]
+    assert [operation.immutable_input["origin"] for operation in suggest] == ["LED", "SVO"]
+    anywhere_rule = {
+        "origin_airports": ["LED", "SVO"],
+        "discovery_source_ids": ["aviasales_hot_offers"],
+        "max_destination_seeds": 2,
+        "exact_verification_limit": 1,
+        "catalog_checksum": "sha256:" + "a" * 64,
+        "taxonomy_version": "v1",
+    }
+    terminal_phase, missing_reasons = _snapshot_anywhere_discovery_phase(
+        anywhere_rule,
+        suggest[:1],
+        terminal=True,
+    )
+    pending_phase, pending_reasons = _snapshot_anywhere_discovery_phase(
+        anywhere_rule,
+        suggest[:1],
+        terminal=False,
+    )
+    assert terminal_phase.status == "partial"
+    assert missing_reasons == {"agent_discovery_binding_not_materialized": 1}
+    assert pending_phase.status == "pending"
+    assert pending_reasons == {}
+    assert len(signals) == 2
+    assert len(signals) <= 2
+    assert {(signal.origin, signal.destination) for signal in signals} == {
+        ("LED", "CDG"),
+        ("SVO", "CDG"),
+    }
+    assert snapshot is not None
+    selected_id = UUID(str(snapshot.snapshot["source_signal_ids"][0]))
+    selected = next(signal for signal in signals if signal.id == selected_id)
+    assert selected.origin == "SVO"
+    assert selected.amount_minor == 12_000
+    led_record = next(signal for signal in signals if signal.origin == "LED")
+    svo_record = next(signal for signal in signals if signal.origin == "SVO")
+    stable_led = replace(
+        led_record,
+        id=UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+        amount_minor=12_000,
+        observed_at=NOW,
+    )
+    stable_svo = replace(
+        svo_record,
+        id=UUID("00000000-0000-0000-0000-000000000001"),
+        observed_at=NOW,
+    )
+    assert execution_module._stored_discovery_order(  # type: ignore[attr-defined]
+        stable_led
+    ) < execution_module._stored_discovery_order(stable_svo)  # type: ignore[attr-defined]
+    exact_starts = tuple(
+        operation for operation in operations if operation.kind is AgentOperationKind.EXACT_START
+    )
+    assert len(exact_starts) == 1
+    assert exact_starts[0].immutable_input["origin"] == "SVO"
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_sequential_anywhere_discovery_keeps_scope_stage_running_with_next_pending(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-next-stage-state.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=2,
+        exact_searches=2,
+        logical_budget=4,
+        scope_variant="anywhere",
+        anywhere_max_destination_seeds=2,
+        anywhere_exact_verification_limit=2,
+        anywhere_origin_airports=("LED", "SVO"),
+    )
+    clock = MutableClock()
+    signal = replace(
+        _signal(uuid4(), date(2026, 9, 10), 18_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(signal,)])
+
+    async with sessions() as session:
+        step = await _service(execution_module, session, gateway, clock).run_step(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+        )
+        await session.commit()
+        repository = AgentOperationRepository(session)
+        operations = await repository.list_operations(HOUSEHOLD_ID, RUN_ID)
+        stages = await repository.list_stages(HOUSEHOLD_ID, RUN_ID)
+
+    suggest = tuple(
+        operation
+        for operation in operations
+        if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY
+    )
+    assert step.operation_status == AgentOperationStatus.SUCCEEDED.value
+    assert tuple(operation.status for operation in suggest) == (
+        AgentOperationStatus.SUCCEEDED,
+        AgentOperationStatus.PENDING,
+    )
+    assert len(stages) == 1
+    assert stages[0].status is AgentStageStatus.RUNNING
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_anywhere_scope_freeze_materialization_keeps_scope_stage_running(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-freeze-stage-state.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=1,
+        exact_searches=1,
+        logical_budget=2,
+        scope_variant="anywhere",
+        anywhere_max_destination_seeds=1,
+        anywhere_exact_verification_limit=1,
+    )
+    clock = MutableClock()
+    signal = replace(
+        _signal(uuid4(), date(2026, 9, 10), 18_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(signal,)])
+
+    async with sessions() as session:
+        step = await _service(execution_module, session, gateway, clock).run_step(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+        )
+        await session.commit()
+        repository = AgentOperationRepository(session)
+        operations = await repository.list_operations(HOUSEHOLD_ID, RUN_ID)
+        stages = await repository.list_stages(HOUSEHOLD_ID, RUN_ID)
+
+    freeze = tuple(
+        operation for operation in operations if operation.kind is AgentOperationKind.SCOPE_FREEZE
+    )
+    assert step.operation_status == AgentOperationStatus.SUCCEEDED.value
+    assert len(freeze) == 1 and freeze[0].status is AgentOperationStatus.PENDING
+    assert len(stages) == 1 and stages[0].status is AgentStageStatus.RUNNING
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_post_snapshot_coverage_stays_partial_when_one_discovery_origin_failed(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-partial-discovery-coverage.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=2,
+        exact_searches=1,
+        logical_budget=3,
+        scope_variant="anywhere",
+        coverage="full",
+        anywhere_max_destination_seeds=2,
+        anywhere_exact_verification_limit=1,
+        anywhere_origin_airports=("LED", "SVO"),
+    )
+    clock = MutableClock()
+    signal = replace(
+        _signal(uuid4(), date(2026, 9, 10), 18_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(signal,)])
+
+    async with sessions() as session:
+        execution_service = _service(execution_module, session, gateway, clock)
+        terminal = await _run_until_terminal(
+            execution_service,
+            session,
+            limit=20,
+        )
+        await session.rollback()
+        view = await AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(clock=clock),
+            clock=clock,
+        ).get_run(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
+
+    assert terminal.status == "partial"
+    assert view.coverage_report is not None
+    report = view.coverage_report
+    assert report.completion == "partial"
+    assert (report.planned, report.succeeded, report.failed) == (1, 1, 0)
+    assert report.discovery_phase is not None
+    assert report.discovery_phase.status == "partial"
+    assert report.discovery_phase.terminal_reason == "provider_schema"
+    assert report.reason_counts == {"provider_schema": 1}
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_anywhere_structural_corruption_rejects_the_whole_provider_batch(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-provider-corrupt.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=2,
+        exact_searches=2,
+        logical_budget=4,
+        scope_variant="anywhere",
+        anywhere_max_destination_seeds=2,
+        anywhere_exact_verification_limit=2,
+    )
+    clock = MutableClock()
+    valid = replace(
+        _signal(uuid4(), date(2026, 9, 10), 10_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    corrupt = replace(valid, provider_id="foreign_provider", destination="ORY")
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(valid, corrupt)])
+
+    async with sessions() as session:
+        step = await _service(execution_module, session, gateway, clock).run_step(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+        )
+        await session.commit()
+        stored = await AgentEvidenceRepository(session).list_discovery_signals(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    assert step.operation_status == AgentOperationStatus.FAILED.value
+    assert stored == ()
+    assert operations[0].error_code == "provider_schema"
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_anywhere_existing_evidence_reduces_run_wide_persistence_cap(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-existing-cap.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=2,
+        exact_searches=2,
+        logical_budget=4,
+        scope_variant="anywhere",
+        anywhere_max_destination_seeds=2,
+        anywhere_exact_verification_limit=2,
+    )
+    clock = MutableClock()
+    existing = replace(
+        _signal(uuid4(), date(2026, 9, 10), 9_000),
+        destination="ORY",
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    cdg = replace(
+        _signal(uuid4(), date(2026, 9, 10), 20_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    nce = replace(
+        _signal(uuid4(), date(2026, 9, 10), 5_000),
+        destination="NCE",
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(cdg, nce)])
+
+    async with sessions() as session:
+        service = _service(execution_module, session, gateway, clock)
+        run = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
+        assert run is not None
+        await service._ensure_initial_operation(run, clock.value)
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        root = operations[0]
+        stored_existing = replace(existing, id=_anywhere_signal_id(root.id, existing))
+        await AgentEvidenceRepository(session).append_discovery_signal(
+            NewAgentDiscoverySignal(
+                id=stored_existing.id,
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                stage_id=root.stage_id,
+                provider_id=stored_existing.provider_id,
+                origin=stored_existing.origin,
+                destination=stored_existing.destination,
+                departure_date=stored_existing.departure_date,
+                return_date=stored_existing.return_date,
+                amount_minor=stored_existing.observed_amount.minor_units,
+                currency=stored_existing.observed_amount.currency,
+                passengers=stored_existing.passengers,
+                passenger_basis=PriceBasis.PROVIDER_SINGLE_ADULT_TICKET,
+                source_kind=stored_existing.source_kind,
+                freshness=Freshness.API_CACHED,
+                observed_at=stored_existing.observed_at,
+                signal_evidence={
+                    "route_key": "LED-ORY",
+                    "source_id": "aviasales_hot_offers",
+                    "source_version": "fixture-v1",
+                },
+                fingerprint=execution_module._evidence_fingerprint(  # type: ignore[attr-defined]
+                    stored_existing.id
+                ),
+                created_at=clock.value,
+            )
+        )
+        await session.commit()
+
+        step = await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+        await session.commit()
+        stored = await AgentEvidenceRepository(session).list_discovery_signals(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    assert step.operation_status == AgentOperationStatus.SUCCEEDED.value
+    assert gateway.anywhere_calls[0].params.max_results == 1
+    assert gateway.anywhere_calls[0].params.allowed_destination_airports == frozenset(
+        {"CDG", "NCE", "ORY"}
+    )
+    assert gateway.anywhere_calls[0].params.excluded_destination_airports == frozenset({"ORY"})
+    assert {(signal.destination, signal.amount_minor) for signal in stored} == {
+        ("ORY", 9_000),
+        ("NCE", 5_000),
+    }
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_anywhere_family_run_uses_single_adult_discovery_and_actual_mix_for_exact(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-family-mix.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=1,
+        exact_searches=1,
+        logical_budget=2,
+        scope_variant="anywhere",
+        adults=2,
+        children=1,
+        infants=0,
+        anywhere_max_destination_seeds=1,
+        anywhere_exact_verification_limit=1,
+    )
+    clock = MutableClock()
+    signal = replace(
+        _signal(uuid4(), date(2026, 9, 10), 10_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(signal,)])
+
+    async with sessions() as session:
+        execution_service = _service(execution_module, session, gateway, clock)
+        terminal = await _run_until_terminal(
+            execution_service,
+            session,
+            limit=12,
+        )
+        stored = await AgentEvidenceRepository(session).list_discovery_signals(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    assert terminal.status == "completed"
+    assert len(gateway.anywhere_calls) == 1
+    discovery_params = gateway.anywhere_calls[0].params
+    assert (
+        discovery_params.adults,
+        discovery_params.children,
+        discovery_params.infants,
+    ) == (1, 0, 0)
+    assert len(stored) == 1 and stored[0].passengers == 1
+    assert len(gateway.start_calls) == 1
+    assert gateway.start_calls[0].params.passengers == 3
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_terminal_anywhere_discovery_failure_has_typed_zero_pair_coverage(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-discovery-terminal.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=40,
+        exact_searches=20,
+        logical_budget=60,
+        scope_variant="anywhere",
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            limit=8,
+        )
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        await session.rollback()
+        view = await AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(clock=clock),
+            clock=clock,
+        ).get_run(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
+
+    assert terminal.status == "failed"
+    assert terminal.error_code == "agent_no_discovery_results"
+    suggest = tuple(
+        operation
+        for operation in operations
+        if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY
+    )
+    assert len(suggest) == 1
+    assert suggest[0].status is AgentOperationStatus.SKIPPED
+    assert suggest[0].attempt_count == 1
+    assert suggest[0].error_code == "agent_no_discovery_results"
+    assert view.coverage_error_code is None
+    assert view.coverage_report is not None
+    report = view.coverage_report
+    assert report.completion == "failed"
+    assert report.frozen_input.origins == ("LED",)
+    assert report.frozen_input.destinations == ()
+    assert (report.planned, report.attempted, report.succeeded, report.failed, report.skipped) == (
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+    assert report.pairs == ()
+    assert report.reason_counts == {"agent_no_discovery_results": 1}
+    assert report.discovery_phase is not None
+    assert report.discovery_phase.status == "failed"
+    assert report.discovery_phase.terminal_reason == "agent_no_discovery_results"
+    assert report.discovery_phase.source_ids == ("aviasales_hot_offers",)
+    assert report.discovery_phase.max_destination_seeds == 40
+    assert report.discovery_phase.exact_verification_limit == 20
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_task10_anywhere_range_coverage_uses_exact_source_signal_pairs(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-range-coverage.db")
+    await _seed_run(
+        sessions,
+        date_mode="range",
+        calendar_searches=40,
+        exact_searches=20,
+        logical_budget=60,
+        scope_variant="anywhere",
+    )
+    clock = MutableClock()
+    cdg = replace(
+        _signal(uuid4(), date(2026, 9, 10), 20_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    ory = replace(
+        _signal(uuid4(), date(2026, 9, 12), 10_000),
+        destination="ORY",
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(cdg, ory)])
+
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            limit=16,
+        )
+        await session.rollback()
+        view = await AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(clock=clock),
+            clock=clock,
+        ).get_run(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
+
+    assert terminal.status == "completed"
+    assert view.coverage_report is not None
+    report = view.coverage_report
+    assert report.planned == report.attempted == report.succeeded == 2
+    assert report.failed == report.skipped == 0
+    assert tuple((pair.destination, pair.departure_date, pair.status) for pair in report.pairs) == (
+        ("ORY", date(2026, 9, 12), "succeeded"),
+        ("CDG", date(2026, 9, 10), "succeeded"),
+    )
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_anywhere_coverage_projection_rejects_tampered_snapshot_and_source_record(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "anywhere-projection-integrity.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        calendar_searches=1,
+        exact_searches=1,
+        logical_budget=2,
+        scope_variant="anywhere",
+        anywhere_max_destination_seeds=1,
+        anywhere_exact_verification_limit=1,
+    )
+    clock = MutableClock()
+    signal = replace(
+        _signal(uuid4(), date(2026, 9, 10), 18_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(signal,)])
+
+    async with sessions() as session:
+        execution_service = _service(execution_module, session, gateway, clock)
+        terminal = await _run_until_terminal(
+            execution_service,
+            session,
+            limit=16,
+        )
+        assert terminal.status == "completed"
+        await session.rollback()
+        lifecycle = AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(clock=clock),
+            clock=clock,
+        )
+        valid = await lifecycle.get_run(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
+        assert valid.coverage_error_code is None
+        assert valid.coverage_report is not None
+
+        snapshot_row = (
+            (
+                await session.execute(
+                    select(agent_run_scope_snapshots_table).where(
+                        agent_run_scope_snapshots_table.c.run_id == str(RUN_ID)
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        original_snapshot = json.loads(str(snapshot_row["snapshot_json"]))
+        original_snapshot_fingerprint = str(snapshot_row["fingerprint"])
+
+        narrowed = json.loads(json.dumps(original_snapshot))
+        narrowed["origins"] = ["SVO"]
+        wrong_catalog = json.loads(json.dumps(original_snapshot))
+        wrong_catalog["catalog_checksum"] = "sha256:" + "f" * 64
+        over_limit = json.loads(json.dumps(original_snapshot))
+        over_limit["destinations"] = ["CDG", "NCE"]
+        over_limit["source_signal_ids"] = [
+            *original_snapshot["source_signal_ids"],
+            "99999999-9999-9999-9999-999999999999",
+        ]
+        snapshot_tampers = (
+            (narrowed, execution_module._scope_snapshot_fingerprint(narrowed)),  # type: ignore[attr-defined]
+            (
+                wrong_catalog,
+                execution_module._scope_snapshot_fingerprint(wrong_catalog),  # type: ignore[attr-defined]
+            ),
+            (over_limit, execution_module._scope_snapshot_fingerprint(over_limit)),  # type: ignore[attr-defined]
+            (original_snapshot, "sha256:" + "0" * 64),
+        )
+        for payload, fingerprint in snapshot_tampers:
+            await session.execute(
+                update(agent_run_scope_snapshots_table)
+                .where(agent_run_scope_snapshots_table.c.run_id == str(RUN_ID))
+                .values(
+                    snapshot_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                    fingerprint=fingerprint,
+                )
+            )
+            await session.commit()
+            projected = await lifecycle.get_run(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
+            assert projected.coverage_report is None
+            assert projected.coverage_error_code == "agent_coverage_projection_invalid"
+            with pytest.raises(execution_module.AgentExecutionError):  # type: ignore[attr-defined]
+                await execution_service._workflow(terminal)
+            await session.execute(
+                update(agent_run_scope_snapshots_table)
+                .where(agent_run_scope_snapshots_table.c.run_id == str(RUN_ID))
+                .values(
+                    snapshot_json=str(snapshot_row["snapshot_json"]),
+                    fingerprint=original_snapshot_fingerprint,
+                )
+            )
+            await session.commit()
+
+        await session.execute(
+            update(agent_run_scope_snapshots_table)
+            .where(agent_run_scope_snapshots_table.c.run_id == str(RUN_ID))
+            .values(created_at=terminal.deadline_at + timedelta(seconds=1))
+        )
+        await session.commit()
+        projected = await lifecycle.get_run(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
+        assert projected.coverage_report is None
+        assert projected.coverage_error_code == "agent_coverage_projection_invalid"
+        with pytest.raises(execution_module.AgentExecutionError):  # type: ignore[attr-defined]
+            await execution_service._workflow(terminal)
+        await session.execute(
+            update(agent_run_scope_snapshots_table)
+            .where(agent_run_scope_snapshots_table.c.run_id == str(RUN_ID))
+            .values(created_at=snapshot_row["created_at"])
+        )
+        await session.commit()
+
+        source_row = (
+            (
+                await session.execute(
+                    select(agent_discovery_signals_table).where(
+                        agent_discovery_signals_table.c.run_id == str(RUN_ID)
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        source_tampers = (
+            {"provider_id": "foreign_provider"},
+            {"currency": "USD"},
+            {"amount_minor": None, "currency": None},
+            {"passengers": 2},
+            {"fingerprint": "sha256:" + "0" * 64},
+            {"observed_at": source_row["created_at"] - timedelta(minutes=10)},
+            {
+                "signal_evidence_json": json.dumps(
+                    {
+                        "route_key": "LED-CDG",
+                        "source_id": "foreign_source",
+                        "source_version": "fixture-v1",
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            },
+        )
+        source_columns = tuple(source_row.keys())
+        for values in source_tampers:
+            await session.execute(
+                update(agent_discovery_signals_table)
+                .where(agent_discovery_signals_table.c.id == source_row["id"])
+                .values(**values)
+            )
+            await session.commit()
+            projected = await lifecycle.get_run(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
+            assert projected.coverage_report is None
+            assert projected.coverage_error_code == "agent_coverage_projection_invalid"
+            with pytest.raises(execution_module.AgentExecutionError):  # type: ignore[attr-defined]
+                await execution_service._workflow(terminal)
+            await session.execute(
+                update(agent_discovery_signals_table)
+                .where(agent_discovery_signals_table.c.id == source_row["id"])
+                .values(
+                    **{
+                        column: source_row[column]
+                        for column in source_columns
+                        if column not in {"id", "household_id", "run_id", "stage_id"}
+                    }
+                )
+            )
+            await session.commit()
+
+        await session.execute(
+            delete(agent_run_scope_snapshots_table).where(
+                agent_run_scope_snapshots_table.c.run_id == str(RUN_ID)
+            )
+        )
+        await session.execute(
+            update(agent_discovery_signals_table)
+            .where(agent_discovery_signals_table.c.id == source_row["id"])
+            .values(
+                signal_evidence_json=json.dumps(
+                    {
+                        "route_key": "LED-CDG",
+                        "source_id": "foreign_source",
+                        "source_version": "fixture-v1",
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        )
+        await session.commit()
+        with pytest.raises(execution_module.AgentExecutionError) as freeze_error:  # type: ignore[attr-defined]
+            await execution_service._freeze_anywhere_scope(terminal, clock.value)
+        assert freeze_error.value.code == "agent_discovery_evidence_invalid"
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_terminal_coverage_marks_started_but_unfinished_pair_incomplete(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "terminal-incomplete-pair.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        exact_searches=1,
+        logical_budget=1,
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async with sessions() as session:
+        step = await _service(execution_module, session, gateway, clock).run_step(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+        )
+        await session.commit()
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    assert step.operation_status == AgentOperationStatus.SUCCEEDED.value
+    exact_start = tuple(
+        operation for operation in operations if operation.kind is AgentOperationKind.EXACT_START
+    )
+    pair = CoveragePair("LED", "CDG", date(2026, 9, 10), None)
+    outcome = _coverage_operation_outcomes((pair,), exact_start, terminal=True)[pair]
+    assert outcome.status == "failed"
+    assert outcome.reason == "agent_pair_incomplete"
     await engine.dispose()
 
 
@@ -1462,15 +3004,15 @@ async def test_empty_requested_strategies_execute_as_default_through_ticket_sema
     clock = MutableClock()
     gateway = ResumableFakeGateway(clock, connecting_evidence=True)
     if flexible:
-        gateway.calendar_results.append((_signal(uuid4(), date(2026, 9, 10), 10_000),))
+        gateway.calendar_results.append(_complete_flexible_signals())
 
     async with sessions() as session:
         terminal = await _run_until_terminal(
             _service(execution_module, session, gateway, clock),
             session,
-            limit=16,
+            limit=24,
         )
-        (evidence,) = await AgentEvidenceRepository(session).list_confirmed_evidence(
+        evidence_items = await AgentEvidenceRepository(session).list_confirmed_evidence(
             HOUSEHOLD_ID,
             RUN_ID,
         )
@@ -1481,8 +3023,10 @@ async def test_empty_requested_strategies_execute_as_default_through_ticket_sema
 
     assert terminal.status == "completed"
     assert approval is not None and approval.snapshot.approved_strategies == ()
-    assert evidence.itinerary_evidence["stops"] == 1
-    assert len(gateway.poll_calls) == 1
+    expected_evidence = 5 if flexible else 1
+    assert len(evidence_items) == expected_evidence
+    assert all(evidence.itinerary_evidence["stops"] == 1 for evidence in evidence_items)
+    assert len(gateway.poll_calls) == expected_evidence
     await engine.dispose()
 
 
@@ -1500,7 +3044,7 @@ async def test_parser_planner_lifecycle_to_executor_keeps_empty_default_strategy
     clock = MutableClock()
     gateway = ResumableFakeGateway(clock, connecting_evidence=True)
     if date_mode == "flexible":
-        gateway.calendar_results.append((_signal(uuid4(), date(2026, 9, 10), 10_000),))
+        gateway.calendar_results.append(_complete_flexible_signals())
     selections: dict[str, object] = {
         "departure_date": "2026-09-10",
         "requested_strategies": [],
@@ -1566,8 +3110,121 @@ async def test_parser_planner_lifecycle_to_executor_keeps_empty_default_strategy
 
     assert terminal.status == "completed", (terminal.error_code, plan.estimate)
     assert approval is not None and approval.snapshot.approved_strategies == ()
-    (evidence,) = evidence_items
-    assert evidence.itinerary_evidence["stops"] == 1
+    expected_evidence = 5 if date_mode == "flexible" else 1
+    assert len(evidence_items) == expected_evidence
+    assert all(evidence.itinerary_evidence["stops"] == 1 for evidence in evidence_items)
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_approved_scope_is_immutable_after_airport_catalog_mutation(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "approved-catalog-mutation.db")
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+    catalog = _MutableApprovalAirportCatalog(
+        airports=(
+            Airport(
+                iata_code="LED",
+                name="Pulkovo",
+                municipality="Saint Petersburg",
+                country_code="RU",
+                latitude=59.8003,
+                longitude=30.2625,
+                airport_type=AirportType.LARGE_AIRPORT,
+                active=True,
+                scheduled_service=True,
+                commercial_provenance="task10.mutable_catalog",
+            ),
+            Airport(
+                iata_code="CDG",
+                name="Charles de Gaulle",
+                municipality="Paris",
+                country_code="FR",
+                latitude=49.0097,
+                longitude=2.5479,
+                airport_type=AirportType.LARGE_AIRPORT,
+                active=True,
+                scheduled_service=True,
+                commercial_provenance="task10.mutable_catalog",
+            ),
+            Airport(
+                iata_code="ORY",
+                name="Orly",
+                municipality="Paris",
+                country_code="FR",
+                latitude=48.7262,
+                longitude=2.3652,
+                airport_type=AirportType.LARGE_AIRPORT,
+                active=True,
+                scheduled_service=True,
+                commercial_provenance="task10.mutable_catalog",
+            ),
+        )
+    )
+
+    async with sessions() as session:
+        lifecycle = AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(
+                clock=clock,
+                scope_resolver=ScopeResolver(repository=catalog),
+            ),
+            clock=clock,
+            provider_gateway=gateway,
+        )
+        plan = await lifecycle.create_plan(
+            CreateAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                text="LED → France",
+                selections={"departure_date": "2026-09-10", "requested_strategies": []},
+                coverage=CoverageMode.FULL,
+            )
+        )
+        assert plan.estimate is not None and plan.estimate.exact_searches == 2
+        run_view = await lifecycle.execute_plan(
+            ExecuteAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                approved_by_session_id=SESSION_ID,
+                plan_id=plan.plan_id,
+                revision_id=plan.revision_id,
+                expected_revision=plan.revision,
+                content_hash=plan.content_hash,
+                idempotency_key="approved-catalog-mutation",
+            )
+        )
+        reads_at_approval = catalog.reads
+        catalog.airports += (
+            Airport(
+                iata_code="BVA",
+                name="Beauvais",
+                municipality="Beauvais",
+                country_code="FR",
+                latitude=49.4544,
+                longitude=2.1128,
+                airport_type=AirportType.LARGE_AIRPORT,
+                active=True,
+                scheduled_service=True,
+                commercial_provenance="task10.mutable_catalog.v2",
+            ),
+        )
+        catalog.forbid_reads = True
+
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            run_id=run_view.run_id,
+            limit=16,
+        )
+
+    assert terminal.status == "completed"
+    assert catalog.reads == reads_at_approval
+    assert {call.params.destination.code for call in gateway.start_calls} == {"CDG", "ORY"}
     await engine.dispose()
 
 
@@ -1593,16 +3250,7 @@ async def test_parser_planner_lifecycle_executes_native_round_trip_surface(
     clock = MutableClock()
     gateway = ResumableFakeGateway(clock)
     if date_mode == "flexible":
-        gateway.calendar_results.append(
-            (
-                _signal(
-                    uuid4(),
-                    date(2026, 9, 10),
-                    10_000,
-                    return_date=date(2026, 9, 12),
-                ),
-            )
-        )
+        gateway.calendar_results.append(_complete_flexible_signals(return_date=date(2026, 9, 12)))
     selections: dict[str, object] = {
         "departure_date": "2026-09-10",
         "return_date": "2026-09-12",
@@ -1658,12 +3306,92 @@ async def test_parser_planner_lifecycle_executes_native_round_trip_surface(
         )
 
     assert terminal.status == "completed", (terminal.error_code, plan.estimate)
-    (evidence,) = evidence_items
-    assert len(evidence.itinerary_evidence["segments"]) == 2
-    assert evidence.itinerary_evidence["stops"] == 0
+    assert len(evidence_items) == expected_exact
+    assert all(len(evidence.itinerary_evidence["segments"]) == 2 for evidence in evidence_items)
+    assert all(evidence.itinerary_evidence["stops"] == 0 for evidence in evidence_items)
     assert len(gateway.calendar_calls) == expected_calendar
+    assert len(gateway.start_calls) == expected_exact
+    assert {call.params.return_date for call in gateway.start_calls} == {"2026-09-12"}
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_parser_planner_lifecycle_executes_round_trip_anywhere_from_one_way_seed(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "production-round-trip-anywhere.db")
+    clock = MutableClock()
+    signal = replace(
+        _signal(uuid4(), date(2026, 9, 10), 18_000),
+        source_kind=DiscoverySource.HOT_OFFER,
+    )
+    gateway = ResumableFakeGateway(clock, anywhere_results=[(signal,)])
+
+    async with sessions() as session:
+        lifecycle = AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(
+                clock=clock,
+                scope_resolver=ScopeResolver(repository=_ProductionShapeAirportCatalog()),
+            ),
+            clock=clock,
+            provider_gateway=gateway,
+        )
+        plan = await lifecycle.create_plan(
+            CreateAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                text="LED → anywhere",
+                selections={
+                    "departure_date": "2026-09-10",
+                    "return_date": "2026-09-12",
+                    "requested_strategies": [],
+                },
+                coverage=CoverageMode.QUICK,
+            )
+        )
+        assert plan.state == "awaiting_approval", plan.clarifications
+        assert plan.estimate is not None
+        assert (plan.estimate.calendar_searches, plan.estimate.exact_searches) == (40, 20)
+        assert plan.summary.scope[1].frozen is True
+        assert plan.summary.scope[1].reciprocal_anywhere_return is True
+        assert plan.summary.scope[1].origin_airports == ()
+        run_view = await lifecycle.execute_plan(
+            ExecuteAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                approved_by_session_id=SESSION_ID,
+                plan_id=plan.plan_id,
+                revision_id=plan.revision_id,
+                expected_revision=plan.revision,
+                content_hash=plan.content_hash,
+                idempotency_key="production-round-trip-anywhere",
+            )
+        )
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            run_id=run_view.run_id,
+            limit=20,
+        )
+        snapshot = await AgentOperationRepository(session).get_scope_snapshot_for_run(
+            HOUSEHOLD_ID,
+            run_view.run_id,
+        )
+        await session.rollback()
+        projected = await lifecycle.get_run(HOUSEHOLD_ID, plan.plan_id, run_view.run_id)
+
+    assert terminal.status == "completed", terminal.error_code
+    assert len(gateway.anywhere_calls) == 1
+    assert gateway.anywhere_calls[0].params.one_way is True
+    assert snapshot is not None
+    assert snapshot.snapshot["destinations"] == ("CDG",)
     assert len(gateway.start_calls) == 1
     assert gateway.start_calls[0].params.return_date == "2026-09-12"
+    assert projected.coverage_report is not None
+    assert projected.coverage_report.pairs[0].return_date == date(2026, 9, 12)
     await engine.dispose()
 
 
@@ -2264,19 +3992,20 @@ async def test_http_and_logical_budgets_stop_before_unreserved_provider_io(
     )
     logical_clock = MutableClock()
     logical_gateway = ResumableFakeGateway(logical_clock)
-    logical_gateway.calendar_results.append((_signal(uuid4(), date(2026, 9, 10), 10_000),))
+    logical_gateway.calendar_results.append(_complete_flexible_signals())
     async with logical_sessions() as session:
         terminal = await _run_until_terminal(
             _service(execution_module, session, logical_gateway, logical_clock),
             session,
+            limit=24,
         )
 
     assert terminal.status == "completed"
-    assert terminal.logical_operations_consumed == 6
-    assert terminal.http_attempts_consumed == 7
+    assert terminal.logical_operations_consumed == 10
+    assert terminal.http_attempts_consumed == 15
     assert len(logical_gateway.calendar_calls) == 5
-    assert len(logical_gateway.start_calls) == 1
-    assert len(logical_gateway.poll_calls) == 1
+    assert len(logical_gateway.start_calls) == 5
+    assert len(logical_gateway.poll_calls) == 5
     await logical_engine.dispose()
 
 
@@ -4136,6 +5865,8 @@ async def _seed_run(
     poll_rounds: int = 3,
     attempts_per_poll: int = 2,
     adults: int = 1,
+    children: int = 0,
+    infants: int = 0,
     trip_shape: Literal["one_way", "round_trip", "open_jaw", "multi_city"] = "one_way",
     round_trip_return_date: str = "2026-09-20",
     return_tamper: Literal["none", "intent", "scope"] = "none",
@@ -4152,6 +5883,10 @@ async def _seed_run(
     approved_strategies: tuple[str, ...] | None = None,
     analysis_modes: tuple[str, ...] = (),
     requests_per_minute: int = 20,
+    coverage: Literal["quick", "full"] = "quick",
+    anywhere_max_destination_seeds: int = 40,
+    anywhere_exact_verification_limit: int = 20,
+    anywhere_origin_airports: tuple[str, ...] = ("LED",),
 ) -> None:
     if logical_budget != calendar_searches + exact_searches:
         raise ValueError("test logical budget must match planned calendar + exact work")
@@ -4169,7 +5904,7 @@ async def _seed_run(
         else None
     )
     plan = {
-        "coverage": "quick",
+        "coverage": coverage,
         "approval": {"generation": 1, "expires_at": (NOW + timedelta(hours=1)).isoformat()},
         "intent": {
             "origin_text": "LED",
@@ -4177,8 +5912,8 @@ async def _seed_run(
             "trip_shape": trip_shape,
             "date_mode": date_mode,
             "adults": adults,
-            "children": 0,
-            "infants": 0,
+            "children": children,
+            "infants": infants,
             "currency": "RUB",
             "requested_strategies": list(requested_strategies),
             "preset_id": None,
@@ -4199,7 +5934,7 @@ async def _seed_run(
         "clarifications": [],
     }
     scope = {
-        "coverage": "quick",
+        "coverage": coverage,
         "legs": [
             {
                 "origin": {
@@ -4208,7 +5943,7 @@ async def _seed_run(
                     "catalog_checksum": "sha256:" + "a" * 64,
                     "taxonomy_version": "v1",
                     "commercial_provenance": "fixture",
-                    "coverage": "quick",
+                    "coverage": coverage,
                     "nearby_radius_km": 0,
                 },
                 "destination": {
@@ -4217,7 +5952,7 @@ async def _seed_run(
                     "catalog_checksum": "sha256:" + "a" * 64,
                     "taxonomy_version": "v1",
                     "commercial_provenance": "fixture",
-                    "coverage": "quick",
+                    "coverage": coverage,
                     "nearby_radius_km": 0,
                 },
                 "anywhere": None,
@@ -4254,21 +5989,28 @@ async def _seed_run(
         first_scope_leg["destination"]["airport_codes"] = airport_codes
     elif scope_variant == "anywhere":
         first_intent_leg["destination"] = {"kind": "anywhere", "value": None}
+        first_scope_leg["origin"]["airport_codes"] = list(anywhere_origin_airports)
         first_scope_leg["destination"] = None
         first_scope_leg["anywhere"] = {
-            "origin_airports": ["LED"],
+            "origin_airports": list(anywhere_origin_airports),
             "date_start": "2026-09-10",
-            "date_end": "2026-09-10",
+            "date_end": end_date or "2026-09-10",
             "allowed_country_codes": [],
             "excluded_country_codes": [],
-            "discovery_source_ids": ["fixture"],
-            "max_destination_seeds": 40,
-            "exact_verification_limit": 20,
+            "discovery_source_ids": ["aviasales_hot_offers"],
+            "max_destination_seeds": anywhere_max_destination_seeds,
+            "exact_verification_limit": anywhere_exact_verification_limit,
             "catalog_checksum": "sha256:" + "a" * 64,
             "taxonomy_version": "v1",
+            "eligible_destination_countries": {
+                "CDG": "FR",
+                "NCE": "FR",
+                "ORY": "FR",
+            },
         }
     elif scope_variant == "nearby":
         first_scope_leg["destination"]["nearby_radius_km"] = 100
+        first_scope_leg["destination"]["airport_codes"] = ["CDG", "ORY"]
     if trip_shape != "one_way":
         intent_return_origin = "SVO" if return_tamper == "intent" else "CDG"
         scope_return_origin = "SVO" if return_tamper == "scope" else "CDG"
@@ -4295,7 +6037,7 @@ async def _seed_run(
                     "catalog_checksum": "sha256:" + "a" * 64,
                     "taxonomy_version": "v1",
                     "commercial_provenance": "fixture",
-                    "coverage": "quick",
+                    "coverage": coverage,
                     "nearby_radius_km": 0,
                 },
                 "destination": {
@@ -4304,7 +6046,7 @@ async def _seed_run(
                     "catalog_checksum": "sha256:" + "a" * 64,
                     "taxonomy_version": "v1",
                     "commercial_provenance": "fixture",
-                    "coverage": "quick",
+                    "coverage": coverage,
                     "nearby_radius_km": 0,
                 },
                 "anywhere": None,
@@ -4427,6 +6169,21 @@ def _signal(
     )
 
 
+def _complete_flexible_signals(
+    *,
+    return_date: date | None = None,
+) -> tuple[DiscoverySignal, ...]:
+    return tuple(
+        _signal(
+            uuid4(),
+            date(2026, 9, day),
+            10_000 + day,
+            return_date=return_date,
+        )
+        for day in range(8, 13)
+    )
+
+
 def _calendar_signal_id(namespace: UUID, signal: DiscoverySignal) -> UUID:
     identity = "|".join(
         (
@@ -4438,6 +6195,23 @@ def _calendar_signal_id(namespace: UUID, signal: DiscoverySignal) -> UUID:
             signal.return_date.isoformat() if signal.return_date is not None else "",
             str(signal.observed_amount.minor_units),
             signal.observed_amount.currency,
+        )
+    )
+    return uuid5(namespace, f"discovery|{identity}")
+
+
+def _anywhere_signal_id(namespace: UUID, signal: DiscoverySignal) -> UUID:
+    identity = "|".join(
+        (
+            "aviasales_search",
+            "hot_offer",
+            signal.origin,
+            signal.destination,
+            signal.departure_date.isoformat(),
+            signal.return_date.isoformat() if signal.return_date is not None else "",
+            str(signal.observed_amount.minor_units),
+            signal.observed_amount.currency,
+            str(signal.passengers),
         )
     )
     return uuid5(namespace, f"discovery|{identity}")

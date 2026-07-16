@@ -31,6 +31,7 @@ from flight_hunter.ops.worker import (
     _default_worker_id,
     _empty_worker_summary,
     _parse_worker_roles,
+    _UnavailableAgentSearchGateway,
     _worker_heartbeat_role,
     main,
     run_loop,
@@ -71,6 +72,7 @@ from flight_hunter.persistence.repositories import (
     WorkerHeartbeatRecord,
     WorkerHeartbeatRepository,
 )
+from flight_hunter.providers.aviasales_search.gateway import AviasalesSearchPolicyDenied
 from flight_hunter.providers.personal_observer.runner import (
     PersonalObserverError,
     PersonalObserverErrorCode,
@@ -926,6 +928,19 @@ async def _create_empty_database(database_url: str) -> None:
     await engine.dispose()
 
 
+def test_unavailable_agent_gateway_rejects_anywhere_before_transport() -> None:
+    gateway = _UnavailableAgentSearchGateway()
+
+    with pytest.raises(AviasalesSearchPolicyDenied, match="provider_unavailable"):
+        asyncio.run(
+            gateway.discover_anywhere(
+                object(),  # type: ignore[arg-type]
+                evidence_namespace=AGENT_OPERATION_ID,
+                request_fingerprint="sha256:anywhere-unavailable",
+            )
+        )
+
+
 async def _create_seeded_agent_operation(database_url: str) -> None:
     engine = create_async_engine(database_url)
     async with engine.begin() as connection:
@@ -979,11 +994,17 @@ async def _create_seeded_agent_operation(database_url: str) -> None:
                             "origin": {
                                 "requested_scope": {"kind": "airport", "value": "LED"},
                                 "airport_codes": ["LED"],
+                                "catalog_checksum": "sha256:" + "a" * 64,
+                                "taxonomy_version": "v1",
+                                "commercial_provenance": "fixture",
                                 "nearby_radius_km": 0,
                             },
                             "destination": {
                                 "requested_scope": {"kind": "airport", "value": "CDG"},
                                 "airport_codes": ["CDG"],
+                                "catalog_checksum": "sha256:" + "a" * 64,
+                                "taxonomy_version": "v1",
+                                "commercial_provenance": "fixture",
                                 "nearby_radius_km": 0,
                             },
                             "anywhere": None,

@@ -30,6 +30,7 @@ from flight_hunter.providers.aviasales_search.client import (
     SearchStartParams,
 )
 from flight_hunter.providers.aviasales_search.gateway import (
+    AnywhereDiscoveryParams,
     AviasalesSearchCapabilityError,
     AviasalesSearchGateway,
     AviasalesSearchPolicyDenied,
@@ -674,6 +675,372 @@ def test_calendar_returns_discovery_signals_in_one_transport_call() -> None:
             )
         )[0].id
     )
+
+
+def _anywhere_params(
+    *,
+    origin: ProviderLocation | None = None,
+    date_from: date = date(2026, 9, 14),
+    date_to: date = date(2026, 9, 16),
+    currency: str = "RUB",
+    max_results: int = 40,
+    allowed_destination_airports: frozenset[str] = frozenset({"CDG", "NCE", "ORY"}),
+    excluded_destination_airports: frozenset[str] = frozenset(),
+    one_way: bool = True,
+    adults: int = 1,
+    children: int = 0,
+    infants: int = 0,
+) -> AnywhereDiscoveryParams:
+    return AnywhereDiscoveryParams(
+        origin=origin or _airport("svo"),
+        date_from=date_from,
+        date_to=date_to,
+        currency=currency,
+        max_results=max_results,
+        allowed_destination_airports=allowed_destination_airports,
+        excluded_destination_airports=excluded_destination_airports,
+        one_way=one_way,
+        adults=adults,
+        children=children,
+        infants=infants,
+    )
+
+
+def _hot_offer_payload(
+    *,
+    origin_airport: str = "SVO",
+    destination_airport: str = "CDG",
+    origin_city: str = "MOW",
+    destination_city: str = "PAR",
+    direction_city: str | None = None,
+    departure_date: str = "2026-09-15",
+    return_date: str | None = None,
+    price: int = 1234,
+    currency: str = "rub",
+    additional_directions: tuple[dict[str, object], ...] = (),
+) -> dict[str, object]:
+    direction = _hot_offer_direction(
+        origin_airport=origin_airport,
+        destination_airport=destination_airport,
+        origin_city=origin_city,
+        destination_city=destination_city,
+        direction_city=direction_city,
+        departure_date=departure_date,
+        return_date=return_date,
+        price=price,
+        currency=currency,
+    )
+    return {
+        "origin": {"translation": {"su": "Fixture origin"}, "image_url": None},
+        "directions": [direction, *additional_directions],
+        "sale_info": None,
+        "entities_info": {},
+        "tags_order": None,
+        "filters_order": [],
+    }
+
+
+def _hot_offer_direction(
+    *,
+    origin_airport: str = "SVO",
+    destination_airport: str = "CDG",
+    origin_city: str = "MOW",
+    destination_city: str = "PAR",
+    direction_city: str | None = None,
+    departure_date: str = "2026-09-15",
+    return_date: str | None = None,
+    price: int = 1234,
+    currency: str = "rub",
+) -> dict[str, object]:
+    return {
+        "destination_iata": direction_city or destination_city,
+        "ticket": {
+            "price": {
+                "signature": "fixture-signature-redacted",
+                "value": price,
+                "currency": currency,
+                "duration": 12600,
+                "gate": "fixture-gate",
+                "search_id": "fixture-search-redacted",
+                "origin_city_iata": origin_city,
+                "destination_city_iata": destination_city,
+                "depart_date": departure_date,
+                "return_date": return_date,
+                "withBaggage": False,
+                "fareKey": "fixture-fare",
+                "segments": [
+                    {
+                        "localArrivalDate": departure_date,
+                        "localArrivalTime": "13:30",
+                        "localDepartDate": departure_date,
+                        "localDepartTime": "09:00",
+                        "flightLegs": [
+                            {
+                                "localArrivalDate": departure_date,
+                                "localArrivalTime": "13:30",
+                                "localDepartDate": departure_date,
+                                "localDepartTime": "09:00",
+                                "origin": origin_airport,
+                                "destination": destination_airport,
+                                "carrier": "FH",
+                                "technicalStops": [],
+                                "flightNumber": "101",
+                                "aircraftCode": "320",
+                                "durationSeconds": 12600,
+                                "equipmentType": "aircraft",
+                            }
+                        ],
+                        "transfers": [],
+                    }
+                ],
+            },
+            "badge": None,
+        },
+        "sale_ticket": None,
+        "tags": [],
+        "tickets_count": 1,
+    }
+
+
+def test_anywhere_discovery_is_one_policy_checked_background_attempt_and_maps_hot_offer() -> None:
+    transport = _FakeTransport(gets=[_FakeResponse(payload=_hot_offer_payload())])
+    main_thread_id = threading.get_ident()
+
+    signals = asyncio.run(
+        _gateway(transport).discover_anywhere(
+            _anywhere_params(currency="rub"),
+            evidence_namespace=EVIDENCE_NAMESPACE,
+            request_fingerprint="sha256:anywhere",
+            context=ExecutionContext.WORKER,
+        )
+    )
+
+    assert len(transport.get_calls) == 1
+    call = transport.get_calls[0]
+    assert call["params"]["origin"] == "SVO"
+    assert call["params"]["origin_type"] == "airport"
+    assert call["params"]["currency"] == "rub"
+    assert call["params"]["one_way"] == "true"
+    assert call["params"]["with_baggage"] == "false"
+    assert call["params"]["direct"] == "false"
+    assert call["params"]["depart_months[]"] == ["2026-09"]
+    assert transport.thread_ids == [transport.thread_ids[0]]
+    assert transport.thread_ids[0] != main_thread_id
+    assert len(signals) == 1
+    signal = signals[0]
+    assert signal.origin == "SVO"
+    assert signal.destination == "CDG"
+    assert signal.departure_date == date(2026, 9, 15)
+    assert signal.return_date is None
+    assert signal.observed_amount == Money(123_400, "RUB")
+    assert signal.observed_at == NOW
+    assert signal.source_kind is DiscoverySource.HOT_OFFER
+    assert signal.passengers == 1
+
+
+def test_anywhere_discovery_never_maps_more_than_the_approved_result_limit() -> None:
+    payload = _hot_offer_payload(
+        additional_directions=(
+            _hot_offer_direction(
+                destination_airport="ORY",
+                departure_date="2026-09-16",
+                price=900,
+            ),
+        )
+    )
+    transport = _FakeTransport(gets=[_FakeResponse(payload=payload)])
+
+    signals = asyncio.run(
+        _gateway(transport).discover_anywhere(
+            _anywhere_params(max_results=1),
+            evidence_namespace=EVIDENCE_NAMESPACE,
+            request_fingerprint="sha256:anywhere-bounded",
+        )
+    )
+
+    assert [(signal.destination, signal.observed_amount.minor_units) for signal in signals] == [
+        ("ORY", 90_000)
+    ]
+
+
+def test_anywhere_discovery_uuid_is_stable_only_within_operation_namespace() -> None:
+    def discover(namespace: UUID) -> Any:
+        transport = _FakeTransport(gets=[_FakeResponse(payload=_hot_offer_payload())])
+        return asyncio.run(
+            _gateway(transport).discover_anywhere(
+                _anywhere_params(),
+                evidence_namespace=namespace,
+                request_fingerprint=f"sha256:anywhere:{namespace}",
+            )
+        )[0]
+
+    first = discover(EVIDENCE_NAMESPACE)
+    repeated = discover(EVIDENCE_NAMESPACE)
+    other_operation = discover(OTHER_EVIDENCE_NAMESPACE)
+
+    assert first.id == repeated.id
+    assert first.id != other_operation.id
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        _hot_offer_payload(origin_airport="LED"),
+        _hot_offer_payload(destination_city="PARIS"),
+        _hot_offer_payload(direction_city="LON"),
+        _hot_offer_payload(destination_airport="SVO"),
+        _hot_offer_payload(departure_date="2026-09-15T10:00:00"),
+        _hot_offer_payload(return_date="2026-09-20"),
+        _hot_offer_payload(price=-1),
+        _hot_offer_payload(currency="USD"),
+    ),
+)
+def test_anywhere_discovery_rejects_provider_rows_outside_frozen_request(
+    payload: dict[str, object],
+) -> None:
+    transport = _FakeTransport(gets=[_FakeResponse(payload=payload)])
+
+    with pytest.raises(AviasalesSearchSchemaError) as raised:
+        asyncio.run(
+            _gateway(transport).discover_anywhere(
+                _anywhere_params(),
+                evidence_namespace=EVIDENCE_NAMESPACE,
+                request_fingerprint="sha256:anywhere-mismatch",
+            )
+        )
+
+    assert str(raised.value) == AviasalesSearchSchemaError.code
+    assert raised.value.__cause__ is None
+    assert len(transport.get_calls) == 1
+
+
+def test_anywhere_discovery_filters_before_consuming_the_approved_result_limit() -> None:
+    payload = _hot_offer_payload(
+        departure_date="2026-09-30",
+        additional_directions=(
+            _hot_offer_direction(
+                destination_airport="ORY",
+                departure_date="2026-09-16",
+                price=800,
+            ),
+        ),
+    )
+    transport = _FakeTransport(gets=[_FakeResponse(payload=payload)])
+
+    signals = asyncio.run(
+        _gateway(transport).discover_anywhere(
+            _anywhere_params(max_results=1),
+            evidence_namespace=EVIDENCE_NAMESPACE,
+            request_fingerprint="sha256:anywhere-coarse-month",
+        )
+    )
+
+    assert [(signal.destination, signal.departure_date) for signal in signals] == [
+        ("ORY", date(2026, 9, 16))
+    ]
+
+
+def test_anywhere_discovery_returns_empty_for_only_valid_out_of_window_rows() -> None:
+    transport = _FakeTransport(
+        gets=[_FakeResponse(payload=_hot_offer_payload(departure_date="2026-09-30"))]
+    )
+
+    signals = asyncio.run(
+        _gateway(transport).discover_anywhere(
+            _anywhere_params(),
+            evidence_namespace=EVIDENCE_NAMESPACE,
+            request_fingerprint="sha256:anywhere-only-coarse-month",
+        )
+    )
+
+    assert signals == ()
+
+
+@pytest.mark.parametrize(
+    "params",
+    (
+        lambda: _anywhere_params(origin=ProviderLocation(kind="city", code="MOW")),
+        lambda: _anywhere_params(date_from=date(2026, 9, 17)),
+        lambda: _anywhere_params(
+            date_from=date(2026, 1, 1),
+            date_to=date(2027, 1, 1),
+        ),
+        lambda: _anywhere_params(currency="РУБ"),
+        lambda: _anywhere_params(max_results=0),
+        lambda: _anywhere_params(allowed_destination_airports=frozenset()),
+        lambda: _anywhere_params(
+            allowed_destination_airports=frozenset({"CDG"}),
+            excluded_destination_airports=frozenset({"ORY"}),
+        ),
+        lambda: _anywhere_params(adults=0),
+    ),
+)
+def test_anywhere_params_reject_non_airport_or_unbounded_basis(
+    params: Any,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        params()
+
+
+def test_anywhere_discovery_rejects_round_trip_before_policy_or_transport() -> None:
+    transport = _FakeTransport()
+
+    with pytest.raises(AviasalesSearchCapabilityError):
+        asyncio.run(
+            _gateway(transport).discover_anywhere(
+                _anywhere_params(one_way=False),
+                evidence_namespace=EVIDENCE_NAMESPACE,
+                request_fingerprint="sha256:anywhere-basis",
+            )
+        )
+
+    assert transport.get_calls == []
+
+
+@pytest.mark.parametrize(
+    ("adults", "children", "infants"),
+    ((2, 0, 0), (1, 1, 0), (1, 0, 1), (2, 1, 1)),
+)
+def test_anywhere_discovery_accepts_any_approved_mix_as_one_adult_indicative_basis(
+    adults: int,
+    children: int,
+    infants: int,
+) -> None:
+    transport = _FakeTransport(gets=[_FakeResponse(payload=_hot_offer_payload())])
+
+    signal = asyncio.run(
+        _gateway(transport).discover_anywhere(
+            _anywhere_params(adults=adults, children=children, infants=infants),
+            evidence_namespace=EVIDENCE_NAMESPACE,
+            request_fingerprint="sha256:anywhere-family",
+        )
+    )[0]
+    single_adult_transport = _FakeTransport(gets=[_FakeResponse(payload=_hot_offer_payload())])
+    single_adult_signal = asyncio.run(
+        _gateway(single_adult_transport).discover_anywhere(
+            _anywhere_params(),
+            evidence_namespace=EVIDENCE_NAMESPACE,
+            request_fingerprint="sha256:anywhere-single",
+        )
+    )[0]
+
+    assert signal.passengers == 1
+    assert signal.id == single_adult_signal.id
+
+
+def test_anywhere_discovery_policy_denial_performs_no_transport_call() -> None:
+    transport = _FakeTransport()
+
+    with pytest.raises(AviasalesSearchPolicyDenied, match="provider_disabled"):
+        asyncio.run(
+            _gateway(transport, enabled=False).discover_anywhere(
+                _anywhere_params(),
+                evidence_namespace=EVIDENCE_NAMESPACE,
+                request_fingerprint="sha256:anywhere-denied",
+            )
+        )
+
+    assert transport.get_calls == []
 
 
 def test_calendar_evidence_uuid_is_scoped_to_operation_namespace() -> None:

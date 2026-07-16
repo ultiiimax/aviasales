@@ -335,7 +335,7 @@ async def test_quick_anywhere_freezes_rule_and_estimates_seed_worst_case() -> No
 
 
 @pytest.mark.anyio
-async def test_quick_anywhere_rolling_window_rejects_complete_unclamped_surface() -> None:
+async def test_quick_anywhere_rolling_window_counts_one_bounded_seed_query() -> None:
     parsed = IntentParser().parse(
         "LED → anywhere",
         preset=None,
@@ -344,30 +344,43 @@ async def test_quick_anywhere_rolling_window_rejects_complete_unclamped_surface(
 
     revision = await _builder().build(parsed, CoverageMode.QUICK)
 
-    assert revision.status is PlanRevisionStatus.DRAFT
-    assert revision.estimate is None
+    assert revision.status is PlanRevisionStatus.AWAITING_APPROVAL
+    assert revision.estimate is not None
+    assert revision.estimate.calendar_searches == 40
+    assert revision.estimate.exact_searches == 20
+    assert revision.estimate.logical_operations == 60
     assert len(revision.frozen_legs) == 1
     frozen = revision.frozen_legs[0]
     assert frozen.anywhere_rule is not None
     assert frozen.anywhere_rule.date_start == date(2026, 7, 14)
     assert frozen.anywhere_rule.date_end == date(2026, 10, 11)
-    (clarification,) = revision.clarifications
-    assert clarification.code == "quick_budget_too_large"
-    assert clarification.details == {
-        "calendar_searches": 180,
-        "exact_searches": 20,
-        "logical_operations": 200,
-        "limit": 60,
-    }
-    assert tuple(action.action_id for action in clarification.actions) == (
-        "narrow_scope_or_dates",
-        "choose_full_coverage",
-    )
-    assert clarification.actions[1].selections == {"coverage": "full"}
+    assert revision.clarifications == ()
 
 
 @pytest.mark.anyio
-async def test_full_anywhere_uses_full_bounds_and_requires_budget_revision() -> None:
+async def test_anywhere_range_above_twelve_months_stays_structured_draft() -> None:
+    parsed = IntentParser().parse(
+        "LED → anywhere",
+        preset=None,
+        selections={
+            "date_mode": "range",
+            "date_start": "2026-01-01",
+            "date_end": "2027-01-01",
+        },
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.QUICK)
+
+    assert revision.status is PlanRevisionStatus.DRAFT
+    assert revision.frozen_legs == ()
+    assert revision.estimate is None
+    (clarification,) = revision.clarifications
+    assert clarification.code == "anywhere_date_range_too_large"
+    assert clarification.details == {"actual_months": 13, "max_months": 12}
+
+
+@pytest.mark.anyio
+async def test_full_anywhere_default_budget_is_executable_with_two_to_one_split() -> None:
     parsed = IntentParser().parse(
         "LED → anywhere",
         preset=None,
@@ -376,17 +389,18 @@ async def test_full_anywhere_uses_full_bounds_and_requires_budget_revision() -> 
 
     revision = await _builder().build(parsed, CoverageMode.FULL)
 
-    assert revision.status is PlanRevisionStatus.DRAFT
+    assert revision.status is PlanRevisionStatus.AWAITING_APPROVAL
     frozen = revision.frozen_legs[0]
     assert frozen.anywhere_rule is not None
-    assert frozen.anywhere_rule.max_destination_seeds == 240
-    assert frozen.anywhere_rule.exact_verification_limit == 240
+    assert frozen.anywhere_rule.max_destination_seeds == 160
+    assert frozen.anywhere_rule.exact_verification_limit == 80
     assert revision.estimate is not None
-    assert revision.estimate.calendar_searches == 240
-    assert revision.estimate.exact_searches == 240
-    assert revision.estimate.logical_operations == 480
-    assert revision.estimate.requested_logical_limit == 480
-    assert tuple(item.code for item in revision.clarifications) == ("budget_revision_required",)
+    assert revision.estimate.calendar_searches == 160
+    assert revision.estimate.exact_searches == 80
+    assert revision.estimate.logical_operations == 240
+    assert revision.estimate.requested_logical_limit == 240
+    assert revision.estimate.requires_budget_revision is False
+    assert revision.clarifications == ()
 
 
 @pytest.mark.anyio
@@ -409,7 +423,10 @@ async def test_full_frozen_surface_is_not_truncated_to_quick_exact_limit() -> No
     assert revision.estimate.logical_operations == 241
     assert revision.estimate.requested_logical_limit == 241
     assert revision.estimate.requires_budget_revision is True
-    assert tuple(item.code for item in revision.clarifications) == ("budget_revision_required",)
+    (clarification,) = revision.clarifications
+    assert clarification.code == "budget_revision_required"
+    assert clarification.actions == ()
+    assert "суз" in clarification.message_ru.casefold()
 
 
 @pytest.mark.anyio
@@ -426,6 +443,21 @@ async def test_full_frozen_surface_above_absolute_limit_is_rejected() -> None:
 
     with pytest.raises(PlanBudgetExceededError, match="absolute_logical_limit"):
         await _builder(airports).build(parsed, CoverageMode.FULL)
+
+
+@pytest.mark.anyio
+async def test_same_only_route_returns_stable_draft_clarification() -> None:
+    parsed = IntentParser().parse(
+        "CDG → CDG",
+        preset=None,
+        selections={"departure_date": "2026-09-10"},
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.QUICK)
+
+    assert revision.status is PlanRevisionStatus.DRAFT
+    assert revision.estimate is None
+    assert tuple(item.code for item in revision.clarifications) == ("same_origin_destination",)
 
 
 @pytest.mark.anyio
@@ -474,10 +506,7 @@ async def test_rolling_finite_quick_scope_keeps_window_and_rejects_complete_surf
         "logical_operations": 720,
         "limit": 60,
     }
-    assert tuple(action.action_id for action in clarification.actions) == (
-        "narrow_scope_or_dates",
-        "choose_full_coverage",
-    )
+    assert tuple(action.action_id for action in clarification.actions) == ("narrow_scope_or_dates",)
 
 
 @pytest.mark.anyio

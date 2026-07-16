@@ -169,6 +169,18 @@ async def test_frozen_scope_keeps_old_checksum_after_later_catalog_import() -> N
     assert later.airport_codes == ("BVA", "CDG", "LYS", "NCE", "ORY")
 
 
+def test_catalog_checksum_binds_nearby_coordinates_and_commercial_provenance() -> None:
+    airport = _airport("CDG", "Paris", "FR")
+    original = freeze_airport_catalog((airport,))
+    moved = freeze_airport_catalog((replace(airport, latitude=airport.latitude + 0.5),))
+    reprovenanced = freeze_airport_catalog(
+        (replace(airport, commercial_provenance="verified.schedule.v2"),)
+    )
+
+    assert moved.checksum != original.checksum
+    assert reprovenanced.checksum != original.checksum
+
+
 def test_country_names_resolve_only_through_versioned_country_taxonomy() -> None:
     resolver = ScopeResolver(repository=MutableAirportCatalog(_french_catalog()))
 
@@ -233,6 +245,32 @@ async def test_city_text_groups_catalog_matches_and_asks_when_name_is_ambiguous(
 
 
 @pytest.mark.anyio
+async def test_normalized_duplicate_city_aliases_collapse_to_one_unique_scope() -> None:
+    catalog = (
+        _airport(
+            "CDG",
+            "Paris",
+            "FR",
+            keywords=("Paris", "PARIS", " paris "),
+        ),
+        _airport(
+            "ORY",
+            "Paris",
+            "FR",
+            keywords=("Paris", "PARIS", " paris "),
+        ),
+    )
+    resolver = ScopeResolver(repository=MutableAirportCatalog(catalog))
+
+    resolved = await resolver.resolve_city_text("  PARIS!!!  ")
+
+    assert isinstance(resolved, GeographyChoice)
+    assert resolved.scope == LocationScope(LocationScopeKind.CITY, "CDG")
+    assert resolved.airport_codes == ("CDG", "ORY")
+    assert len(resolved.airport_codes) == len(set(resolved.airport_codes))
+
+
+@pytest.mark.anyio
 async def test_city_anchor_expands_same_country_and_normalized_municipality() -> None:
     resolver = ScopeResolver(repository=MutableAirportCatalog(_french_catalog()))
 
@@ -279,6 +317,48 @@ async def test_nearby_expansion_is_separate_from_city_membership() -> None:
 
 
 @pytest.mark.anyio
+async def test_nearby_radius_compares_raw_distance_before_display_rounding() -> None:
+    origin = replace(_airport("AAA", "Origin", "FR"), latitude=0.0, longitude=0.0)
+    just_outside = replace(
+        _airport("BBB", "Outside", "FR"),
+        latitude=0.903,
+        longitude=0.0,
+    )
+    resolver = ScopeResolver(repository=MutableAirportCatalog((origin, just_outside)))
+
+    frozen = await resolver.resolve_finite(
+        LocationScope(LocationScopeKind.AIRPORT, "AAA"),
+        coverage=CoverageMode.FULL,
+        nearby_radius_km=100,
+    )
+
+    assert frozen.airport_codes == ("AAA",)
+
+
+@pytest.mark.anyio
+async def test_sub_kilometer_nearby_candidate_keeps_zero_display_and_uncertain_ground_cost() -> (
+    None
+):
+    origin = replace(_airport("AAA", "Origin", "FR"), latitude=0.0, longitude=0.0)
+    nearby = replace(
+        _airport("BBB", "Nearby", "FR"),
+        latitude=0.004,
+        longitude=0.0,
+    )
+    resolver = ScopeResolver(repository=MutableAirportCatalog((origin, nearby)))
+
+    frozen = await resolver.resolve_finite(
+        LocationScope(LocationScopeKind.AIRPORT, "AAA"),
+        coverage=CoverageMode.FULL,
+        nearby_radius_km=1,
+    )
+    candidate = next(item for item in frozen.airport_candidates if item.airport.iata_code == "BBB")
+
+    assert candidate.nearby_distance_km == 0
+    assert candidate.ground_cost_uncertain is True
+
+
+@pytest.mark.anyio
 async def test_anywhere_rule_freezes_origins_without_inventing_destinations() -> None:
     resolver = ScopeResolver(repository=MutableAirportCatalog(_french_catalog()))
     origins = await resolver.resolve_finite(
@@ -302,10 +382,33 @@ async def test_anywhere_rule_freezes_origins_without_inventing_destinations() ->
         date_end=date(2026, 11, 29),
         allowed_country_codes=("BE", "FR"),
         excluded_country_codes=("DE",),
-        discovery_source_ids=("aviasales_calendar", "aviasales_hot_offers"),
+        discovery_source_ids=("aviasales_hot_offers",),
         max_destination_seeds=12,
         exact_verification_limit=5,
         catalog_checksum=origins.catalog_checksum,
         taxonomy_version=resolver.taxonomy_version,
+        eligible_destination_countries=(
+            ("BRU", "BE"),
+            ("LYS", "FR"),
+            ("NCE", "FR"),
+        ),
     )
     assert not hasattr(rule, "destination_airports")
+
+
+@pytest.mark.anyio
+async def test_anywhere_rule_rejects_more_than_twelve_inclusive_months() -> None:
+    resolver = ScopeResolver(repository=MutableAirportCatalog(_french_catalog()))
+    origins = await resolver.resolve_finite(
+        LocationScope(LocationScopeKind.CITY, "CDG"),
+        coverage=CoverageMode.FULL,
+    )
+
+    with pytest.raises(ValueError, match="months"):
+        resolver.build_anywhere_rule(
+            frozen_origins=origins,
+            date_start=date(2026, 1, 1),
+            date_end=date(2027, 1, 1),
+            max_destination_seeds=12,
+            exact_verification_limit=5,
+        )

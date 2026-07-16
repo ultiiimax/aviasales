@@ -10,9 +10,11 @@ from uuid import UUID
 
 from flight_hunter.domain.agent_evidence import ConfirmedOfferEvidence, DiscoverySignal
 from flight_hunter.domain.agent_search import (
+    MAX_ANYWHERE_DISCOVERY_MONTHS,
     CapabilityState,
     LocationScopeKind,
     ProviderCapabilitySnapshot,
+    inclusive_month_count,
 )
 from flight_hunter.domain.policy import ExecutionContext, ProviderOperation, ProviderPolicy
 from flight_hunter.policy.guard import ProviderPolicyGuard
@@ -20,12 +22,14 @@ from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchClient,
     AviasalesSearchError,
     AviasalesSearchSchemaError,
+    HotOffer,
     SearchStartParams,
     normalize_results_host,
     validate_calendar_price_rows,
 )
 from flight_hunter.providers.aviasales_search.mapper import (
     map_calendar_price_to_discovery,
+    map_hot_offer_to_discovery,
     map_parsed_ticket_to_evidence,
 )
 from flight_hunter.providers.aviasales_search.schemas import (
@@ -148,6 +152,73 @@ class CalendarSearchParams:
         currency = self.currency.upper()
         if not _ISO_CURRENCY_RE.fullmatch(currency):
             raise ValueError("currency must be an ISO 4217 alpha-3 code")
+        for field_name in ("adults", "children", "infants"):
+            value = getattr(self, field_name)
+            minimum = 1 if field_name == "adults" else 0
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"{field_name} has an invalid value")
+        object.__setattr__(self, "currency", currency)
+
+    @property
+    def passengers(self) -> int:
+        return self.adults + self.children + self.infants
+
+
+@dataclass(frozen=True, slots=True)
+class AnywhereDiscoveryParams:
+    origin: ProviderLocation
+    date_from: date
+    date_to: date
+    currency: str
+    max_results: int
+    allowed_destination_airports: frozenset[str]
+    excluded_destination_airports: frozenset[str] = frozenset()
+    one_way: bool = True
+    adults: int = 1
+    children: int = 0
+    infants: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.origin, ProviderLocation):
+            raise TypeError("origin must be ProviderLocation")
+        if self.origin.kind is not LocationScopeKind.AIRPORT:
+            raise ValueError("origin must be a frozen airport location")
+        if type(self.date_from) is not date or type(self.date_to) is not date:
+            raise TypeError("discovery bounds must be dates")
+        if self.date_to < self.date_from:
+            raise ValueError("date_to cannot be before date_from")
+        if inclusive_month_count(self.date_from, self.date_to) > MAX_ANYWHERE_DISCOVERY_MONTHS:
+            raise ValueError(
+                "anywhere discovery cannot span more than "
+                f"{MAX_ANYWHERE_DISCOVERY_MONTHS} inclusive months"
+            )
+        if not isinstance(self.currency, str):
+            raise TypeError("currency must be a string")
+        currency = self.currency.upper()
+        if not _ISO_CURRENCY_RE.fullmatch(currency):
+            raise ValueError("currency must be an ISO 4217 alpha-3 code")
+        if type(self.one_way) is not bool:
+            raise TypeError("one_way must be a boolean")
+        if type(self.max_results) is not int or self.max_results <= 0:
+            raise ValueError("max_results must be a positive integer")
+        if not isinstance(self.allowed_destination_airports, frozenset):
+            raise TypeError("allowed_destination_airports must be a frozenset")
+        if not self.allowed_destination_airports or any(
+            not isinstance(code, str) or not re.fullmatch(r"[A-Z]{3}", code)
+            for code in self.allowed_destination_airports
+        ):
+            raise ValueError("allowed_destination_airports must contain uppercase IATA codes")
+        if not isinstance(self.excluded_destination_airports, frozenset):
+            raise TypeError("excluded_destination_airports must be a frozenset")
+        if any(
+            not isinstance(code, str) or not re.fullmatch(r"[A-Z]{3}", code)
+            for code in self.excluded_destination_airports
+        ):
+            raise ValueError("excluded_destination_airports must contain uppercase IATA codes")
+        if not self.excluded_destination_airports <= self.allowed_destination_airports:
+            raise ValueError("excluded destinations must be a subset of allowed destinations")
+        if self.origin.code in self.allowed_destination_airports:
+            raise ValueError("origin cannot be an allowed destination")
         for field_name in ("adults", "children", "infants"):
             value = getattr(self, field_name)
             minimum = 1 if field_name == "adults" else 0
@@ -307,6 +378,68 @@ class AviasalesSearchGateway:
                 )
                 for price in prices
             )
+        except (TypeError, ValueError):
+            raise AviasalesSearchSchemaError() from None
+
+    async def discover_anywhere(
+        self,
+        params: AnywhereDiscoveryParams,
+        *,
+        evidence_namespace: UUID,
+        request_fingerprint: str,
+        context: ExecutionContext = ExecutionContext.WORKER,
+    ) -> tuple[DiscoverySignal, ...]:
+        if not isinstance(params, AnywhereDiscoveryParams):
+            raise TypeError("params must be AnywhereDiscoveryParams")
+        if not isinstance(evidence_namespace, UUID):
+            raise TypeError("evidence_namespace must be UUID")
+        self._require_location_capability(params.origin)
+        if not params.one_way:
+            raise AviasalesSearchCapabilityError("round_trip_hot_offers_not_supported")
+        self._authorize(request_fingerprint=request_fingerprint, context=context)
+        offers = await asyncio.to_thread(
+            self._client.hot_offers,
+            origin=params.origin.code,
+            origin_type=params.origin.kind.value,
+            market="RU",
+            passport_country="RU",
+            currency=params.currency,
+            one_way=params.one_way,
+            date_from=params.date_from,
+            date_to=params.date_to,
+            max_results=params.max_results,
+            allowed_destination_airports=params.allowed_destination_airports,
+            excluded_destination_airports=params.excluded_destination_airports,
+        )
+        observed_at = self._clock()
+        try:
+            signals: list[DiscoverySignal] = []
+            for offer in offers:
+                if not isinstance(offer, HotOffer):
+                    raise TypeError("hot offer must be HotOffer")
+                departure = date.fromisoformat(offer.departure_date)
+                if departure.isoformat() != offer.departure_date:
+                    raise ValueError("hot offer date must be canonical")
+                if not params.date_from <= departure <= params.date_to:
+                    continue
+                if (
+                    offer.destination not in params.allowed_destination_airports
+                    or offer.destination in params.excluded_destination_airports
+                ):
+                    continue
+                signals.append(
+                    map_hot_offer_to_discovery(
+                        offer,
+                        expected_origin=params.origin.code,
+                        date_from=params.date_from,
+                        date_to=params.date_to,
+                        expected_currency=params.currency,
+                        one_way=params.one_way,
+                        observed_at=observed_at,
+                        evidence_namespace=evidence_namespace,
+                    )
+                )
+            return tuple(signals)
         except (TypeError, ValueError):
             raise AviasalesSearchSchemaError() from None
 

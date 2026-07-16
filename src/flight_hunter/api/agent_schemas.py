@@ -37,6 +37,7 @@ class AgentPlanSelections(BaseModel):
     adults: StrictInt | None = Field(default=None, ge=1, le=9)
     children: StrictInt | None = Field(default=None, ge=0, le=9)
     infants: StrictInt | None = Field(default=None, ge=0, le=9)
+    nearby_radius_km: StrictInt | None = Field(default=None, ge=0, le=500)
     currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
     requested_strategies: list[RouteStrategy] | None = Field(default=None, max_length=5)
 
@@ -131,6 +132,7 @@ class AgentPlanScopeLegSummaryResponse(BaseModel):
     destination_airports: list[str]
     anywhere: bool
     frozen: bool
+    reciprocal_anywhere_return: bool
     nearby_radius_km: int
     date_mode: str
     date_start: Date | None
@@ -222,6 +224,55 @@ class AgentOperationCountsResponse(BaseModel):
     skipped: int
 
 
+class AgentCoverageFrozenInputResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    origins: list[str]
+    destinations: list[str]
+    date_start: Date
+    date_end: Date
+    return_date: Date | None
+    catalog_checksums: list[str]
+    taxonomy_versions: list[str]
+
+
+class AgentCoveragePairResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    origin: str
+    destination: str
+    departure_date: Date
+    return_date: Date | None
+    status: Literal["planned", "attempted", "succeeded", "failed", "skipped"]
+    reason: str | None
+
+
+class AgentCoverageDiscoveryPhaseResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    status: Literal["pending", "complete", "partial", "failed"]
+    terminal_reason: str | None
+    source_ids: list[str]
+    max_destination_seeds: int
+    exact_verification_limit: int
+
+
+class AgentCoverageReportResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    coverage: Literal["quick", "full"]
+    completion: Literal["pending", "complete", "full", "partial", "failed"]
+    frozen_input: AgentCoverageFrozenInputResponse
+    planned: int
+    attempted: int
+    succeeded: int
+    failed: int
+    skipped: int
+    pairs: list[AgentCoveragePairResponse]
+    reason_counts: dict[str, int]
+    discovery_phase: AgentCoverageDiscoveryPhaseResponse | None
+
+
 class AgentRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -243,6 +294,8 @@ class AgentRunResponse(BaseModel):
     http_attempt_budget: int
     http_attempts_consumed: int
     cancellation_requested: bool
+    coverage_report: AgentCoverageReportResponse | None
+    coverage_error_code: Literal["agent_coverage_projection_invalid"] | None
 
     @classmethod
     def from_view(cls, view: RunView) -> AgentRunResponse:

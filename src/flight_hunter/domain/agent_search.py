@@ -8,6 +8,17 @@ from enum import StrEnum
 _IATA_RE = re.compile(r"^[A-Z]{3}$")
 _ISO_COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
 _ISO_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+MAX_ANYWHERE_DISCOVERY_MONTHS = 12
+
+
+def inclusive_month_count(start: date, end: date) -> int:
+    """Return the number of calendar months touched by an inclusive date range."""
+
+    if type(start) is not date or type(end) is not date:
+        raise TypeError("month-count bounds must be dates")
+    if end < start:
+        raise ValueError("end cannot be before start")
+    return (end.year - start.year) * 12 + end.month - start.month + 1
 
 
 class LocationScopeKind(StrEnum):

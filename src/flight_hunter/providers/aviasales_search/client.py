@@ -10,7 +10,13 @@ from time import perf_counter, sleep
 from typing import Any, Literal, Protocol, cast
 
 from curl_cffi import requests as cc
+from curl_cffi.curl import CURL_WRITEFUNC_ERROR
 
+from flight_hunter.domain.agent_search import (
+    MAX_ANYWHERE_DISCOVERY_MONTHS,
+    inclusive_month_count,
+)
+from flight_hunter.domain.money import MAX_MONEY_MINOR_UNITS
 from flight_hunter.domain.provider_errors import ProviderOperationError
 from flight_hunter.ops.structured_logging import log_event
 from flight_hunter.providers.aviasales_search.schemas import ProviderLocation
@@ -26,6 +32,17 @@ _ASCII_IATA_RE = re.compile(r"^[A-Z]{3}$")
 _ASCII_MARKET_RE = re.compile(r"^[A-Z]{2}$")
 _RESULT_HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _RESULT_HOST_SUFFIX = "aviasales.ru"
+_DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+_HOT_OFFERS_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_HOT_OFFERS_MAX_DIRECTIONS = 512
+_HOT_OFFERS_MAX_TAGS = 64
+_HOT_OFFERS_MAX_FILTERS = 64
+_HOT_OFFERS_MAX_ENTITY_ITEMS = 2_048
+_HOT_OFFERS_MAX_SEGMENTS = 8
+_HOT_OFFERS_MAX_FLIGHT_LEGS = 16
+_HOT_OFFERS_MAX_TRANSFERS = 16
+_HOT_OFFERS_MAX_TECHNICAL_STOPS = 8
+_HOT_OFFERS_DEFAULT_MAX_RESULTS = 100
 
 
 class AviasalesSearchError(ProviderOperationError):
@@ -185,10 +202,21 @@ class SuggestPlace:
 class HotOffer:
     origin: str
     destination: str
-    departure_date: str | None
+    departure_date: str
     return_date: str | None
-    price_minor_units: int | None
-    currency: str | None
+    price_minor_units: int
+    currency: str
+
+
+@dataclass(frozen=True, slots=True)
+class _HotOfferFact:
+    origin: str
+    destination: str
+    departure_date: date
+    return_date: date | None
+    price_minor_units: int
+    currency: str
+    ordinal: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,8 +266,33 @@ class AviasalesSearchTransport(Protocol):
     ) -> AviasalesSearchResponse: ...
 
 
+class _BoundedResponseBuffer:
+    __slots__ = ("_content", "_max_response_bytes", "exceeded")
+
+    def __init__(self, max_response_bytes: int) -> None:
+        self._max_response_bytes = max_response_bytes
+        self._content = bytearray()
+        self.exceeded = False
+
+    @property
+    def content(self) -> bytes:
+        return bytes(self._content)
+
+    def write(self, chunk: bytes) -> int:
+        if self.exceeded or len(chunk) > self._max_response_bytes - len(self._content):
+            self.exceeded = True
+            return CURL_WRITEFUNC_ERROR
+        self._content.extend(chunk)
+        return len(chunk)
+
+
 class CurlCffiTransport:
     """Real transport: curl_cffi with Chrome TLS impersonation to pass CloudFront."""
+
+    def __init__(self, *, max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES) -> None:
+        if type(max_response_bytes) is not int or max_response_bytes <= 0:
+            raise ValueError("max_response_bytes must be a positive integer")
+        self._max_response_bytes = max_response_bytes
 
     def post(
         self,
@@ -249,16 +302,24 @@ class CurlCffiTransport:
         headers: Mapping[str, str],
         timeout: float,
     ) -> AviasalesSearchResponse:
-        return cast(
-            AviasalesSearchResponse,
-            cc.post(
+        buffer = _BoundedResponseBuffer(self._max_response_bytes)
+        response: cc.Response | None = None
+        try:
+            response = cc.post(
                 url,
                 json=json,
                 headers=dict(headers),
                 impersonate=DEFAULT_IMPERSONATE,
                 timeout=timeout,
-            ),
-        )
+                content_callback=buffer.write,
+            )
+        except cc.RequestsError:
+            if not buffer.exceeded:
+                raise
+        if buffer.exceeded or response is None:
+            raise AviasalesSearchSchemaError()
+        response.content = buffer.content
+        return cast(AviasalesSearchResponse, response)
 
     def get(
         self,
@@ -268,16 +329,24 @@ class CurlCffiTransport:
         headers: Mapping[str, str],
         timeout: float,
     ) -> AviasalesSearchResponse:
-        return cast(
-            AviasalesSearchResponse,
-            cc.get(
+        buffer = _BoundedResponseBuffer(self._max_response_bytes)
+        response: cc.Response | None = None
+        try:
+            response = cc.get(
                 url,
                 params=dict(params),
                 headers=dict(headers),
                 impersonate=DEFAULT_IMPERSONATE,
                 timeout=timeout,
-            ),
-        )
+                content_callback=buffer.write,
+            )
+        except cc.RequestsError:
+            if not buffer.exceeded:
+                raise
+        if buffer.exceeded or response is None:
+            raise AviasalesSearchSchemaError()
+        response.content = buffer.content
+        return cast(AviasalesSearchResponse, response)
 
 
 class AviasalesSearchClient:
@@ -509,26 +578,68 @@ class AviasalesSearchClient:
         passport_country: str = "RU",
         currency: str = "rub",
         one_way: bool = True,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        max_results: int = _HOT_OFFERS_DEFAULT_MAX_RESULTS,
+        allowed_destination_airports: frozenset[str] | None = None,
+        excluded_destination_airports: frozenset[str] = frozenset(),
     ) -> tuple[HotOffer, ...]:
+        normalized_origin = _normalized_ascii_iata(origin)
+        normalized_currency = _normalized_ascii_currency(currency)
+        if type(one_way) is not bool:
+            raise TypeError("one_way must be a boolean")
+        if type(max_results) is not int or max_results <= 0:
+            raise ValueError("max_results must be a positive integer")
+        allowed_destinations = _hot_offer_airport_filter(
+            allowed_destination_airports,
+            field_name="allowed_destination_airports",
+            allow_none=True,
+        )
+        excluded_destinations = _hot_offer_airport_filter(
+            excluded_destination_airports,
+            field_name="excluded_destination_airports",
+            allow_none=False,
+        )
+        assert excluded_destinations is not None
+        if allowed_destinations is not None:
+            if not allowed_destinations:
+                raise ValueError("allowed_destination_airports cannot be empty")
+            if not excluded_destinations <= allowed_destinations:
+                raise ValueError("excluded destinations must be a subset of allowed destinations")
+            if normalized_origin in allowed_destinations:
+                raise ValueError("origin cannot be an allowed destination")
+        depart_months = _hot_offer_departure_months(date_from=date_from, date_to=date_to)
+        request_params: dict[str, Any] = {
+            "origin": normalized_origin,
+            "origin_type": origin_type,
+            "market": market,
+            "passport_country": passport_country,
+            "language": "ru",
+            "currency": normalized_currency.lower(),
+            "one_way": str(one_way).lower(),
+            "sort_type": "price",
+            "with_baggage": "false",
+            "direct": "false",
+            "marker": self._marker,
+        }
+        if depart_months is not None:
+            request_params["depart_months[]"] = list(depart_months)
         response = self._request(
             "GET",
             f"{self._explore_base_url}/v1/hot_offers/list.json",
-            params={
-                "origin": origin.upper(),
-                "origin_type": origin_type,
-                "market": market,
-                "passport_country": passport_country,
-                "language": "ru",
-                "currency": currency.lower(),
-                "one_way": str(one_way).lower(),
-                "sort_type": "price",
-                "marker": self._marker,
-            },
+            params=request_params,
             full_url=True,
         )
-        return tuple(
-            _parse_hot_offer(item, default_currency=currency)
-            for item in _iter_items(_json_value(response))
+        return _parse_hot_offers_payload(
+            _json_value(response, max_response_bytes=_HOT_OFFERS_MAX_RESPONSE_BYTES),
+            expected_origin=normalized_origin,
+            expected_currency=normalized_currency,
+            one_way=one_way,
+            max_results=max_results,
+            date_from=date_from,
+            date_to=date_to,
+            allowed_destination_airports=allowed_destinations,
+            excluded_destination_airports=excluded_destinations,
         )
 
     def calendar_prices(
@@ -688,6 +799,16 @@ class AviasalesSearchClient:
                         url, params=params or {}, headers=headers, timeout=self._timeout
                     )
                 status = response.status_code
+            except AviasalesSearchSchemaError:
+                log_event(
+                    "provider_call",
+                    provider="aviasales_search",
+                    endpoint=_endpoint_name(target),
+                    status_code=None,
+                    error_class="schema_error",
+                    duration_ms=max(0, int((perf_counter() - started) * 1000)),
+                )
+                raise
             except Exception:  # provider transport boundary: classify + log
                 transport_failed = True
             if transport_failed:
@@ -809,10 +930,17 @@ def _json_object(response: AviasalesSearchResponse) -> dict[str, Any]:
     return payload
 
 
-def _json_value(response: AviasalesSearchResponse) -> Any:
+def _json_value(
+    response: AviasalesSearchResponse,
+    *,
+    max_response_bytes: int | None = None,
+) -> Any:
     if response.status_code >= 400:
         raise AviasalesSearchHttpStatusError(status_code=response.status_code)
-    if not response.content:
+    content = response.content
+    if not isinstance(content, bytes) or not content:
+        raise AviasalesSearchSchemaError()
+    if max_response_bytes is not None and len(content) > max_response_bytes:
         raise AviasalesSearchSchemaError()
     decode_failed = False
     payload: Any = None
@@ -883,16 +1011,416 @@ def _parse_suggest_place(item: dict[str, Any]) -> SuggestPlace:
     )
 
 
-def _parse_hot_offer(item: dict[str, Any], *, default_currency: str) -> HotOffer:
-    price = _price_minor_units(item)
-    return HotOffer(
-        origin=_first_str(item, "origin", "origin_iata").upper(),
-        destination=_first_str(item, "destination", "destination_iata").upper(),
-        departure_date=_first_str(item, "depart_date", "departure_date", "departure_at") or None,
-        return_date=_first_str(item, "return_date", "return_at") or None,
-        price_minor_units=price,
-        currency=(_first_str(item, "currency", "currency_code") or default_currency).upper(),
+def _parse_hot_offers_payload(
+    payload: object,
+    *,
+    expected_origin: str,
+    expected_currency: str,
+    one_way: bool,
+    max_results: int,
+    date_from: date | None,
+    date_to: date | None,
+    allowed_destination_airports: frozenset[str] | None,
+    excluded_destination_airports: frozenset[str],
+) -> tuple[HotOffer, ...]:
+    if not isinstance(payload, dict):
+        raise AviasalesSearchSchemaError()
+    required_keys = {
+        "origin",
+        "directions",
+        "sale_info",
+        "entities_info",
+        "tags_order",
+        "filters_order",
+    }
+    if not required_keys.issubset(payload):
+        raise AviasalesSearchSchemaError()
+    top_origin = payload["origin"]
+    translation = top_origin.get("translation") if isinstance(top_origin, dict) else None
+    if (
+        not isinstance(top_origin, dict)
+        or not {"translation", "image_url"}.issubset(top_origin)
+        or not isinstance(translation, dict)
+        or not _non_empty_string(translation.get("su"))
+        or any(
+            key in translation
+            and translation[key] is not None
+            and not isinstance(translation[key], str)
+            for key in ("ro", "da", "vi", "tv", "pr")
+        )
+        or (top_origin["image_url"] is not None and not isinstance(top_origin["image_url"], str))
+    ):
+        raise AviasalesSearchSchemaError()
+    directions = payload["directions"]
+    if not isinstance(directions, list) or len(directions) > _HOT_OFFERS_MAX_DIRECTIONS:
+        raise AviasalesSearchSchemaError()
+    if payload["sale_info"] is not None and not isinstance(payload["sale_info"], dict):
+        raise AviasalesSearchSchemaError()
+    entities_info = payload["entities_info"]
+    if not isinstance(entities_info, dict):
+        raise AviasalesSearchSchemaError()
+    entity_items = 0
+    for entity_kind in ("airports", "cities", "countries"):
+        entity_map = entities_info.get(entity_kind)
+        if entity_map is not None and not isinstance(entity_map, dict):
+            raise AviasalesSearchSchemaError()
+        if isinstance(entity_map, dict):
+            entity_items += len(entity_map)
+            if entity_items > _HOT_OFFERS_MAX_ENTITY_ITEMS:
+                raise AviasalesSearchSchemaError()
+    tags_order = payload["tags_order"]
+    if tags_order is not None and (
+        not isinstance(tags_order, list) or len(tags_order) > _HOT_OFFERS_MAX_TAGS
+    ):
+        raise AviasalesSearchSchemaError()
+    filters_order = payload["filters_order"]
+    if not isinstance(filters_order, list) or len(filters_order) > _HOT_OFFERS_MAX_FILTERS:
+        raise AviasalesSearchSchemaError()
+
+    selected: list[_HotOfferFact] = []
+    ordinal = 0
+    for direction in directions:
+        if not isinstance(direction, dict):
+            raise AviasalesSearchSchemaError()
+        direction_keys = {
+            "destination_iata",
+            "ticket",
+            "sale_ticket",
+            "tags",
+            "tickets_count",
+        }
+        if not direction_keys.issubset(direction):
+            raise AviasalesSearchSchemaError()
+        destination = _ascii_iata_or_none(direction["destination_iata"])
+        if destination is None or destination == expected_origin:
+            raise AviasalesSearchSchemaError()
+        direction_tags = direction["tags"]
+        if direction_tags is not None and (
+            not isinstance(direction_tags, list) or len(direction_tags) > _HOT_OFFERS_MAX_TAGS
+        ):
+            raise AviasalesSearchSchemaError()
+        tickets_count = direction["tickets_count"]
+        if type(tickets_count) is not int or tickets_count < 0:
+            raise AviasalesSearchSchemaError()
+        ticket = _parse_hot_offer_ticket(
+            direction["ticket"],
+            direction_destination=destination,
+            expected_origin=expected_origin,
+            expected_currency=expected_currency,
+            one_way=one_way,
+            ordinal=ordinal,
+        )
+        ordinal += 1
+        if _hot_offer_fact_matches(
+            ticket,
+            date_from=date_from,
+            date_to=date_to,
+            allowed_destination_airports=allowed_destination_airports,
+            excluded_destination_airports=excluded_destination_airports,
+        ):
+            _retain_hot_offer_fact(
+                selected,
+                ticket,
+                max_results=max_results,
+                deduplicate_destination=allowed_destination_airports is not None,
+            )
+        sale_ticket = direction["sale_ticket"]
+        if sale_ticket is not None:
+            parsed_sale = _parse_hot_offer_ticket(
+                sale_ticket,
+                direction_destination=destination,
+                expected_origin=expected_origin,
+                expected_currency=expected_currency,
+                one_way=one_way,
+                ordinal=ordinal,
+            )
+            ordinal += 1
+            if _hot_offer_fact_matches(
+                parsed_sale,
+                date_from=date_from,
+                date_to=date_to,
+                allowed_destination_airports=allowed_destination_airports,
+                excluded_destination_airports=excluded_destination_airports,
+            ):
+                _retain_hot_offer_fact(
+                    selected,
+                    parsed_sale,
+                    max_results=max_results,
+                    deduplicate_destination=allowed_destination_airports is not None,
+                )
+    if allowed_destination_airports is not None:
+        ordered = sorted(selected, key=_hot_offer_fact_rank)
+    else:
+        ordered = sorted(selected, key=lambda fact: fact.ordinal)
+    return tuple(_hot_offer_from_fact(fact) for fact in ordered)
+
+
+def _parse_hot_offer_ticket(
+    value: object,
+    *,
+    direction_destination: str,
+    expected_origin: str,
+    expected_currency: str,
+    one_way: bool,
+    ordinal: int,
+) -> _HotOfferFact:
+    if not isinstance(value, dict) or not {"price", "badge"}.issubset(value):
+        raise AviasalesSearchSchemaError()
+    if value["badge"] is not None and not isinstance(value["badge"], dict):
+        raise AviasalesSearchSchemaError()
+    price = value["price"]
+    if not isinstance(price, dict):
+        raise AviasalesSearchSchemaError()
+    price_keys = {
+        "signature",
+        "value",
+        "currency",
+        "duration",
+        "gate",
+        "search_id",
+        "origin_city_iata",
+        "destination_city_iata",
+        "depart_date",
+        "return_date",
+        "withBaggage",
+        "fareKey",
+        "segments",
+    }
+    if not price_keys.issubset(price):
+        raise AviasalesSearchSchemaError()
+    # The signature proves this is the nested price fragment, but it remains private.
+    if not isinstance(price["signature"], str) or not price["signature"]:
+        raise AviasalesSearchSchemaError()
+    duration = price["duration"]
+    if type(duration) is not int or duration < 0:
+        raise AviasalesSearchSchemaError()
+    for key in ("gate", "search_id", "fareKey"):
+        if not isinstance(price[key], str) or not price[key]:
+            raise AviasalesSearchSchemaError()
+    if type(price["withBaggage"]) is not bool or not isinstance(price["segments"], list):
+        raise AviasalesSearchSchemaError()
+
+    origin_city = _ascii_iata_or_none(price["origin_city_iata"])
+    destination_city = _ascii_iata_or_none(price["destination_city_iata"])
+    currency = _ascii_currency_or_none(price["currency"])
+    departure = _provider_date_or_none(price["depart_date"])
+    raw_return = price["return_date"]
+    returned = _provider_date_or_none(raw_return) if raw_return is not None else None
+    raw_amount = price["value"]
+    if (
+        origin_city is None
+        or destination_city != direction_destination
+        or origin_city == destination_city
+        or currency != expected_currency
+        or departure is None
+        or (raw_return is not None and returned is None)
+        or isinstance(raw_amount, bool)
+        or not isinstance(raw_amount, int | float)
+        or (isinstance(raw_amount, float) and not raw_amount.is_integer())
+        or raw_amount < 0
+        or raw_amount > MAX_MONEY_MINOR_UNITS // 100
+    ):
+        raise AviasalesSearchSchemaError()
+    if one_way:
+        if returned is not None:
+            raise AviasalesSearchSchemaError()
+    elif returned is None or returned < departure:
+        raise AviasalesSearchSchemaError()
+    origin, destination = _parse_hot_offer_airport_itinerary(
+        price["segments"],
+        expected_departure=departure,
     )
+    if origin != expected_origin or destination == origin:
+        raise AviasalesSearchSchemaError()
+    return _HotOfferFact(
+        origin=origin,
+        destination=destination,
+        departure_date=departure,
+        return_date=returned,
+        price_minor_units=int(raw_amount) * 100,
+        currency=currency,
+        ordinal=ordinal,
+    )
+
+
+def _hot_offer_fact_matches(
+    fact: _HotOfferFact,
+    *,
+    date_from: date | None,
+    date_to: date | None,
+    allowed_destination_airports: frozenset[str] | None,
+    excluded_destination_airports: frozenset[str],
+) -> bool:
+    if (
+        date_from is not None
+        and date_to is not None
+        and not date_from <= fact.departure_date <= date_to
+    ):
+        return False
+    if (
+        allowed_destination_airports is not None
+        and fact.destination not in allowed_destination_airports
+    ):
+        return False
+    return fact.destination not in excluded_destination_airports
+
+
+def _hot_offer_fact_rank(fact: _HotOfferFact) -> tuple[int, date, date, str, str, str, int]:
+    return (
+        fact.price_minor_units,
+        fact.departure_date,
+        fact.return_date or date.min,
+        fact.destination,
+        fact.origin,
+        fact.currency,
+        fact.ordinal,
+    )
+
+
+def _retain_hot_offer_fact(
+    selected: list[_HotOfferFact],
+    candidate: _HotOfferFact,
+    *,
+    max_results: int,
+    deduplicate_destination: bool,
+) -> None:
+    candidate_rank = _hot_offer_fact_rank(candidate)
+    if deduplicate_destination:
+        for index, current in enumerate(selected):
+            if current.destination == candidate.destination:
+                if candidate_rank < _hot_offer_fact_rank(current):
+                    selected[index] = candidate
+                return
+    if len(selected) < max_results:
+        selected.append(candidate)
+        return
+    worst_index = max(range(len(selected)), key=lambda index: _hot_offer_fact_rank(selected[index]))
+    if candidate_rank < _hot_offer_fact_rank(selected[worst_index]):
+        selected[worst_index] = candidate
+
+
+def _hot_offer_from_fact(fact: _HotOfferFact) -> HotOffer:
+    return HotOffer(
+        origin=fact.origin,
+        destination=fact.destination,
+        departure_date=fact.departure_date.isoformat(),
+        return_date=fact.return_date.isoformat() if fact.return_date is not None else None,
+        price_minor_units=fact.price_minor_units,
+        currency=fact.currency,
+    )
+
+
+def _parse_hot_offer_airport_itinerary(
+    value: object,
+    *,
+    expected_departure: date,
+) -> tuple[str, str]:
+    if not isinstance(value, list) or not value or len(value) > _HOT_OFFERS_MAX_SEGMENTS:
+        raise AviasalesSearchSchemaError()
+    itinerary_origin: str | None = None
+    previous_destination: str | None = None
+    first_departure: date | None = None
+    for segment in value:
+        if not isinstance(segment, dict):
+            raise AviasalesSearchSchemaError()
+        segment_keys = {
+            "localArrivalDate",
+            "localArrivalTime",
+            "localDepartDate",
+            "localDepartTime",
+            "flightLegs",
+            "transfers",
+        }
+        if not segment_keys.issubset(segment):
+            raise AviasalesSearchSchemaError()
+        segment_departure = _provider_date_or_none(segment["localDepartDate"])
+        segment_arrival = _provider_date_or_none(segment["localArrivalDate"])
+        if (
+            segment_departure is None
+            or segment_arrival is None
+            or not _non_empty_string(segment["localDepartTime"])
+            or not _non_empty_string(segment["localArrivalTime"])
+            or not isinstance(segment["transfers"], list)
+            or len(segment["transfers"]) > _HOT_OFFERS_MAX_TRANSFERS
+        ):
+            raise AviasalesSearchSchemaError()
+        flight_legs = segment["flightLegs"]
+        if (
+            not isinstance(flight_legs, list)
+            or not flight_legs
+            or len(flight_legs) > _HOT_OFFERS_MAX_FLIGHT_LEGS
+        ):
+            raise AviasalesSearchSchemaError()
+        segment_first_departure: date | None = None
+        segment_last_arrival: date | None = None
+        for flight_leg in flight_legs:
+            if not isinstance(flight_leg, dict):
+                raise AviasalesSearchSchemaError()
+            flight_leg_keys = {
+                "localArrivalDate",
+                "localArrivalTime",
+                "localDepartDate",
+                "localDepartTime",
+                "origin",
+                "destination",
+                "carrier",
+                "technicalStops",
+                "flightNumber",
+                "aircraftCode",
+                "durationSeconds",
+                "equipmentType",
+            }
+            if not flight_leg_keys.issubset(flight_leg):
+                raise AviasalesSearchSchemaError()
+            leg_departure = _provider_date_or_none(flight_leg["localDepartDate"])
+            leg_arrival = _provider_date_or_none(flight_leg["localArrivalDate"])
+            origin = _ascii_iata_or_none(flight_leg["origin"])
+            destination = _ascii_iata_or_none(flight_leg["destination"])
+            technical_stops = flight_leg["technicalStops"]
+            duration_seconds = flight_leg["durationSeconds"]
+            required_strings = (
+                flight_leg["localArrivalTime"],
+                flight_leg["localDepartTime"],
+                flight_leg["carrier"],
+                flight_leg["flightNumber"],
+                flight_leg["aircraftCode"],
+                flight_leg["equipmentType"],
+            )
+            if (
+                leg_departure is None
+                or leg_arrival is None
+                or origin is None
+                or destination is None
+                or origin == destination
+                or any(not _non_empty_string(item) for item in required_strings)
+                or not isinstance(technical_stops, list)
+                or len(technical_stops) > _HOT_OFFERS_MAX_TECHNICAL_STOPS
+                or any(not _non_empty_string(item) for item in technical_stops)
+                or type(duration_seconds) is not int
+                or duration_seconds < 0
+                or (previous_destination is not None and origin != previous_destination)
+            ):
+                raise AviasalesSearchSchemaError()
+            if itinerary_origin is None:
+                itinerary_origin = origin
+                first_departure = leg_departure
+            if segment_first_departure is None:
+                segment_first_departure = leg_departure
+            segment_last_arrival = leg_arrival
+            previous_destination = destination
+        if segment_first_departure != segment_departure or segment_last_arrival != segment_arrival:
+            raise AviasalesSearchSchemaError()
+    if (
+        itinerary_origin is None
+        or previous_destination is None
+        or first_departure != expected_departure
+    ):
+        raise AviasalesSearchSchemaError()
+    return itinerary_origin, previous_destination
+
+
+def _non_empty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value)
 
 
 def _parse_calendar_price(item: dict[str, Any]) -> CalendarPrice | None:
@@ -964,7 +1492,11 @@ def validate_calendar_price_rows(
                 continue
         elif returned is None or returned < departure:
             continue
-        if type(price.price_minor_units) is not int or price.price_minor_units < 0:
+        if (
+            type(price.price_minor_units) is not int
+            or price.price_minor_units < 0
+            or price.price_minor_units > MAX_MONEY_MINOR_UNITS
+        ):
             schema_corruption = True
             continue
         row_currency = _ascii_currency_or_none(price.currency)
@@ -1014,6 +1546,23 @@ def _ascii_currency_or_none(value: object) -> str | None:
     return normalized if _ASCII_CURRENCY_RE.fullmatch(normalized) else None
 
 
+def _hot_offer_airport_filter(
+    value: frozenset[str] | None,
+    *,
+    field_name: str,
+    allow_none: bool,
+) -> frozenset[str] | None:
+    if value is None:
+        if allow_none:
+            return None
+        raise TypeError(f"{field_name} must be a frozenset")
+    if not isinstance(value, frozenset):
+        raise TypeError(f"{field_name} must be a frozenset")
+    if any(not isinstance(code, str) or not _ASCII_IATA_RE.fullmatch(code) for code in value):
+        raise ValueError(f"{field_name} must contain uppercase IATA codes")
+    return value
+
+
 def _request_date(value: str) -> date:
     if not isinstance(value, str):
         raise TypeError("calendar date must be an ISO date string")
@@ -1024,6 +1573,38 @@ def _request_date(value: str) -> date:
     if parsed.isoformat() != value:
         raise ValueError("calendar date must be a canonical ISO date")
     return parsed
+
+
+def _hot_offer_departure_months(
+    *,
+    date_from: date | None,
+    date_to: date | None,
+) -> tuple[str, ...] | None:
+    if date_from is None and date_to is None:
+        return None
+    if type(date_from) is not date or type(date_to) is not date:
+        raise TypeError("hot-offer bounds must both be dates")
+    if date_to < date_from:
+        raise ValueError("date_to cannot be before date_from")
+    month_count = inclusive_month_count(date_from, date_to)
+    if month_count > MAX_ANYWHERE_DISCOVERY_MONTHS:
+        raise ValueError(
+            "hot-offer discovery cannot span more than "
+            f"{MAX_ANYWHERE_DISCOVERY_MONTHS} inclusive months"
+        )
+    cursor = date(date_from.year, date_from.month, 1)
+    final = date(date_to.year, date_to.month, 1)
+    months: list[str] = []
+    while True:
+        months.append(f"{cursor.year:04d}-{cursor.month:02d}")
+        if cursor == final:
+            break
+        cursor = (
+            date(cursor.year + 1, 1, 1)
+            if cursor.month == 12
+            else date(cursor.year, cursor.month + 1, 1)
+        )
+    return tuple(months)
 
 
 def _provider_date_or_none(value: object) -> date | None:
@@ -1057,5 +1638,7 @@ def _price_minor_units(item: dict[str, Any]) -> int | None:
     if isinstance(raw, bool) or not isinstance(raw, int | float):
         return None
     if isinstance(raw, float) and not raw.is_integer():
+        return None
+    if raw < 0 or raw > MAX_MONEY_MINOR_UNITS // 100:
         return None
     return int(raw) * 100

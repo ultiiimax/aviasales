@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal, cast
 from uuid import UUID, uuid4
@@ -20,12 +21,24 @@ from flight_hunter.application.agent_intent import (
     ParsedIntent,
     ParsedLeg,
 )
+from flight_hunter.application.agent_operations import (
+    CoveragePair,
+    CoveragePairOutcome,
+    CoverageReport,
+    FrozenCoverageInput,
+    build_coverage_report,
+)
 from flight_hunter.application.agent_planning import (
     AgentPlanBuilder,
     PlanBudgetExceededError,
     ProposedPlanRevision,
 )
-from flight_hunter.application.agent_scope import CoverageMode, FrozenAirportScope
+from flight_hunter.application.agent_scope import (
+    CoverageMode,
+    FrozenAirportScope,
+    finite_route_pairs,
+)
+from flight_hunter.domain.agent_evidence import DiscoverySource
 from flight_hunter.domain.agent_search import (
     DateConstraint,
     DateMode,
@@ -34,8 +47,14 @@ from flight_hunter.domain.agent_search import (
     RouteStrategy,
     TripShape,
 )
+from flight_hunter.domain.offers import Freshness, PriceBasis
 from flight_hunter.persistence.agent_repositories import (
+    AgentDiscoverySignalRecord,
+    AgentEvidenceRepository,
+    AgentOperationKind,
     AgentOperationRepository,
+    AgentOperationResultType,
+    AgentOperationStatus,
     AgentPlanApprovalSnapshot,
     AgentPlanConflict,
     AgentPlanError,
@@ -45,7 +64,9 @@ from flight_hunter.persistence.agent_repositories import (
     AgentPlanRevisionRecord,
     AgentPlanRunRecord,
     AgentRunLedgerProgress,
+    AgentRunOperationRecord,
     AgentRunRepository,
+    AgentRunScopeSnapshotRecord,
     NewAgentPlan,
     NewAgentPlanApproval,
     NewAgentPlanRevision,
@@ -53,7 +74,9 @@ from flight_hunter.persistence.agent_repositories import (
 )
 
 HIDDEN_CITY_WARNING_VERSION = "hidden-city-v1"
-PARSER_VERSION = "intent-parser-v1"
+PARSER_VERSION = "intent-parser-v2"
+_PROVIDER_ID = "aviasales_search"
+_PROVIDER_CLOCK_SKEW = timedelta(minutes=5)
 _PUBLIC_RUN_ERRORS: dict[str, str] = {
     "deadline_exceeded": "Search deadline exceeded.",
     "provider_unavailable": "Flight provider is temporarily unavailable.",
@@ -72,6 +95,10 @@ _PUBLIC_RUN_ERRORS: dict[str, str] = {
     "agent_strategy_unsupported": "The approved route strategy is not supported.",
     "agent_analysis_unsupported": "The approved analysis mode is not supported.",
     "agent_provider_rate_wait": "Flight provider rate limit reached.",
+    "agent_discovery_binding_not_materialized": "An approved discovery query was not run.",
+    "agent_discovery_not_completed": "Destination discovery did not complete.",
+    "agent_pair_incomplete": "The approved route search did not complete.",
+    "agent_pair_not_materialized": "The approved route search was not started.",
     "agent_lease_expired_attempts_exhausted": "Search operation attempts were exhausted.",
     "provider_auth": "Flight provider authentication failed.",
     "provider_forbidden": "Flight provider denied the request.",
@@ -175,6 +202,7 @@ class PlanScopeLegView:
     destination_airports: tuple[str, ...]
     anywhere: bool
     frozen: bool
+    reciprocal_anywhere_return: bool
     nearby_radius_km: int
     date_mode: str
     date_start: str | None
@@ -244,6 +272,51 @@ class OperationCountsView:
 
 
 @dataclass(frozen=True, slots=True)
+class CoverageFrozenInputView:
+    origins: tuple[str, ...]
+    destinations: tuple[str, ...]
+    date_start: date
+    date_end: date
+    return_date: date | None
+    catalog_checksums: tuple[str, ...]
+    taxonomy_versions: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CoveragePairView:
+    origin: str
+    destination: str
+    departure_date: date
+    return_date: date | None
+    status: str
+    reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageDiscoveryPhaseView:
+    status: Literal["pending", "complete", "partial", "failed"]
+    terminal_reason: str | None
+    source_ids: tuple[str, ...]
+    max_destination_seeds: int
+    exact_verification_limit: int
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageReportView:
+    coverage: str
+    completion: str
+    frozen_input: CoverageFrozenInputView
+    planned: int
+    attempted: int
+    succeeded: int
+    failed: int
+    skipped: int
+    pairs: tuple[CoveragePairView, ...]
+    reason_counts: Mapping[str, int]
+    discovery_phase: CoverageDiscoveryPhaseView | None
+
+
+@dataclass(frozen=True, slots=True)
 class RunView:
     run_id: UUID
     plan_id: UUID
@@ -263,6 +336,8 @@ class RunView:
     http_attempt_budget: int
     http_attempts_consumed: int
     cancellation_requested: bool
+    coverage_report: CoverageReportView | None
+    coverage_error_code: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +365,7 @@ class AgentLifecycleService:
         self._plans = AgentPlanRepository(session)
         self._runs = AgentRunRepository(session)
         self._operations = AgentOperationRepository(session)
+        self._evidence = AgentEvidenceRepository(session)
 
     async def create_plan(self, command: CreateAgentPlan) -> PlanView:
         async with self._owned_transaction():
@@ -492,10 +568,18 @@ class AgentLifecycleService:
             latest = await self._expire_if_due(revisions[-1])
         return _plan_view(latest)
 
-    async def list_runs(self, household_id: UUID, plan_id: UUID) -> tuple[RunView, ...]:
+    async def list_runs(
+        self,
+        household_id: UUID,
+        plan_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> tuple[RunView, ...]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
         async with self._owned_transaction():
             await self._require_plan(household_id, plan_id)
-            runs = await self._runs.list_runs(household_id, plan_id)
+            runs = await self._runs.list_runs(household_id, plan_id, limit=limit)
             return await self._project_runs(household_id, runs)
 
     async def get_run(self, household_id: UUID, plan_id: UUID, run_id: UUID) -> RunView:
@@ -554,11 +638,272 @@ class AgentLifecycleService:
         household_id: UUID,
         runs: Sequence[AgentPlanRunRecord],
     ) -> tuple[RunView, ...]:
+        if not runs:
+            return ()
+        run_ids = tuple(run.id for run in runs)
         progress_by_run = await self._operations.get_run_ledger_progress(
             household_id,
-            tuple(run.id for run in runs),
+            run_ids,
         )
-        return tuple(_run_view(run, progress_by_run[run.id]) for run in runs)
+        revisions_by_id = await self._plans.get_revisions_by_ids(
+            household_id,
+            tuple(run.revision_id for run in runs),
+        )
+        snapshots_by_run = await self._operations.get_scope_snapshots_for_runs(
+            household_id,
+            run_ids,
+        )
+        signals_by_run = await self._evidence.list_discovery_signals_for_runs(
+            household_id,
+            run_ids,
+        )
+        operations_by_run = await self._operations.list_operations_for_runs(
+            household_id,
+            run_ids,
+        )
+        projected: list[RunView] = []
+        for run in runs:
+            coverage_report, coverage_error_code = self._coverage_view(
+                run,
+                revisions_by_id.get(run.revision_id),
+                snapshots_by_run.get(run.id),
+                signals_by_run.get(run.id, ()),
+                operations_by_run.get(run.id, ()),
+            )
+            projected.append(
+                _run_view(
+                    run,
+                    progress_by_run[run.id],
+                    coverage_report,
+                    coverage_error_code,
+                )
+            )
+        return tuple(projected)
+
+    def _coverage_view(
+        self,
+        run: AgentPlanRunRecord,
+        revision: AgentPlanRevisionRecord | None,
+        snapshot: AgentRunScopeSnapshotRecord | None,
+        discovery_signals: Sequence[AgentDiscoverySignalRecord],
+        operations: Sequence[AgentRunOperationRecord],
+    ) -> tuple[CoverageReportView | None, str | None]:
+        try:
+            return (
+                self._coverage_view_unchecked(
+                    run,
+                    revision,
+                    snapshot,
+                    discovery_signals,
+                    operations,
+                ),
+                None,
+            )
+        except (KeyError, OverflowError, RuntimeError, TypeError, ValueError):
+            return None, "agent_coverage_projection_invalid"
+
+    def _coverage_view_unchecked(
+        self,
+        run: AgentPlanRunRecord,
+        revision: AgentPlanRevisionRecord | None,
+        snapshot: AgentRunScopeSnapshotRecord | None,
+        discovery_signals: Sequence[AgentDiscoverySignalRecord],
+        operations: Sequence[AgentRunOperationRecord],
+    ) -> CoverageReportView | None:
+        if revision is None:
+            raise RuntimeError("stored run revision is missing")
+        scope = _json_mapping(revision.scope_snapshot_json)
+        legs = _sequence(scope.get("legs", []))
+        if not legs:
+            raise RuntimeError("stored run scope has no legs")
+        first_leg = _mapping(legs[0])
+        origin = _mapping(first_leg["origin"])
+        raw_constraint = _mapping(first_leg["date_constraint"])
+        start_text, end_text = _plan_date_bounds(raw_constraint)
+        if start_text is None:
+            raise RuntimeError("stored run scope has no departure date")
+        date_start = date.fromisoformat(start_text)
+        date_end = date.fromisoformat(end_text or start_text)
+        return_date: date | None = None
+        if len(legs) == 2:
+            return_constraint = _mapping(_mapping(legs[1])["date_constraint"])
+            return_raw = return_constraint.get("start_date")
+            if isinstance(return_raw, str):
+                return_date = date.fromisoformat(return_raw)
+        explicit_pairs: tuple[CoveragePair, ...] = ()
+        finite_pairs: tuple[tuple[str, str], ...] = ()
+        finite_pair_count = 0
+        catalog_checksums: tuple[str, ...]
+        taxonomy_versions: tuple[str, ...]
+        if first_leg.get("anywhere") is not None:
+            anywhere = _mapping(first_leg["anywhere"])
+            if snapshot is None:
+                return _anywhere_discovery_coverage_view(
+                    scope=scope,
+                    anywhere=anywhere,
+                    date_start=date_start,
+                    date_end=date_end,
+                    return_date=return_date,
+                    run=run,
+                    operations=operations,
+                )
+            (
+                rule_origins,
+                rule_source_ids,
+                max_destination_seeds,
+                exact_verification_limit,
+                rule_catalog_checksum,
+                rule_taxonomy_version,
+            ) = _anywhere_projection_values(anywhere)
+            payload = _mapping(snapshot.snapshot)
+            origins = _coverage_code_sequence(payload.get("origins"), "snapshot origins")
+            destinations = _coverage_code_sequence(
+                payload.get("destinations"),
+                "snapshot destinations",
+            )
+            source_ids = tuple(
+                UUID(_required_stored_str(value, "source signal id"))
+                for value in _sequence(payload.get("source_signal_ids", ()))
+            )
+            if (
+                snapshot.household_id != run.household_id
+                or snapshot.run_id != run.id
+                or not _durable_scope_snapshot_observation(snapshot, run)
+                or snapshot.fingerprint != _scope_snapshot_fingerprint(payload)
+                or origins != rule_origins
+                or len(source_ids) != len(destinations)
+                or len(source_ids) != len(set(source_ids))
+                or len(destinations) > exact_verification_limit
+                or len(destinations) > max_destination_seeds
+                or _required_stored_str(payload.get("coverage"), "snapshot coverage")
+                != _required_stored_str(scope.get("coverage"), "coverage")
+                or _required_stored_str(payload.get("catalog_checksum"), "catalog checksum")
+                != rule_catalog_checksum
+                or _required_stored_str(payload.get("taxonomy_version"), "taxonomy version")
+                != rule_taxonomy_version
+            ):
+                raise RuntimeError("stored anywhere coverage snapshot is invalid")
+            approved_currency = _approved_intent_currency(revision)
+            by_id = {record.id: record for record in discovery_signals}
+            pairs: list[CoveragePair] = []
+            for source_id, expected_destination in zip(source_ids, destinations, strict=True):
+                record = by_id.get(source_id)
+                if (
+                    record is None
+                    or record.household_id != run.household_id
+                    or record.run_id != run.id
+                    or record.provider_id != _PROVIDER_ID
+                    or record.origin not in origins
+                    or record.destination != expected_destination
+                    or not date_start <= record.departure_date <= date_end
+                    or record.return_date is not None
+                    or record.source_kind is not DiscoverySource.HOT_OFFER
+                    or record.freshness is not Freshness.API_CACHED
+                    or record.passenger_basis is not PriceBasis.PROVIDER_SINGLE_ADULT_TICKET
+                    or record.amount_minor is None
+                    or record.currency != approved_currency
+                    or record.passengers != 1
+                    or _required_stored_str(
+                        record.signal_evidence.get("source_id"),
+                        "source id",
+                    )
+                    not in rule_source_ids
+                    or record.fingerprint != _evidence_fingerprint(record.id)
+                    or not _durable_discovery_observation(record, run)
+                ):
+                    raise RuntimeError("stored anywhere source signal is invalid")
+                pairs.append(
+                    CoveragePair(
+                        record.origin,
+                        record.destination,
+                        record.departure_date,
+                        return_date,
+                    )
+                )
+            explicit_pairs = tuple(pairs)
+            catalog_checksums = (
+                _required_stored_str(payload.get("catalog_checksum"), "catalog checksum"),
+            )
+            taxonomy_versions = (
+                _required_stored_str(payload.get("taxonomy_version"), "taxonomy version"),
+            )
+        else:
+            destination = _mapping(first_leg["destination"])
+            origins = _coverage_scope_codes(origin)
+            destinations = _coverage_scope_codes(destination)
+            catalog_checksums = _stable_scope_values(
+                origin,
+                destination,
+                field_name="catalog_checksum",
+            )
+            taxonomy_versions = _stable_scope_values(
+                origin,
+                destination,
+                field_name="taxonomy_version",
+            )
+            finite_pair_count = len(origins) * len(destinations) - len(
+                set(origins) & set(destinations)
+            )
+        date_count = (date_end - date_start).days + 1
+        planned_count = len(explicit_pairs) or finite_pair_count * date_count
+        if date_count <= 0 or planned_count <= 0 or planned_count > run.logical_operation_budget:
+            raise RuntimeError("stored coverage surface exceeds the approved run budget")
+        if not explicit_pairs:
+            finite_pairs = finite_route_pairs(origins, destinations)
+        frozen_input = FrozenCoverageInput(
+            coverage=_required_stored_str(scope.get("coverage"), "coverage"),
+            origins=origins,
+            destinations=destinations,
+            date_start=date_start,
+            date_end=date_end,
+            return_date=return_date,
+            catalog_checksums=catalog_checksums,
+            taxonomy_versions=taxonomy_versions,
+            explicit_pairs=explicit_pairs,
+        )
+        planned_pairs = (
+            explicit_pairs
+            if explicit_pairs
+            else tuple(
+                CoveragePair(origin_code, destination_code, departure_date, return_date)
+                for origin_code, destination_code in finite_pairs
+                for departure_date in (
+                    date_start + timedelta(days=offset)
+                    for offset in range((date_end - date_start).days + 1)
+                )
+            )
+        )
+        report = build_coverage_report(
+            frozen_input=frozen_input,
+            planned_pairs=planned_pairs,
+            outcomes=_coverage_operation_outcomes(
+                planned_pairs,
+                operations,
+                terminal=run.status in {"completed", "partial", "failed", "cancelled"},
+            ),
+        )
+        view = _coverage_report_view(report)
+        if first_leg.get("anywhere") is None:
+            return view
+        discovery_phase, discovery_reasons = _snapshot_anywhere_discovery_phase(
+            _mapping(first_leg["anywhere"]),
+            operations,
+            terminal=run.status in {"completed", "partial", "failed", "cancelled"},
+        )
+        completion = view.completion
+        if discovery_phase.status in {"partial", "failed"}:
+            completion = "partial" if view.planned else "failed"
+        elif discovery_phase.status == "pending":
+            completion = "pending"
+        merged_reasons = dict(view.reason_counts)
+        for reason, count in discovery_reasons.items():
+            merged_reasons[reason] = merged_reasons.get(reason, 0) + count
+        return replace(
+            view,
+            completion=completion,
+            reason_counts=merged_reasons,
+            discovery_phase=discovery_phase,
+        )
 
     async def _build(
         self,
@@ -695,6 +1040,7 @@ def _intent_payload(parsed: ParsedIntent) -> dict[str, object]:
         "adults": parsed.adults,
         "children": parsed.children,
         "infants": parsed.infants,
+        "nearby_radius_km": parsed.nearby_radius_km,
         "currency": parsed.currency,
         "requested_strategies": [strategy.value for strategy in parsed.requested_strategies],
         "preset_id": parsed.preset_id.value if parsed.preset_id is not None else None,
@@ -754,7 +1100,11 @@ def _scope_payload(proposed: ProposedPlanRevision) -> dict[str, object]:
         "coverage": proposed.coverage.value,
         "legs": [
             {
-                "origin": _frozen_scope_payload(leg.origin_scope),
+                "origin": (
+                    _frozen_scope_payload(leg.origin_scope)
+                    if leg.origin_scope is not None
+                    else None
+                ),
                 "destination": (
                     _frozen_scope_payload(leg.destination_scope)
                     if leg.destination_scope is not None
@@ -772,11 +1122,18 @@ def _scope_payload(proposed: ProposedPlanRevision) -> dict[str, object]:
                         "exact_verification_limit": leg.anywhere_rule.exact_verification_limit,
                         "catalog_checksum": leg.anywhere_rule.catalog_checksum,
                         "taxonomy_version": leg.anywhere_rule.taxonomy_version,
+                        "eligible_destination_countries": [
+                            {"code": code, "country_code": country_code}
+                            for code, country_code in (
+                                leg.anywhere_rule.eligible_destination_countries
+                            )
+                        ],
                     }
                     if leg.anywhere_rule is not None
                     else None
                 ),
                 "date_constraint": _date_constraint_payload(leg.date_constraint),
+                "reciprocal_anywhere_return": leg.reciprocal_anywhere_return,
             }
             for leg in proposed.frozen_legs
         ],
@@ -792,6 +1149,18 @@ def _frozen_scope_payload(frozen: FrozenAirportScope) -> dict[str, object]:
         "commercial_provenance": frozen.commercial_provenance,
         "coverage": frozen.coverage.value,
         "nearby_radius_km": frozen.nearby_radius_km,
+        "airport_candidates": [
+            {
+                "code": candidate.airport.iata_code,
+                "discovery_evidence_count": candidate.discovery_evidence_count,
+                "commercial_relevance": candidate.commercial_relevance,
+                "nearby_distance_km": candidate.nearby_distance_km,
+                "ground_transfer_cost_minor": candidate.ground_transfer_cost_minor,
+                "ground_transfer_currency": candidate.ground_transfer_currency,
+                "ground_cost_uncertain": candidate.ground_cost_uncertain,
+            }
+            for candidate in frozen.airport_candidates
+        ],
     }
 
 
@@ -863,9 +1232,12 @@ def _plan_summary_view(revision: AgentPlanRevisionRecord) -> PlanSummaryView:
     capability = _json_mapping(revision.capability_snapshot_json)
     cost_model = _json_mapping(revision.cost_model_snapshot_json)
     preset_id = _optional_stored_str(intent.get("preset_id"), "preset_id")
-    preset_radius = 0
-    if preset_id is not None:
+    if "nearby_radius_km" in intent:
+        preset_radius = _stored_int(intent["nearby_radius_km"], "nearby_radius_km")
+    elif preset_id is not None:
         preset_radius = PRESET_EDITS[AgentPresetId(preset_id).value].nearby_radius_km or 0
+    else:
+        preset_radius = 0
     intent_legs = _sequence(intent.get("legs", []))
     frozen_legs = _sequence(scope_snapshot.get("legs", []))
     scope = tuple(
@@ -927,14 +1299,15 @@ def _plan_scope_leg_view(
     frozen = frozen_leg is not None
     anywhere = _scope_kind(intent_destination) == LocationScopeKind.ANYWHERE.value
     if frozen_leg is not None:
-        frozen_origin = _mapping(frozen_leg["origin"])
-        origin_airports = tuple(
-            str(value) for value in _sequence(frozen_origin.get("airport_codes", []))
-        )
-        nearby_radius_km = _stored_int(
-            frozen_origin.get("nearby_radius_km"),
-            "nearby_radius_km",
-        )
+        frozen_origin = _optional_mapping(frozen_leg.get("origin"))
+        if frozen_origin is not None:
+            origin_airports = tuple(
+                str(value) for value in _sequence(frozen_origin.get("airport_codes", []))
+            )
+            nearby_radius_km = _stored_int(
+                frozen_origin.get("nearby_radius_km"),
+                "nearby_radius_km",
+            )
         frozen_destination = _optional_mapping(frozen_leg.get("destination"))
         if frozen_destination is not None:
             destination_airports = tuple(
@@ -949,6 +1322,11 @@ def _plan_scope_leg_view(
             )
         anywhere = frozen_leg.get("anywhere") is not None
         date_constraint = _mapping(frozen_leg["date_constraint"])
+    reciprocal_anywhere_return = (
+        frozen_leg.get("reciprocal_anywhere_return", False) if frozen_leg is not None else False
+    )
+    if type(reciprocal_anywhere_return) is not bool:
+        raise RuntimeError("stored reciprocal_anywhere_return must be a boolean")
     date_start, date_end = _plan_date_bounds(date_constraint)
     return PlanScopeLegView(
         origin_kind=_scope_kind(intent_origin),
@@ -959,6 +1337,7 @@ def _plan_scope_leg_view(
         destination_airports=destination_airports,
         anywhere=anywhere,
         frozen=frozen,
+        reciprocal_anywhere_return=reciprocal_anywhere_return,
         nearby_radius_km=nearby_radius_km,
         date_mode=_required_stored_str(date_constraint.get("mode"), "date_mode"),
         date_start=date_start,
@@ -1013,7 +1392,12 @@ def _estimate_view(revision: AgentPlanRevisionRecord) -> EstimateView | None:
     return EstimateView(calendar, exact, logical, http, deadline)
 
 
-def _run_view(run: AgentPlanRunRecord, progress: AgentRunLedgerProgress) -> RunView:
+def _run_view(
+    run: AgentPlanRunRecord,
+    progress: AgentRunLedgerProgress,
+    coverage_report: CoverageReportView | None,
+    coverage_error_code: str | None,
+) -> RunView:
     public_error_code, public_message = _public_run_error(run.error_code)
     return RunView(
         run_id=run.id,
@@ -1052,6 +1436,438 @@ def _run_view(run: AgentPlanRunRecord, progress: AgentRunLedgerProgress) -> RunV
         http_attempt_budget=run.http_attempt_budget,
         http_attempts_consumed=run.http_attempts_consumed,
         cancellation_requested=run.status in {"cancel_requested", "cancelled"},
+        coverage_report=coverage_report,
+        coverage_error_code=coverage_error_code,
+    )
+
+
+def _coverage_scope_codes(scope: Mapping[str, object]) -> tuple[str, ...]:
+    codes = tuple(str(value).upper() for value in _sequence(scope.get("airport_codes", [])))
+    if not codes or len(set(codes)) != len(codes):
+        raise ValueError("frozen coverage airport codes must be non-empty and unique")
+    raw_candidates = scope.get("airport_candidates")
+    if raw_candidates is not None:
+        candidates = tuple(_mapping(value) for value in _sequence(raw_candidates))
+        candidate_codes = tuple(
+            _required_stored_str(candidate.get("code"), "candidate code")
+            for candidate in candidates
+        )
+        if candidate_codes != codes:
+            raise ValueError("frozen coverage candidate codes differ from airport codes")
+    return codes
+
+
+def _coverage_code_sequence(value: object, field_name: str) -> tuple[str, ...]:
+    codes = tuple(_required_stored_str(item, field_name).upper() for item in _sequence(value))
+    if (
+        not codes
+        or len(codes) != len(set(codes))
+        or any(len(code) != 3 or not code.isascii() or not code.isalpha() for code in codes)
+    ):
+        raise RuntimeError(f"stored {field_name} must contain unique IATA codes")
+    return codes
+
+
+def _stable_scope_values(
+    *scopes: Mapping[str, object],
+    field_name: str,
+) -> tuple[str, ...]:
+    values = tuple(
+        dict.fromkeys(_required_stored_str(scope.get(field_name), field_name) for scope in scopes)
+    )
+    if not values:
+        raise ValueError(f"{field_name} is required")
+    return values
+
+
+def _scope_snapshot_fingerprint(value: Mapping[str, object]) -> str:
+    encoded = json.dumps(
+        _mutable_projection_json(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _mutable_projection_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _mutable_projection_json(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_mutable_projection_json(item) for item in value]
+    return value
+
+
+def _approved_intent_currency(revision: AgentPlanRevisionRecord) -> str:
+    canonical = _json_mapping(revision.plan_json)
+    intent = _mapping(canonical.get("intent"))
+    currency = _required_stored_str(intent.get("currency"), "approved currency").upper()
+    if len(currency) != 3 or not currency.isascii() or not currency.isalpha():
+        raise RuntimeError("stored approved currency is invalid")
+    return currency
+
+
+def _evidence_fingerprint(evidence_id: UUID) -> str:
+    return "sha256:" + hashlib.sha256(str(evidence_id).encode("utf-8")).hexdigest()
+
+
+def _durable_discovery_observation(
+    record: AgentDiscoverySignalRecord,
+    run: AgentPlanRunRecord,
+) -> bool:
+    times = (record.observed_at, record.created_at, run.created_at, run.deadline_at)
+    if any(value.tzinfo is None or value.utcoffset() is None for value in times):
+        return False
+    observed_at = record.observed_at.astimezone(UTC)
+    created_at = record.created_at.astimezone(UTC)
+    run_start = run.created_at.astimezone(UTC)
+    run_deadline = run.deadline_at.astimezone(UTC)
+    lower_bound = max(run_start, created_at - _PROVIDER_CLOCK_SKEW)
+    return (
+        run_start <= created_at <= run_deadline + _PROVIDER_CLOCK_SKEW
+        and lower_bound <= observed_at <= created_at + _PROVIDER_CLOCK_SKEW
+    )
+
+
+def _durable_scope_snapshot_observation(
+    snapshot: AgentRunScopeSnapshotRecord,
+    run: AgentPlanRunRecord,
+) -> bool:
+    if snapshot.created_at.tzinfo is None or snapshot.created_at.utcoffset() is None:
+        return False
+    created_at = snapshot.created_at.astimezone(UTC)
+    return run.created_at.astimezone(UTC) <= created_at <= run.deadline_at.astimezone(UTC)
+
+
+def _coverage_operation_outcomes(
+    planned_pairs: tuple[CoveragePair, ...],
+    operations: Sequence[AgentRunOperationRecord],
+    *,
+    terminal: bool = False,
+) -> Mapping[CoveragePair, CoveragePairOutcome]:
+    outcomes: dict[CoveragePair, CoveragePairOutcome] = {}
+    for pair in planned_pairs:
+        exact_roots = tuple(
+            operation
+            for operation in operations
+            if operation.kind is AgentOperationKind.EXACT_START
+            and _operation_matches_pair(operation, pair)
+        )
+        calendar = tuple(
+            operation
+            for operation in operations
+            if operation.kind is AgentOperationKind.CALENDAR_SEARCH
+            and _operation_matches_pair(operation, pair)
+        )
+        if exact_roots:
+            root_ids = {operation.id for operation in exact_roots}
+            related = exact_roots + tuple(
+                operation
+                for operation in operations
+                if operation.kind is AgentOperationKind.EXACT_POLL
+                and operation.logical_root_operation_id in root_ids
+            )
+            outcome = _operation_group_outcome(related, require_confirmed=True)
+        elif calendar:
+            outcome = _operation_group_outcome(calendar, require_confirmed=False)
+        else:
+            outcome = None
+        if terminal and outcome is not None and outcome.status == "attempted":
+            outcome = CoveragePairOutcome("failed", "agent_pair_incomplete")
+        if outcome is not None:
+            outcomes[pair] = outcome
+        elif terminal:
+            outcomes[pair] = CoveragePairOutcome(
+                "skipped",
+                (
+                    "agent_pair_incomplete"
+                    if exact_roots or calendar
+                    else "agent_pair_not_materialized"
+                ),
+            )
+    return outcomes
+
+
+def _operation_matches_pair(
+    operation: AgentRunOperationRecord,
+    pair: CoveragePair,
+) -> bool:
+    values = operation.immutable_input
+    return (
+        values.get("origin") == pair.origin
+        and values.get("destination") == pair.destination
+        and values.get("departure_date") == pair.departure_date.isoformat()
+        and values.get("return_date")
+        == (pair.return_date.isoformat() if pair.return_date is not None else None)
+    )
+
+
+def _operation_group_outcome(
+    operations: Sequence[AgentRunOperationRecord],
+    *,
+    require_confirmed: bool,
+) -> CoveragePairOutcome | None:
+    if require_confirmed and any(
+        operation.status is AgentOperationStatus.SUCCEEDED
+        and operation.result_type is AgentOperationResultType.CONFIRMED_OFFER
+        for operation in operations
+    ):
+        return CoveragePairOutcome("succeeded")
+    failed = next(
+        (operation for operation in operations if operation.status is AgentOperationStatus.FAILED),
+        None,
+    )
+    if failed is not None:
+        return CoveragePairOutcome("failed", _coverage_reason(failed.error_code, failed=True))
+    skipped = next(
+        (operation for operation in operations if operation.status is AgentOperationStatus.SKIPPED),
+        None,
+    )
+    if skipped is not None:
+        return CoveragePairOutcome("skipped", _coverage_reason(skipped.error_code, failed=False))
+    if not require_confirmed and any(
+        operation.status is AgentOperationStatus.SUCCEEDED for operation in operations
+    ):
+        return CoveragePairOutcome("attempted")
+    if any(operation.attempt_count > 0 for operation in operations):
+        return CoveragePairOutcome("attempted")
+    return None
+
+
+def _coverage_reason(value: str | None, *, failed: bool) -> str:
+    if value is not None and value in _PUBLIC_RUN_ERRORS:
+        return value
+    return "agent_pair_failed" if failed else "agent_pair_skipped"
+
+
+def _anywhere_projection_values(
+    anywhere: Mapping[str, object],
+) -> tuple[tuple[str, ...], tuple[str, ...], int, int, str, str]:
+    origins = _coverage_code_sequence(anywhere.get("origin_airports"), "anywhere origins")
+    source_ids = tuple(
+        _required_stored_str(value, "discovery source id")
+        for value in _sequence(anywhere.get("discovery_source_ids", ()))
+    )
+    if not source_ids or len(source_ids) != len(set(source_ids)):
+        raise RuntimeError("stored discovery source ids must be non-empty and unique")
+    max_destination_seeds = _stored_int(
+        anywhere.get("max_destination_seeds"),
+        "max_destination_seeds",
+    )
+    exact_verification_limit = _stored_int(
+        anywhere.get("exact_verification_limit"),
+        "exact_verification_limit",
+    )
+    if (
+        max_destination_seeds <= 0
+        or exact_verification_limit <= 0
+        or exact_verification_limit > max_destination_seeds
+    ):
+        raise RuntimeError("stored anywhere limits are invalid")
+    return (
+        origins,
+        source_ids,
+        max_destination_seeds,
+        exact_verification_limit,
+        _required_stored_str(anywhere.get("catalog_checksum"), "catalog checksum"),
+        _required_stored_str(anywhere.get("taxonomy_version"), "taxonomy version"),
+    )
+
+
+def _snapshot_anywhere_discovery_phase(
+    anywhere: Mapping[str, object],
+    operations: Sequence[AgentRunOperationRecord],
+    *,
+    terminal: bool,
+) -> tuple[CoverageDiscoveryPhaseView, Mapping[str, int]]:
+    origins, source_ids, max_seeds, exact_limit, _catalog, _taxonomy = _anywhere_projection_values(
+        anywhere
+    )
+    expected_bindings = {(origin, source_id) for origin in origins for source_id in source_ids}
+    discovery = tuple(
+        operation
+        for operation in operations
+        if operation.kind is AgentOperationKind.SUGGEST_DISCOVERY
+    )
+    materialized_bindings: set[tuple[str, str]] = set()
+    for operation in discovery:
+        binding = (
+            _required_stored_str(operation.immutable_input.get("origin"), "discovery origin"),
+            _required_stored_str(
+                operation.immutable_input.get("source_id"),
+                "discovery source id",
+            ),
+        )
+        if (
+            operation.provider_id != _PROVIDER_ID
+            or binding not in expected_bindings
+            or binding in materialized_bindings
+        ):
+            raise RuntimeError("stored discovery operation binding is invalid")
+        materialized_bindings.add(binding)
+    missing_bindings = expected_bindings - materialized_bindings
+    active = any(
+        operation.status
+        in {
+            AgentOperationStatus.PENDING,
+            AgentOperationStatus.LEASED,
+            AgentOperationStatus.RETRY_WAIT,
+        }
+        for operation in discovery
+    )
+    succeeded = any(operation.status is AgentOperationStatus.SUCCEEDED for operation in discovery)
+    failed = tuple(
+        operation
+        for operation in discovery
+        if operation.status in {AgentOperationStatus.FAILED, AgentOperationStatus.SKIPPED}
+    )
+    reasons: dict[str, int] = {}
+    for operation in failed:
+        reason = (
+            operation.error_code
+            if operation.error_code in _PUBLIC_RUN_ERRORS
+            else (
+                "agent_discovery_failed"
+                if operation.status is AgentOperationStatus.FAILED
+                else "agent_discovery_skipped"
+            )
+        )
+        reasons[reason] = reasons.get(reason, 0) + 1
+    if missing_bindings and terminal:
+        reasons["agent_discovery_binding_not_materialized"] = len(missing_bindings)
+    if active and terminal:
+        reasons["agent_discovery_not_completed"] = sum(
+            operation.status
+            in {
+                AgentOperationStatus.PENDING,
+                AgentOperationStatus.LEASED,
+                AgentOperationStatus.RETRY_WAIT,
+            }
+            for operation in discovery
+        )
+    status: Literal["pending", "complete", "partial", "failed"]
+    if not terminal and (active or missing_bindings):
+        status = "pending"
+    elif failed or missing_bindings or active:
+        status = "partial" if succeeded else "failed"
+    else:
+        status = "complete"
+    terminal_reason = next(iter(reasons), None) if status in {"partial", "failed"} else None
+    return (
+        CoverageDiscoveryPhaseView(
+            status=status,
+            terminal_reason=terminal_reason,
+            source_ids=source_ids,
+            max_destination_seeds=max_seeds,
+            exact_verification_limit=exact_limit,
+        ),
+        reasons,
+    )
+
+
+def _anywhere_discovery_coverage_view(
+    *,
+    scope: Mapping[str, object],
+    anywhere: Mapping[str, object],
+    date_start: date,
+    date_end: date,
+    return_date: date | None,
+    run: AgentPlanRunRecord,
+    operations: Sequence[AgentRunOperationRecord],
+) -> CoverageReportView:
+    coverage = _required_stored_str(scope.get("coverage"), "coverage")
+    if coverage not in {CoverageMode.QUICK.value, CoverageMode.FULL.value}:
+        raise RuntimeError("stored coverage is invalid")
+    origins, _source_ids, _max_seeds, _exact_limit, catalog, taxonomy = _anywhere_projection_values(
+        anywhere
+    )
+    terminal = run.status in {"completed", "partial", "failed", "cancelled"}
+    discovery_phase, discovery_reasons = _snapshot_anywhere_discovery_phase(
+        anywhere,
+        operations,
+        terminal=terminal,
+    )
+    if terminal and not discovery_reasons:
+        reason = _discovery_terminal_reason(run, operations)
+        discovery_reasons = {reason: 1}
+        discovery_phase = replace(
+            discovery_phase,
+            status="failed",
+            terminal_reason=reason,
+        )
+    return CoverageReportView(
+        coverage=coverage,
+        completion="failed" if terminal else "pending",
+        frozen_input=CoverageFrozenInputView(
+            origins=origins,
+            destinations=(),
+            date_start=date_start,
+            date_end=date_end,
+            return_date=return_date,
+            catalog_checksums=(catalog,),
+            taxonomy_versions=(taxonomy,),
+        ),
+        planned=0,
+        attempted=0,
+        succeeded=0,
+        failed=0,
+        skipped=0,
+        pairs=(),
+        reason_counts=discovery_reasons,
+        discovery_phase=discovery_phase,
+    )
+
+
+def _discovery_terminal_reason(
+    run: AgentPlanRunRecord,
+    operations: Sequence[AgentRunOperationRecord],
+) -> str:
+    for operation in operations:
+        if operation.kind in {
+            AgentOperationKind.SUGGEST_DISCOVERY,
+            AgentOperationKind.SCOPE_FREEZE,
+        } and operation.status in {AgentOperationStatus.FAILED, AgentOperationStatus.SKIPPED}:
+            if operation.error_code in _PUBLIC_RUN_ERRORS:
+                return operation.error_code
+            return "agent_discovery_failed"
+    if run.error_code in _PUBLIC_RUN_ERRORS:
+        return run.error_code
+    return "agent_discovery_not_completed"
+
+
+def _coverage_report_view(report: CoverageReport) -> CoverageReportView:
+    frozen = report.frozen_input
+    return CoverageReportView(
+        coverage=report.coverage,
+        completion=report.completion,
+        frozen_input=CoverageFrozenInputView(
+            origins=frozen.origins,
+            destinations=frozen.destinations,
+            date_start=frozen.date_start,
+            date_end=frozen.date_end,
+            return_date=frozen.return_date,
+            catalog_checksums=frozen.catalog_checksums,
+            taxonomy_versions=frozen.taxonomy_versions,
+        ),
+        planned=report.planned,
+        attempted=report.attempted,
+        succeeded=report.succeeded,
+        failed=report.failed,
+        skipped=report.skipped,
+        pairs=tuple(
+            CoveragePairView(
+                origin=item.pair.origin,
+                destination=item.pair.destination,
+                departure_date=item.pair.departure_date,
+                return_date=item.pair.return_date,
+                status=item.status.value,
+                reason=item.reason,
+            )
+            for item in report.pairs
+        ),
+        reason_counts=report.reason_counts,
+        discovery_phase=None,
     )
 
 
@@ -1110,6 +1926,7 @@ def _parsed_intent(revision: AgentPlanRevisionRecord) -> ParsedIntent:
         adults=_stored_int(intent["adults"], "adults"),
         children=_stored_int(intent["children"], "children"),
         infants=_stored_int(intent["infants"], "infants"),
+        nearby_radius_km=_stored_int(intent.get("nearby_radius_km", 0), "nearby_radius_km"),
         currency=str(intent["currency"]),
         requested_strategies=tuple(
             RouteStrategy(str(value)) for value in _sequence(intent.get("requested_strategies", []))
@@ -1168,6 +1985,7 @@ def _parser_selections(parsed: ParsedIntent) -> dict[str, object]:
         "trip_shape": parsed.trip_shape.value,
         "requested_strategies": [strategy.value for strategy in parsed.requested_strategies],
     }
+    values["nearby_radius_km"] = parsed.nearby_radius_km
     if parsed.trip_shape.value in {"open_jaw", "multi_city"}:
         values["legs"] = [
             {

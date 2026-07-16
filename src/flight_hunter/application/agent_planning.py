@@ -1,5 +1,3 @@
-# ruff: noqa: RUF001
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -7,7 +5,6 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 
-from flight_hunter.agent.presets import PRESET_EDITS
 from flight_hunter.application.agent_capabilities import ProviderCapabilityRegistry
 from flight_hunter.application.agent_intent import (
     ClarificationAction,
@@ -21,9 +18,11 @@ from flight_hunter.application.agent_scope import (
     FrozenAirportScope,
     GeographyClarification,
     ScopeResolver,
+    finite_route_pairs,
 )
 from flight_hunter.config import AppSettings
 from flight_hunter.domain.agent_search import (
+    MAX_ANYWHERE_DISCOVERY_MONTHS,
     CapabilityState,
     DateConstraint,
     DateMode,
@@ -33,6 +32,7 @@ from flight_hunter.domain.agent_search import (
     ProviderHttpCostModel,
     TravelIntent,
     TripShape,
+    inclusive_month_count,
 )
 
 
@@ -112,15 +112,25 @@ class PlanEstimate:
 
 @dataclass(frozen=True, slots=True)
 class FrozenPlanLeg:
-    origin_scope: FrozenAirportScope
+    origin_scope: FrozenAirportScope | None
     destination_scope: FrozenAirportScope | None
     anywhere_rule: AnywhereDiscoveryRule | None
     date_constraint: DateConstraint
+    reciprocal_anywhere_return: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.origin_scope, FrozenAirportScope):
+        if type(self.reciprocal_anywhere_return) is not bool:
+            raise TypeError("reciprocal_anywhere_return must be a boolean")
+        if self.reciprocal_anywhere_return:
+            if (
+                self.origin_scope is not None
+                or not isinstance(self.destination_scope, FrozenAirportScope)
+                or self.anywhere_rule is not None
+            ):
+                raise ValueError("reciprocal anywhere return leg must contain only destination")
+        elif not isinstance(self.origin_scope, FrozenAirportScope):
             raise TypeError("origin_scope must be FrozenAirportScope")
-        if (self.destination_scope is None) == (self.anywhere_rule is None):
+        elif (self.destination_scope is None) == (self.anywhere_rule is None):
             raise ValueError("exactly one destination scope representation is required")
         if self.destination_scope is not None and not isinstance(
             self.destination_scope,
@@ -148,7 +158,7 @@ class ProposedPlanRevision:
     clarifications: tuple[IntentClarification, ...]
     created_at: datetime
     expires_at: datetime
-    builder_version: str = "agent-plan-builder-v2"
+    builder_version: str = "agent-plan-builder-v4"
 
 
 class PlanEstimator:
@@ -372,7 +382,12 @@ class AgentPlanBuilder:
                 snapshot=snapshot,
                 estimate=estimate,
                 frozen_legs=frozen_legs,
-                clarifications=(_budget_revision_clarification(estimate),),
+                clarifications=(
+                    _budget_revision_clarification(
+                        estimate,
+                        logical_limit=self._settings.agent_full_logical_limit,
+                    ),
+                ),
                 created_at=created_at,
                 expires_at=expires_at,
             )
@@ -403,6 +418,27 @@ class AgentPlanBuilder:
             self._settings.agent_quick_exact_limit if coverage is CoverageMode.QUICK else None
         )
         for index, leg in enumerate(intent.legs):
+            if (
+                intent.trip_shape is TripShape.ROUND_TRIP
+                and index == 1
+                and len(frozen_legs) == 1
+                and leg.origin.kind is LocationScopeKind.ANYWHERE
+                and intent.legs[0].destination.kind is LocationScopeKind.ANYWHERE
+                and leg.destination == intent.legs[0].origin
+                and frozen_legs[0].anywhere_rule is not None
+            ):
+                return_destination = frozen_legs[0].origin_scope
+                assert return_destination is not None
+                frozen_legs.append(
+                    FrozenPlanLeg(
+                        origin_scope=None,
+                        destination_scope=return_destination,
+                        anywhere_rule=None,
+                        date_constraint=leg.date_constraint,
+                        reciprocal_anywhere_return=True,
+                    )
+                )
+                continue
             if leg.origin.kind is LocationScopeKind.ANYWHERE:
                 clarifications.append(_anywhere_origin_clarification(index))
                 continue
@@ -418,19 +454,30 @@ class AgentPlanBuilder:
 
             if leg.destination.kind is LocationScopeKind.ANYWHERE:
                 date_start, date_end = _date_bounds(leg.date_constraint)
-                max_destination_seeds = (
-                    self._settings.agent_quick_calendar_limit
-                    if coverage is CoverageMode.QUICK
-                    else self._settings.agent_full_logical_limit
-                )
-                exact_verification_limit = (
-                    min(
+                month_count = inclusive_month_count(date_start, date_end)
+                if month_count > MAX_ANYWHERE_DISCOVERY_MONTHS:
+                    clarifications.append(
+                        _anywhere_date_range_too_large_clarification(
+                            index,
+                            actual_months=month_count,
+                        )
+                    )
+                    continue
+                if coverage is CoverageMode.QUICK:
+                    max_destination_seeds = self._settings.agent_quick_calendar_limit
+                    exact_verification_limit = min(
                         self._settings.agent_quick_exact_limit,
                         max_destination_seeds,
                     )
-                    if coverage is CoverageMode.QUICK
-                    else max_destination_seeds
-                )
+                else:
+                    max_destination_seeds = max(
+                        1,
+                        self._settings.agent_full_logical_limit * 2 // 3,
+                    )
+                    exact_verification_limit = max(
+                        1,
+                        self._settings.agent_full_logical_limit - max_destination_seeds,
+                    )
                 anywhere_rule = self._scope_resolver.build_anywhere_rule(
                     frozen_origins=frozen_origin,
                     date_start=date_start,
@@ -462,6 +509,13 @@ class AgentPlanBuilder:
             if frozen_origin.catalog_checksum != frozen_destination.catalog_checksum:
                 clarifications.append(_catalog_changed_clarification(index))
                 continue
+            if not any(
+                origin != destination
+                for origin in frozen_origin.airport_codes
+                for destination in frozen_destination.airport_codes
+            ):
+                clarifications.append(_same_origin_destination_clarification(index))
+                continue
             frozen_legs.append(
                 FrozenPlanLeg(
                     origin_scope=frozen_origin,
@@ -484,9 +538,13 @@ def _surface_for_frozen_legs(
 ) -> SearchSurface:
     native_round_trip = _native_round_trip_outbound(frozen_legs, trip_shape, capability_snapshot)
     if native_round_trip is not None:
+        assert native_round_trip.origin_scope is not None
         assert native_round_trip.destination_scope is not None
-        route_pairs = len(native_round_trip.origin_scope.airport_codes) * len(
-            native_round_trip.destination_scope.airport_codes
+        route_pairs = len(
+            finite_route_pairs(
+                native_round_trip.origin_scope.airport_codes,
+                native_round_trip.destination_scope.airport_codes,
+            )
         )
         if native_round_trip.date_constraint.mode is DateMode.EXACT:
             return SearchSurface(
@@ -504,12 +562,13 @@ def _surface_for_frozen_legs(
     calendar_searches = 0
     exact_searches = 0
     for frozen_leg in frozen_legs:
+        if frozen_leg.reciprocal_anywhere_return:
+            continue
+        assert frozen_leg.origin_scope is not None
         origin_count = len(frozen_leg.origin_scope.airport_codes)
         date_count = _date_count(frozen_leg.date_constraint)
         if frozen_leg.anywhere_rule is not None:
-            discovery_query_work = (
-                origin_count * date_count * len(frozen_leg.anywhere_rule.discovery_source_ids)
-            )
+            discovery_query_work = origin_count * len(frozen_leg.anywhere_rule.discovery_source_ids)
             calendar_searches += max(
                 frozen_leg.anywhere_rule.max_destination_seeds,
                 discovery_query_work,
@@ -517,7 +576,12 @@ def _surface_for_frozen_legs(
             exact_searches += frozen_leg.anywhere_rule.exact_verification_limit
             continue
         assert frozen_leg.destination_scope is not None
-        route_pairs = origin_count * len(frozen_leg.destination_scope.airport_codes)
+        route_pairs = len(
+            finite_route_pairs(
+                frozen_leg.origin_scope.airport_codes,
+                frozen_leg.destination_scope.airport_codes,
+            )
+        )
         if frozen_leg.date_constraint.mode is DateMode.EXACT:
             exact_searches += route_pairs
         else:
@@ -544,8 +608,12 @@ def _native_round_trip_outbound(
         return None
     outbound, inbound = frozen_legs
     if (
-        outbound.destination_scope is None
+        outbound.origin_scope is None
+        or outbound.destination_scope is None
+        or inbound.origin_scope is None
         or inbound.destination_scope is None
+        or outbound.reciprocal_anywhere_return
+        or inbound.reciprocal_anywhere_return
         or inbound.date_constraint.mode is not DateMode.EXACT
         or set(outbound.origin_scope.airport_codes) != set(inbound.destination_scope.airport_codes)
         or set(outbound.destination_scope.airport_codes) != set(inbound.origin_scope.airport_codes)
@@ -628,6 +696,24 @@ def _anywhere_origin_clarification(leg_index: int) -> IntentClarification:
     )
 
 
+def _anywhere_date_range_too_large_clarification(
+    leg_index: int,
+    *,
+    actual_months: int,
+) -> IntentClarification:
+    return IntentClarification(
+        field=f"legs.{leg_index}.date_constraint",
+        code="anywhere_date_range_too_large",
+        message_ru=(
+            "Поиск куда угодно ограничен двенадцатью календарными месяцами. Сузьте диапазон дат."
+        ),
+        details={
+            "actual_months": actual_months,
+            "max_months": MAX_ANYWHERE_DISCOVERY_MONTHS,
+        },
+    )
+
+
 def _catalog_changed_clarification(leg_index: int) -> IntentClarification:
     return IntentClarification(
         field=f"legs.{leg_index}.scope",
@@ -652,18 +738,28 @@ def _incomplete_intent_clarification() -> IntentClarification:
     )
 
 
-def _budget_revision_clarification(estimate: PlanEstimate) -> IntentClarification:
+def _same_origin_destination_clarification(leg_index: int) -> IntentClarification:
+    return IntentClarification(
+        field=f"legs.{leg_index}.route",
+        code="same_origin_destination",
+        message_ru="Аэропорт вылета и прилёта совпадают. Выберите разные точки маршрута.",
+        details={"leg_index": leg_index},
+    )
+
+
+def _budget_revision_clarification(
+    estimate: PlanEstimate,
+    *,
+    logical_limit: int,
+) -> IntentClarification:
     return IntentClarification(
         field="budget",
         code="budget_revision_required",
-        message_ru="Полный поиск требует отдельной ревизии с увеличенным бюджетом.",
-        actions=(
-            ClarificationAction(
-                action_id="approve_larger_budget_revision",
-                label_ru="Создать новую ревизию бюджета",
-                selections={"logical_limit": str(estimate.requested_logical_limit)},
-            ),
-        ),
+        message_ru=("Полный поиск превышает локальный лимит. Сузьте географию или диапазон дат."),
+        details={
+            "logical_operations": estimate.logical_operations,
+            "limit": logical_limit,
+        },
     )
 
 
@@ -686,11 +782,6 @@ def _quick_budget_clarification(
                 label_ru="Сузить географию или даты",
                 selections={},
             ),
-            ClarificationAction(
-                action_id="choose_full_coverage",
-                label_ru="Выбрать полный поиск",
-                selections={"coverage": CoverageMode.FULL.value},
-            ),
         ),
         details={
             "calendar_searches": surface.calendar_searches,
@@ -702,6 +793,4 @@ def _quick_budget_clarification(
 
 
 def _nearby_radius_km(parsed: ParsedIntent) -> int:
-    if parsed.preset_id is None:
-        return 0
-    return PRESET_EDITS[parsed.preset_id.value].nearby_radius_km or 0
+    return parsed.nearby_radius_km

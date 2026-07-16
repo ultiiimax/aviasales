@@ -18,6 +18,7 @@ from flight_hunter.domain.agent_search import (
     TravelIntent,
     TravelLeg,
     TripShape,
+    inclusive_month_count,
 )
 
 
@@ -80,6 +81,13 @@ def test_rolling_90_days_counts_both_boundary_dates() -> None:
             date(2026, 9, 1),
             date(2026, 11, 30),
         )
+
+
+def test_inclusive_month_count_handles_boundary_and_rejects_reverse_range() -> None:
+    assert inclusive_month_count(date(2026, 1, 31), date(2026, 12, 1)) == 12
+    assert inclusive_month_count(date(9999, 12, 1), date(9999, 12, 31)) == 1
+    with pytest.raises(ValueError, match="before"):
+        inclusive_month_count(date(2026, 2, 1), date(2026, 1, 31))
 
 
 def test_all_trip_shapes_and_route_strategies_are_closed_domain_enums() -> None:

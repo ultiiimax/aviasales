@@ -69,6 +69,7 @@ from flight_hunter.providers.aviasales_search.client import (
     SearchStartParams,
 )
 from flight_hunter.providers.aviasales_search.gateway import (
+    AnywhereDiscoveryParams,
     AviasalesSearchGateway,
     AviasalesSearchPolicyDenied,
     CalendarSearchParams,
@@ -1183,6 +1184,16 @@ class _UnavailableAgentSearchGateway:
     async def calendar(
         self,
         params: CalendarSearchParams,
+        *,
+        evidence_namespace: UUID,
+        request_fingerprint: str,
+    ) -> tuple[DiscoverySignal, ...]:
+        del params, evidence_namespace, request_fingerprint
+        raise AviasalesSearchPolicyDenied("provider_unavailable")
+
+    async def discover_anywhere(
+        self,
+        params: AnywhereDiscoveryParams,
         *,
         evidence_namespace: UUID,
         request_fingerprint: str,

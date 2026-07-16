@@ -13,7 +13,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from flight_hunter.agent.presets import AgentPresetId
+from flight_hunter.agent.presets import PRESET_EDITS, AgentPresetId
 from flight_hunter.application.agent_scope import (
     GeographyChoice,
     GeographyClarification,
@@ -232,6 +232,7 @@ class ParsedIntent:
     currency: str = "RUB"
     children: int = 0
     infants: int = 0
+    nearby_radius_km: int = 0
     requested_strategies: tuple[RouteStrategy, ...] = ()
     clarifications: tuple[IntentClarification, ...] = ()
     preset_id: AgentPresetId | None = None
@@ -240,6 +241,8 @@ class ParsedIntent:
         object.__setattr__(self, "trip_shape", TripShape(self.trip_shape))
         object.__setattr__(self, "date_mode", DateMode(self.date_mode))
         object.__setattr__(self, "legs", tuple(self.legs))
+        if type(self.nearby_radius_km) is not int or not 0 <= self.nearby_radius_km <= 500:
+            raise ValueError("nearby_radius_km must be between 0 and 500")
         object.__setattr__(
             self,
             "requested_strategies",
@@ -428,6 +431,7 @@ class IntentParser:
                 adults=_positive_int(selected.get("adults", 1), "adults"),
                 children=_non_negative_int(selected.get("children", 0), "children"),
                 infants=_non_negative_int(selected.get("infants", 0), "infants"),
+                nearby_radius_km=_nearby_radius_km(text, selected, normalized_preset),
                 currency=_string(selected.get("currency", "RUB"), "currency"),
                 requested_strategies=_strategies(selected, normalized_preset),
                 clarifications=tuple(_unique_clarifications(clarifications)),
@@ -582,6 +586,29 @@ def _strategies(
     if preset is AgentPresetId.SPLIT_TICKET:
         return (RouteStrategy.SPLIT_TICKET,)
     return ()
+
+
+def _nearby_radius_km(
+    text: str,
+    selections: Mapping[str, object],
+    preset: AgentPresetId | None,
+) -> int:
+    explicit = selections.get("nearby_radius_km")
+    if explicit is not None:
+        if type(explicit) is not int or not 0 <= explicit <= 500:
+            raise ValueError("nearby_radius_km must be between 0 and 500")
+        return explicit
+    if preset is not None:
+        preset_radius = PRESET_EDITS[preset.value].nearby_radius_km
+        if preset_radius is not None:
+            return preset_radius
+    normalized = _normalize_text(text)
+    if re.search(
+        r"(?:аэропорт\w*\s+(?:рядом|поблизости)|близлежащ\w*\s+аэропорт\w*|nearby\s+airports?)",
+        normalized,
+    ):
+        return 150
+    return 0
 
 
 def _route_parts(text: str) -> tuple[str | None, str | None]:

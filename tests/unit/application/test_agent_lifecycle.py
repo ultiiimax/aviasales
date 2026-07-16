@@ -10,8 +10,13 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import event, func, select
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from flight_hunter.application.agent_intent import IntentParser
 from flight_hunter.application.agent_lifecycle import (
@@ -78,6 +83,7 @@ class LifecycleHarness:
     session: AsyncSession
     provider: CountingProviderGateway
     clock: MutableClock
+    engine: AsyncEngine
 
 
 @pytest.mark.anyio
@@ -109,11 +115,18 @@ async def test_complete_create_persists_executable_revision_without_provider_cal
                 coverage=CoverageMode.QUICK,
             )
         )
+        stored = await AgentPlanRepository(session).get_revision(
+            HOUSEHOLD_ID,
+            view.revision_id,
+        )
 
     assert view.state == "awaiting_approval"
     assert view.revision == 1
     assert view.executable is True
     assert view.content_hash.startswith("sha256:")
+    assert stored is not None
+    assert stored.parser_version == "intent-parser-v2"
+    assert stored.planner_version == "agent-plan-builder-v4"
     assert provider.calls == 0
     await engine.dispose()
 
@@ -223,6 +236,124 @@ async def test_edit_and_clone_keep_old_revisions_immutable_and_refresh_terminal_
     assert expired_clone.revision == 2
     assert expired_source is not None and expired_source.state == "expired"
     assert harness.provider.calls == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("text", "selections", "expected_radius"),
+    (
+        ("LED → CDG", {"nearby_radius_km": 80}, 80),
+        (
+            "LED → CDG nearby airports",
+            {"origin": "LED", "destination": "CDG"},
+            150,
+        ),
+    ),
+)
+async def test_edit_without_new_text_and_clone_preserve_nearby_radius(
+    text: str,
+    selections: dict[str, object],
+    expected_radius: int,
+) -> None:
+    async with _lifecycle_harness() as harness:
+        first = await harness.service.create_plan(
+            CreateAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                text=text,
+                selections={"departure_date": "2026-09-10", **selections},
+                coverage=CoverageMode.QUICK,
+            )
+        )
+        edited = await harness.service.edit_plan(
+            EditAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                plan_id=first.plan_id,
+                source_revision_id=first.revision_id,
+                expected_revision=first.revision,
+                selections={"departure_date": "2026-09-11"},
+            )
+        )
+        cloned = await harness.service.clone_revision(
+            CloneAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                plan_id=first.plan_id,
+                source_revision_id=first.revision_id,
+                expected_revision=first.revision,
+                idempotency_key=f"clone-nearby-{expected_radius}",
+            )
+        )
+
+    assert edited.summary.scope[0].nearby_radius_km == expected_radius
+    assert cloned.summary.scope[0].nearby_radius_km == expected_radius
+
+
+@pytest.mark.anyio
+async def test_edit_with_new_route_text_does_not_carry_previous_nearby_radius() -> None:
+    async with _lifecycle_harness() as harness:
+        first = await harness.service.create_plan(
+            CreateAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                text="LED → CDG",
+                selections={"departure_date": "2026-09-10", "nearby_radius_km": 80},
+                coverage=CoverageMode.QUICK,
+            )
+        )
+        edited = await harness.service.edit_plan(
+            EditAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                plan_id=first.plan_id,
+                source_revision_id=first.revision_id,
+                expected_revision=first.revision,
+                text="LED → CDG",
+                selections={"departure_date": "2026-09-11"},
+            )
+        )
+
+    assert edited.summary.scope[0].nearby_radius_km == 0
+
+
+@pytest.mark.anyio
+async def test_explicit_zero_disables_nearby_preset_across_edit_and_clone() -> None:
+    async with _lifecycle_harness() as harness:
+        first = await harness.service.create_plan(
+            CreateAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                text="LED → CDG",
+                preset_id="nearby_airports",
+                selections={"departure_date": "2026-09-10", "nearby_radius_km": 0},
+                coverage=CoverageMode.QUICK,
+            )
+        )
+        edited = await harness.service.edit_plan(
+            EditAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                plan_id=first.plan_id,
+                source_revision_id=first.revision_id,
+                expected_revision=first.revision,
+                selections={"departure_date": "2026-09-11"},
+            )
+        )
+        cloned = await harness.service.clone_revision(
+            CloneAgentPlan(
+                household_id=HOUSEHOLD_ID,
+                user_id=USER_ID,
+                plan_id=first.plan_id,
+                source_revision_id=first.revision_id,
+                expected_revision=first.revision,
+                idempotency_key="clone-nearby-disabled",
+            )
+        )
+
+    assert first.summary.scope[0].nearby_radius_km == 0
+    assert edited.summary.scope[0].nearby_radius_km == 0
+    assert cloned.summary.scope[0].nearby_radius_km == 0
 
 
 @pytest.mark.anyio
@@ -714,6 +845,57 @@ async def test_read_exception_rolls_back_and_reuses_same_session() -> None:
     assert recovered.state == "awaiting_approval"
 
 
+@pytest.mark.anyio
+async def test_list_runs_query_count_is_constant_and_limit_is_bounded() -> None:
+    async with _lifecycle_harness() as harness:
+        first = await _create(harness.service)
+        first_run = await _execute(harness.service, first, "bulk-run-1")
+        await _terminalize_run(harness.session, first_run)
+
+        async def counted_list() -> tuple[int, tuple[RunView, ...]]:
+            queries = 0
+
+            def count_query(*_args: object) -> None:
+                nonlocal queries
+                queries += 1
+
+            event.listen(harness.engine.sync_engine, "before_cursor_execute", count_query)
+            try:
+                views = await harness.service.list_runs(
+                    HOUSEHOLD_ID,
+                    first.plan_id,
+                    limit=100,
+                )
+            finally:
+                event.remove(harness.engine.sync_engine, "before_cursor_execute", count_query)
+            return queries, views
+
+        one_query_count, one = await counted_list()
+        source = first
+        for index in (2, 3):
+            cloned = await harness.service.clone_revision(
+                CloneAgentPlan(
+                    household_id=HOUSEHOLD_ID,
+                    user_id=USER_ID,
+                    plan_id=first.plan_id,
+                    source_revision_id=source.revision_id,
+                    expected_revision=source.revision,
+                    idempotency_key=f"bulk-clone-{index}",
+                )
+            )
+            run = await _execute(harness.service, cloned, f"bulk-run-{index}")
+            await _terminalize_run(harness.session, run)
+            source = cloned
+        many_query_count, many = await counted_list()
+
+        with pytest.raises(ValueError, match="between 1 and 100"):
+            await harness.service.list_runs(HOUSEHOLD_ID, first.plan_id, limit=101)
+
+    assert len(one) == 1
+    assert len(many) == 3
+    assert many_query_count == one_query_count
+
+
 @asynccontextmanager
 async def _lifecycle_harness() -> AsyncIterator[LifecycleHarness]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -738,6 +920,7 @@ async def _lifecycle_harness() -> AsyncIterator[LifecycleHarness]:
             session=session,
             provider=provider,
             clock=clock,
+            engine=engine,
         )
     await engine.dispose()
 
