@@ -1376,7 +1376,7 @@ git commit -m "feat: report complete agent search coverage"
 - Uses per-leg exact search for open-jaw/multi-city while native capability is unknown.
 - Produces separate cheapest, fastest, balanced, low-risk, and risky views.
 
-- [ ] **Step 1: Write failing composer and ranker tests**
+- [x] **Step 1: Write failing composer and ranker tests**
 
 Cover:
 
@@ -1395,7 +1395,7 @@ Cover:
 - tie-breaking is stable;
 - ranking snapshots reference only confirmed/composed IDs and do not rewrite evidence.
 
-- [ ] **Step 2: Run focused tests and confirm composition is absent**
+- [x] **Step 2: Run focused tests and confirm composition is absent**
 
 ```powershell
 uv run pytest tests/unit/application/test_agent_composition.py tests/unit/application/test_agent_reporting.py tests/unit/application/test_agent_execution.py tests/unit/api/test_agent_plan_api.py -q
@@ -1403,7 +1403,7 @@ uv run pytest tests/unit/application/test_agent_composition.py tests/unit/applic
 
 Expected: import failures and missing result views.
 
-- [ ] **Step 3: Implement feasibility and integer price composition**
+- [x] **Step 3: Implement feasibility and integer price composition**
 
 ```python
 def connection_is_feasible(
@@ -1421,11 +1421,11 @@ def connection_is_feasible(
 
 Add prices only when currencies/bases are comparable. Every candidate stores component evidence IDs, ticket boundaries, protection, connection assumptions, known total, unknown costs, and rejection/ranking reasons.
 
-- [ ] **Step 4: Implement bounded multi-leg beam composition**
+- [x] **Step 4: Implement bounded multi-leg beam composition**
 
 After each ordered leg, retain a configured beam of non-dominated candidates by known total, elapsed duration, airport changes, ticket count, and uncertainty flags. Stable fingerprint and IATA/date ordering break ties. Do not expand an unbounded Cartesian product.
 
-- [ ] **Step 5: Implement deterministic result views**
+- [x] **Step 5: Implement deterministic result views**
 
 `CandidateRanker` creates immutable rankings:
 
@@ -1445,7 +1445,7 @@ the provider URL. Composed candidates expose booking only when their exact
 ticket structure has an unambiguous supported action. Hidden-city overrides
 this to unavailable.
 
-- [ ] **Step 6: Verify composition and API results**
+- [x] **Step 6: Verify composition and API results**
 
 ```powershell
 uv run pytest tests/unit/application/test_agent_composition.py tests/unit/application/test_agent_reporting.py tests/unit/application/test_agent_execution.py tests/unit/api/test_agent_plan_api.py -q
@@ -1454,7 +1454,7 @@ uv run mypy src/flight_hunter/application/agent_composition.py src/flight_hunter
 
 Expected: all route-shape, feasibility, ranking, and result tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add src/flight_hunter/domain/agent_evidence.py src/flight_hunter/application/agent_composition.py src/flight_hunter/application/agent_reporting.py src/flight_hunter/application/agent_execution.py src/flight_hunter/application/agent_operations.py src/flight_hunter/persistence/agent_repositories.py src/flight_hunter/api/agent_schemas.py tests/unit/application/test_agent_composition.py tests/unit/application/test_agent_reporting.py tests/unit/application/test_agent_execution.py tests/unit/api/test_agent_plan_api.py

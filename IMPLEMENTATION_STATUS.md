@@ -43,7 +43,8 @@ This file is maintained by coding agents. Mark a slice done only after implement
     accepted at `c0d7de6`; clean-environment gates fixed at `98147bc`).
   - [x] Execute every frozen finite pair and bounded ANYWHERE discovery binding
     (Task 10 accepted at `39fcf60`; status acceptance at `db7798a`).
-  - [ ] Compose and rank split, self-transfer, open-jaw and multi-city routes.
+  - [x] Compose and rank split, self-transfer, open-jaw and multi-city routes
+    (Task 11 accepted at `ce4231a`).
   - [ ] Isolate hidden-city research behind a second acknowledgement.
   - [ ] Add evidence-gated buy timing, anomaly and currency analysis.
   - [ ] Pass browser, recovery, migration, security and release gates.
@@ -115,8 +116,9 @@ local Aviasales settings, Compose and operator docs. Prove restart, dedupe,
 cancellation/deadline zero-I/O, retry/circuit behavior and household/private
 continuation isolation fixture-only before marking the slice complete. The
 existing forward migration `0024_agent_execution_ledger` is sufficient. The
-slice was accepted on 2026-07-15; Task 10 coverage breadth is now accepted and
-Task 11 composition is the active release slice.
+slice was accepted on 2026-07-15; Task 10 coverage breadth and Task 11
+composition are now accepted. Task 12 hidden-city isolation is the active
+release slice.
 
 Task 9 implementation on 2026-07-15 is accepted by independent review. The
 dedicated agent worker now
@@ -203,7 +205,7 @@ timestamp normalization, planning tests and a forward private-descriptor
 migration in addition to the original Task 11 file map. No schema change is
 needed for composed candidates or ranking snapshots already created by `0024`.
 
-Task 11 implementation candidate on 2026-07-16 now composes only confirmed
+Task 11 implementation and acceptance on 2026-07-16 composes only confirmed
 evidence with verified UTC chronology, bounded beam/Pareto growth and explicit
 ticket, protection, transfer and unknown-cost facts. Unknown native multi-leg
 capability executes frozen ordered per-leg searches; approved split work is
@@ -215,12 +217,18 @@ stay server-side and resolve only after an authenticated explicit click.
 Completed/partial runs require a saved ranking snapshot, while typed persistence
 or local-analysis failures close their ledger operation instead of leaving a
 stale lease. Migration `0026_agent_booking_action_descriptors` is the single
-Alembic head. The final focused gate passes 464 tests, the full unit suite passes
-1,407 with 24 known external `aiosqlite` teardown warnings, integration passes
-4, migration/upgrade passes 13, mypy passes 121 source files, Ruff reports 296
-formatted files and no findings, the security scan reports zero findings, and
-`git diff --check` is clean. No live provider call or user database access was
-performed. Independent review and the final post-review rerun are still pending.
+Alembic head. The unified Task 11 acceptance gate passes 530 tests, the full
+unit suite passes 1,419 with 35 known `aiosqlite` event-loop teardown warnings
+outside the changed flow, and integration passes 4. Migration/upgrade passes 13,
+mypy passes 121 source files, Ruff reports 294 formatted files and no findings,
+the security scan reports zero findings, release migration/upgrade/Compose/health
+stages pass, and a fresh temporary database upgrades through `0026` with the
+private descriptor table present. Independent read-only review returned
+`ACCEPT` with zero Critical or Important findings and one non-blocking Minor for
+optional future recomputation of the composed fingerprint/UUID. The exact
+post-review regression set passes 24 tests and `git diff --check` is clean.
+Implementation is committed at `ce4231a`. No live provider call or user database
+access was performed; Task 12 hidden-city isolation is now active.
 
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic
