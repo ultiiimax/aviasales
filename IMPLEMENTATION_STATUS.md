@@ -16,7 +16,26 @@ This file is maintained by coding agents. Mark a slice done only after implement
 | Skyscanner Live | contract only | none | no | no | no | 2026-06-23 |
 | Duffel | contract only | none | no | no | no | 2026-06-23 |
 
-## Current Slice: Agent Route Orchestrator
+## Current Slice: Search-first UI redesign
+
+- Goal: replace the all-at-once technical dashboard with one obvious flow:
+  describe a trip, review the plan, run the search, compare results.
+- Selected concept: `docs/ui-concepts/01-search-first.png`, with the transparent
+  plan structure from `05-journey-board.png`.
+- Design:
+  `docs/superpowers/specs/2026-07-17-search-first-ui-redesign.md`.
+- Execution plan:
+  `docs/superpowers/plans/2026-07-17-search-first-ui-redesign.md`.
+- Progress:
+  - [x] Generate and compare six distinct UI concepts.
+  - [x] Select the search-first direction independently as requested.
+  - [ ] Lock the new hierarchy in HTML/browser tests.
+  - [ ] Implement the responsive shell and progressive disclosure.
+  - [ ] Translate remaining mixed-language and mojibake copy.
+  - [ ] Run focused unit, Chromium, lint and type gates.
+  - [ ] Restart the local release with the redesigned UI.
+
+## Previous Slice: Agent Route Orchestrator
 
 - Goal: turn the plan-only assistant into an approval-gated, durable,
   provider-backed route-search agent for arbitrary airport/city/country/region/
