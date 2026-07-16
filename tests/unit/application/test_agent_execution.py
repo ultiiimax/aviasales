@@ -26,7 +26,15 @@ from flight_hunter.application.agent_lifecycle import (
 )
 from flight_hunter.application.agent_operations import CoveragePair
 from flight_hunter.application.agent_planning import AgentPlanBuilder
+from flight_hunter.application.agent_reporting import (
+    CandidateKind,
+    RankingView,
+    ranking_snapshot_from_payload,
+)
 from flight_hunter.application.agent_scope import CoverageMode, ScopeResolver
+from flight_hunter.application.booking_actions import (
+    verify_agent_booking_action_token,
+)
 from flight_hunter.domain.agent_evidence import (
     ConfirmedOfferEvidence,
     DiscoverySignal,
@@ -89,6 +97,7 @@ from flight_hunter.providers.aviasales_search.gateway import (
     CalendarSearchParams,
     ExactPollOutcome,
     ExactSearchContinuation,
+    PrivateBookingActionDescriptor,
 )
 
 HOUSEHOLD_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -197,9 +206,12 @@ class ResumableFakeGateway:
     poll_calls: list[ExactSearchContinuation] = field(default_factory=list)
     calendar_calls: list[CalendarCall] = field(default_factory=list)
     anywhere_calls: list[AnywhereCall] = field(default_factory=list)
+    booking_descriptor_batches: list[int] = field(default_factory=list)
     advance_on_start_seconds: int = 0
     advance_on_poll_seconds: int = 0
     connecting_evidence: bool = False
+    private_booking_descriptor: bool = False
+    private_booking_results_url: str | None = None
     preserve_calendar_ids: bool = False
     evidence_observed_at: datetime | None = None
 
@@ -258,10 +270,31 @@ class ResumableFakeGateway:
             raise behavior
         if isinstance(behavior, int):
             return ExactPollOutcome(evidence=(), next_cursor=behavior, complete=False)
+        evidence = self.evidence_for(continuation)
+        descriptors = (
+            (
+                PrivateBookingActionDescriptor(
+                    evidence_id=evidence.id,
+                    provider_id="aviasales_search",
+                    value={
+                        "provider_id": "aviasales_search",
+                        "search_id": continuation.search_id,
+                        "proposal_id": "PRIVATE-proposal-id",
+                        "results_url": (
+                            self.private_booking_results_url or continuation.results_url
+                        ),
+                    },
+                ),
+            )
+            if self.private_booking_descriptor
+            else ()
+        )
+        self.booking_descriptor_batches.append(len(descriptors))
         return ExactPollOutcome(
-            evidence=(self.evidence_for(continuation),),
+            evidence=(evidence,),
             next_cursor=continuation.last_update_timestamp + 1,
             complete=False,
+            booking_descriptors=descriptors,
         )
 
     async def calendar(
@@ -310,7 +343,11 @@ class ResumableFakeGateway:
 
     def evidence_for(self, continuation: ExactSearchContinuation) -> ConfirmedOfferEvidence:
         amount = self.exact_amounts.get(continuation.expected_departure_date, 20_000)
-        if self.connecting_evidence:
+        if (
+            self.connecting_evidence
+            and continuation.expected_origin != "AMS"
+            and continuation.expected_destination != "AMS"
+        ):
             segments = (
                 FlightSegmentSummary(
                     airline_code="FV",
@@ -320,6 +357,20 @@ class ResumableFakeGateway:
                     destination="AMS",
                     depart_at=f"{continuation.expected_departure_date.isoformat()} 08:00",
                     arrive_at=f"{continuation.expected_departure_date.isoformat()} 10:00",
+                    depart_at_utc=datetime(
+                        continuation.expected_departure_date.year,
+                        continuation.expected_departure_date.month,
+                        continuation.expected_departure_date.day,
+                        8,
+                        tzinfo=UTC,
+                    ),
+                    arrive_at_utc=datetime(
+                        continuation.expected_departure_date.year,
+                        continuation.expected_departure_date.month,
+                        continuation.expected_departure_date.day,
+                        10,
+                        tzinfo=UTC,
+                    ),
                 ),
                 FlightSegmentSummary(
                     airline_code="FV",
@@ -329,9 +380,31 @@ class ResumableFakeGateway:
                     destination=continuation.expected_destination,
                     depart_at=f"{continuation.expected_departure_date.isoformat()} 11:00",
                     arrive_at=f"{continuation.expected_departure_date.isoformat()} 13:00",
+                    depart_at_utc=datetime(
+                        continuation.expected_departure_date.year,
+                        continuation.expected_departure_date.month,
+                        continuation.expected_departure_date.day,
+                        11,
+                        tzinfo=UTC,
+                    ),
+                    arrive_at_utc=datetime(
+                        continuation.expected_departure_date.year,
+                        continuation.expected_departure_date.month,
+                        continuation.expected_departure_date.day,
+                        13,
+                        tzinfo=UTC,
+                    ),
                 ),
             )
         else:
+            depart_hour = (
+                8
+                if continuation.expected_destination == "AMS"
+                else 13
+                if continuation.expected_origin == "AMS"
+                else 10
+            )
+            arrive_hour = depart_hour + 2
             segments = (
                 FlightSegmentSummary(
                     airline_code="FV",
@@ -339,8 +412,26 @@ class ResumableFakeGateway:
                     flight_number="FV100",
                     origin=continuation.expected_origin,
                     destination=continuation.expected_destination,
-                    depart_at=f"{continuation.expected_departure_date.isoformat()} 10:00",
-                    arrive_at=f"{continuation.expected_departure_date.isoformat()} 12:00",
+                    depart_at=(
+                        f"{continuation.expected_departure_date.isoformat()} {depart_hour:02d}:00"
+                    ),
+                    arrive_at=(
+                        f"{continuation.expected_departure_date.isoformat()} {arrive_hour:02d}:00"
+                    ),
+                    depart_at_utc=datetime(
+                        continuation.expected_departure_date.year,
+                        continuation.expected_departure_date.month,
+                        continuation.expected_departure_date.day,
+                        depart_hour,
+                        tzinfo=UTC,
+                    ),
+                    arrive_at_utc=datetime(
+                        continuation.expected_departure_date.year,
+                        continuation.expected_departure_date.month,
+                        continuation.expected_departure_date.day,
+                        arrive_hour,
+                        tzinfo=UTC,
+                    ),
                 ),
             )
         if continuation.expected_return_date is not None:
@@ -354,6 +445,20 @@ class ResumableFakeGateway:
                         destination="AMS",
                         depart_at=f"{continuation.expected_return_date.isoformat()} 08:00",
                         arrive_at=f"{continuation.expected_return_date.isoformat()} 10:00",
+                        depart_at_utc=datetime(
+                            continuation.expected_return_date.year,
+                            continuation.expected_return_date.month,
+                            continuation.expected_return_date.day,
+                            8,
+                            tzinfo=UTC,
+                        ),
+                        arrive_at_utc=datetime(
+                            continuation.expected_return_date.year,
+                            continuation.expected_return_date.month,
+                            continuation.expected_return_date.day,
+                            10,
+                            tzinfo=UTC,
+                        ),
                     ),
                     FlightSegmentSummary(
                         airline_code="FV",
@@ -363,6 +468,20 @@ class ResumableFakeGateway:
                         destination=continuation.expected_origin,
                         depart_at=f"{continuation.expected_return_date.isoformat()} 11:00",
                         arrive_at=f"{continuation.expected_return_date.isoformat()} 13:00",
+                        depart_at_utc=datetime(
+                            continuation.expected_return_date.year,
+                            continuation.expected_return_date.month,
+                            continuation.expected_return_date.day,
+                            11,
+                            tzinfo=UTC,
+                        ),
+                        arrive_at_utc=datetime(
+                            continuation.expected_return_date.year,
+                            continuation.expected_return_date.month,
+                            continuation.expected_return_date.day,
+                            13,
+                            tzinfo=UTC,
+                        ),
                     ),
                 )
             else:
@@ -375,6 +494,20 @@ class ResumableFakeGateway:
                         destination=continuation.expected_origin,
                         depart_at=f"{continuation.expected_return_date.isoformat()} 10:00",
                         arrive_at=f"{continuation.expected_return_date.isoformat()} 12:00",
+                        depart_at_utc=datetime(
+                            continuation.expected_return_date.year,
+                            continuation.expected_return_date.month,
+                            continuation.expected_return_date.day,
+                            10,
+                            tzinfo=UTC,
+                        ),
+                        arrive_at_utc=datetime(
+                            continuation.expected_return_date.year,
+                            continuation.expected_return_date.month,
+                            continuation.expected_return_date.day,
+                            12,
+                            tzinfo=UTC,
+                        ),
                     ),
                 )
         provider_offer_id = (
@@ -1007,13 +1140,23 @@ async def test_calendar_uses_validated_range_and_rolling_snapshot_bounds(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("trip_shape", ("open_jaw", "multi_city"))
-async def test_unimplemented_trip_shapes_fail_terminal_before_operation_or_provider_io(
+async def test_unknown_native_multi_leg_capability_materializes_ordered_per_leg_exact_searches(
     tmp_path: Path,
     execution_module: ModuleType,
     trip_shape: Literal["open_jaw", "multi_city"],
 ) -> None:
-    engine, sessions = await _session_factory(tmp_path, f"unsupported-{trip_shape}.db")
-    await _seed_run(sessions, date_mode="exact", trip_shape=trip_shape)
+    engine, sessions = await _session_factory(tmp_path, f"per-leg-{trip_shape}.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        trip_shape=trip_shape,
+        exact_searches=2,
+        logical_budget=2,
+        adults=1,
+        children=1,
+        infants=1,
+        requested_strategies=("through_ticket",),
+    )
     clock = MutableClock()
     gateway = ResumableFakeGateway(clock)
 
@@ -1023,14 +1166,293 @@ async def test_unimplemented_trip_shapes_fail_terminal_before_operation_or_provi
             run_id=RUN_ID,
         )
         await session.commit()
-        terminal = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
         operations = await AgentOperationRepository(session).list_operations(HOUSEHOLD_ID, RUN_ID)
 
-    assert step.operation_claimed is False and step.run_status == "failed"
-    assert terminal is not None and terminal.error_code == "agent_trip_shape_unsupported"
-    assert terminal.http_attempts_consumed == 0
-    assert operations == ()
-    assert gateway.provider_calls == 0
+    exact_starts = tuple(
+        operation for operation in operations if operation.kind is AgentOperationKind.EXACT_START
+    )
+    assert step.operation_claimed is True
+    assert len(exact_starts) == 2
+    assert [
+        (
+            operation.immutable_input["origin"],
+            operation.immutable_input["destination"],
+            operation.immutable_input["departure_date"],
+            operation.immutable_input["return_date"],
+            operation.immutable_input["passengers"],
+        )
+        for operation in exact_starts
+    ] == [
+        ("LED", "CDG", "2026-09-10", None, 3),
+        ("CDG", "LED", "2026-09-20", None, 3),
+    ]
+    assert len(gateway.start_calls) == 1
+    assert gateway.start_calls[0].params.return_date is None
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_multi_city_ranks_only_the_full_composed_route_not_individual_legs(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "multi-city-composed-ranking.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        trip_shape="multi_city",
+        exact_searches=2,
+        logical_budget=2,
+        poll_rounds=1,
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            limit=16,
+        )
+        evidence_repository = AgentEvidenceRepository(session)
+        composed = await evidence_repository.list_composed_candidates(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        ranking_operation = next(
+            operation for operation in operations if operation.kind is AgentOperationKind.RANKING
+        )
+        assert ranking_operation.result_id is not None
+        ranking_record = await evidence_repository.get_ranking_snapshot(
+            HOUSEHOLD_ID,
+            ranking_operation.result_id,
+        )
+        await session.rollback()
+        results = await AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(
+                clock=clock,
+                scope_resolver=ScopeResolver(repository=_ProductionShapeAirportCatalog()),
+            ),
+            clock=clock,
+        ).get_run_results(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
+
+    assert terminal.status == "completed"
+    assert len(composed) == 1
+    assert len(composed[0].component_evidence_ids) == 2
+    assert ranking_record is not None
+    ranking = ranking_snapshot_from_payload(ranking_record.ranking)
+    assert ranking.confirmed_evidence_ids == ()
+    assert ranking.composed_candidate_ids == (composed[0].id,)
+    assert all(
+        candidate.reference.kind is CandidateKind.COMPOSED_ROUTE
+        for view in ranking.views
+        for candidate in view.candidates
+    )
+    assert results.state == "ready"
+    assert results.report is not None
+    assert results.report.ranking == ranking
+    assert "stored-evidence:" not in repr(results.report)
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_confirmed_result_uses_opaque_household_scoped_booking_descriptor(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "opaque-booking-descriptor.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        poll_rounds=1,
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(
+        clock,
+        private_booking_descriptor=True,
+    )
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            limit=12,
+        )
+        await session.rollback()
+        results = await AgentLifecycleService(
+            session=session,
+            parser=IntentParser(),
+            builder=AgentPlanBuilder(
+                clock=clock,
+                scope_resolver=ScopeResolver(repository=_ProductionShapeAirportCatalog()),
+            ),
+            clock=clock,
+            booking_action_secret="test-agent-booking-secret",
+        ).get_run_results(HOUSEHOLD_ID, PLAN_ID, RUN_ID)
+        descriptors = await AgentEvidenceRepository(session).list_booking_action_descriptors(
+            HOUSEHOLD_ID,
+            RUN_ID,
+            active_at=clock(),
+        )
+
+    assert terminal.status == "completed"
+    assert results.state == "ready"
+    assert results.report is not None
+    assert gateway.booking_descriptor_batches == [1]
+    assert len(descriptors) == 1
+    (fact,) = results.report.candidates
+    assert fact.booking_action.available is True
+    assert fact.booking_action.token is not None
+    payload = verify_agent_booking_action_token(
+        fact.booking_action.token,
+        secret_key="test-agent-booking-secret",
+        now=clock(),
+    )
+    assert payload.descriptor_id == descriptors[0].id
+    rendered = repr((results, descriptors))
+    assert "PRIVATE-proposal-id" not in rendered
+    assert "results.aviasales.ru" not in rendered
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_invalid_private_booking_descriptor_is_classified_without_losing_evidence(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "invalid-booking-descriptor.db")
+    await _seed_run(sessions, date_mode="exact", poll_rounds=1)
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(
+        clock,
+        private_booking_descriptor=True,
+        private_booking_results_url="https://private-invalid.example.test/path",
+    )
+
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            limit=12,
+        )
+        evidence = await AgentEvidenceRepository(session).list_confirmed_evidence(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        descriptors = await AgentEvidenceRepository(session).list_booking_action_descriptors(
+            HOUSEHOLD_ID,
+            RUN_ID,
+            active_at=clock(),
+        )
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    poll = next(
+        operation for operation in operations if operation.kind is AgentOperationKind.EXACT_POLL
+    )
+    assert terminal.status == "partial"
+    assert terminal.error_code == "agent_run_partial"
+    assert len(evidence) == 1
+    assert descriptors == ()
+    assert poll.status is AgentOperationStatus.FAILED
+    assert poll.error_code == "agent_booking_descriptor_invalid"
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_corrupt_confirmed_evidence_fails_ranking_operation_without_stale_lease(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "corrupt-ranking-input.db")
+    await _seed_run(sessions, date_mode="exact", poll_rounds=1)
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async with sessions() as session:
+        service = _service(execution_module, session, gateway, clock)
+        await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+        await session.commit()
+        await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+        await session.commit()
+        await session.execute(
+            update(agent_confirmed_offer_evidence_table)
+            .where(agent_confirmed_offer_evidence_table.c.run_id == str(RUN_ID))
+            .values(itinerary_evidence_json="{}")
+        )
+        await session.commit()
+
+        step = await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+        await session.commit()
+        terminal = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    ranking = next(
+        operation for operation in operations if operation.kind is AgentOperationKind.RANKING
+    )
+    assert step.operation_status == "failed"
+    assert step.run_status == "failed"
+    assert terminal is not None and terminal.status == "failed"
+    assert terminal.error_code == "agent_confirmed_evidence_invalid"
+    assert ranking.status is AgentOperationStatus.FAILED
+    assert ranking.lease_owner is None
+    assert ranking.lease_expires_at is None
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_no_lease_restart_maps_corrupt_workflow_advance_to_failed_run(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "no-lease-corrupt-restart.db")
+    await _seed_run(sessions, date_mode="exact", poll_rounds=1)
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async with sessions() as session:
+        service = _service(execution_module, session, gateway, clock)
+        await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+        await session.commit()
+        await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+        await session.commit()
+        await session.execute(
+            update(agent_run_operations_table)
+            .where(agent_run_operations_table.c.run_id == str(RUN_ID))
+            .where(agent_run_operations_table.c.operation_kind == "ranking")
+            .values(
+                status="failed",
+                error_code="agent_confirmed_evidence_invalid",
+                completed_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        await session.execute(
+            update(agent_confirmed_offer_evidence_table)
+            .where(agent_confirmed_offer_evidence_table.c.run_id == str(RUN_ID))
+            .values(itinerary_evidence_json="{}")
+        )
+        await session.commit()
+
+        step = await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+        await session.commit()
+        terminal = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
+
+    assert step.operation_claimed is False
+    assert step.run_status == "failed"
+    assert terminal is not None and terminal.status == "failed"
+    assert terminal.error_code == "agent_confirmed_evidence_invalid"
+    assert gateway.provider_calls == 2
     await engine.dispose()
 
 
@@ -2572,8 +2994,6 @@ async def test_terminal_coverage_marks_started_but_unfinished_pair_incomplete(
     ("requested_strategies", "approved_strategies"),
     (
         (("hidden_city",), ("hidden_city",)),
-        (("split_ticket",), ("split_ticket",)),
-        (("self_transfer",), ("self_transfer",)),
         (("direct",), ("through_ticket",)),
     ),
 )
@@ -2618,6 +3038,223 @@ async def test_task9_fails_closed_for_unsupported_or_mismatched_approved_strateg
     assert terminal.http_attempts_consumed == 0
     assert operations == ()
     assert circuit_rows == reservations == gateway.provider_calls == 0
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ("split_ticket", "self_transfer"))
+async def test_split_strategies_are_accepted_and_begin_with_confirmed_exact_search(
+    tmp_path: Path,
+    execution_module: ModuleType,
+    strategy: Literal["split_ticket", "self_transfer"],
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, f"supported-{strategy}.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        requested_strategies=(strategy,),
+        exact_searches=5,
+        logical_budget=5,
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async with sessions() as session:
+        step = await _service(execution_module, session, gateway, clock).run_step(
+            household_id=HOUSEHOLD_ID,
+            run_id=RUN_ID,
+        )
+        await session.commit()
+        run = await AgentRunRepository(session).get_run(HOUSEHOLD_ID, RUN_ID)
+        operations = await AgentOperationRepository(session).list_operations(HOUSEHOLD_ID, RUN_ID)
+
+    assert step.operation_claimed is True
+    assert run is not None and run.status == "running" and run.error_code is None
+    assert len(gateway.start_calls) == 1
+    assert any(operation.kind is AgentOperationKind.EXACT_START for operation in operations)
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_split_searches_are_derived_only_from_confirmed_hubs_within_approved_reserve(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "confirmed-split-hub.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        requested_strategies=("split_ticket",),
+        exact_searches=5,
+        logical_budget=5,
+        poll_rounds=1,
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock, connecting_evidence=True)
+
+    async with sessions() as session:
+        service = _service(execution_module, session, gateway, clock)
+        await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+        await session.commit()
+        await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+        await session.commit()
+        await service.run_step(household_id=HOUSEHOLD_ID, run_id=RUN_ID)
+        await session.commit()
+        operations = await AgentOperationRepository(session).list_operations(HOUSEHOLD_ID, RUN_ID)
+        confirmed = await AgentEvidenceRepository(session).list_confirmed_evidence(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    (source_evidence,) = confirmed
+    exact_starts = tuple(
+        operation for operation in operations if operation.kind is AgentOperationKind.EXACT_START
+    )
+    assert {
+        (
+            operation.immutable_input["origin"],
+            operation.immutable_input["destination"],
+        )
+        for operation in exact_starts
+    } == {("LED", "CDG"), ("LED", "AMS"), ("AMS", "CDG")}
+    split_starts = tuple(
+        operation
+        for operation in exact_starts
+        if operation.immutable_input.get("search_role") == "split_component"
+    )
+    assert len(split_starts) == 2
+    assert {
+        operation.immutable_input["split_source_evidence_id"] for operation in split_starts
+    } == {str(source_evidence.id)}
+    assert len(exact_starts) <= 5
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_split_flow_persists_composed_candidate_and_all_typed_ranking_views(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "split-composition-ranking.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        requested_strategies=("split_ticket",),
+        exact_searches=5,
+        logical_budget=5,
+        poll_rounds=1,
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock, connecting_evidence=True)
+
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            limit=20,
+        )
+        evidence_repository = AgentEvidenceRepository(session)
+        composed = await evidence_repository.list_composed_candidates(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        ranking_operation = next(
+            operation for operation in operations if operation.kind is AgentOperationKind.RANKING
+        )
+        assert ranking_operation.result_id is not None
+        ranking_record = await evidence_repository.get_ranking_snapshot(
+            HOUSEHOLD_ID,
+            ranking_operation.result_id,
+        )
+
+    assert terminal.status == "completed"
+    assert len(composed) == 1
+    assert composed[0].component_evidence_ids
+    assert composed[0].protection_status is ProtectionStatus.SELF_TRANSFER
+    assert ranking_record is not None
+    ranking = ranking_snapshot_from_payload(ranking_record.ranking)
+    assert tuple(view.name for view in ranking.views) == tuple(RankingView)
+    split_view = ranking.view(RankingView.SPLIT_SELF_TRANSFER)
+    assert len(split_view.candidates) == 1
+    assert split_view.candidates[0].reference.kind is CandidateKind.COMPOSED_ROUTE
+    assert split_view.candidates[0].reference.id == composed[0].id
+    assert set(ranking.composed_candidate_ids) == {composed[0].id}
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_round_trip_split_preserves_two_directions_and_never_searches_same_airport(
+    tmp_path: Path,
+    execution_module: ModuleType,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "round-trip-split.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        trip_shape="round_trip",
+        requested_strategies=("split_ticket", "self_transfer"),
+        exact_searches=9,
+        logical_budget=9,
+        poll_rounds=1,
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock, connecting_evidence=True)
+
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+            limit=40,
+        )
+        evidence_repository = AgentEvidenceRepository(session)
+        composed = await evidence_repository.list_composed_candidates(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    split_starts = tuple(
+        operation
+        for operation in operations
+        if operation.kind is AgentOperationKind.EXACT_START
+        and operation.immutable_input.get("search_role") == "split_component"
+    )
+    assert terminal.status == "completed"
+    assert {
+        (
+            operation.immutable_input["leg_ordinal"],
+            operation.immutable_input["origin"],
+            operation.immutable_input["destination"],
+            operation.immutable_input["departure_date"],
+        )
+        for operation in split_starts
+    } == {
+        (0, "LED", "AMS", "2026-09-10"),
+        (0, "AMS", "CDG", "2026-09-10"),
+        (1, "CDG", "AMS", "2026-09-20"),
+        (1, "AMS", "LED", "2026-09-20"),
+    }
+    assert all(
+        operation.immutable_input["origin"] != operation.immutable_input["destination"]
+        for operation in split_starts
+    )
+    assert len(composed) == 1
+    facts = composed[0].itinerary_evidence
+    assert facts["trip_shape"] == "round_trip"
+    assert [
+        (leg["ordinal"], leg["origin"], leg["destination"], leg["departure_date"])
+        for leg in facts["ordered_legs"]
+    ] == [
+        (0, "LED", "CDG", "2026-09-10"),
+        (1, "CDG", "LED", "2026-09-20"),
+    ]
     await engine.dispose()
 
 
@@ -3893,7 +4530,7 @@ async def test_cancel_only_stage_is_cancelled_while_deadline_only_stage_is_skipp
 
 
 @pytest.mark.anyio
-async def test_deadline_preserves_confirmed_evidence_and_projects_partial_stage_without_io(
+async def test_deadline_preserves_evidence_but_fails_without_saved_ranking_snapshot(
     tmp_path: Path,
     execution_module: ModuleType,
 ) -> None:
@@ -3938,8 +4575,8 @@ async def test_deadline_preserves_confirmed_evidence_and_projects_partial_stage_
         stages = await AgentOperationRepository(session).list_stages(HOUSEHOLD_ID, RUN_ID)
 
     exact_stage = next(stage for stage in stages if stage.kind is AgentPlanStageKind.EXACT_SEARCH)
-    assert terminal is not None and terminal.status == "partial"
-    assert terminal.error_code == "agent_run_partial"
+    assert terminal is not None and terminal.status == "failed"
+    assert terminal.error_code == "agent_run_deadline_exceeded"
     assert evidence_after == evidence_before
     assert gateway.provider_calls == calls_before_deadline
     assert exact_stage.status is AgentStageStatus.PARTIAL
@@ -4819,7 +5456,7 @@ async def test_provider_response_time_drives_retry_and_completion_without_stale_
 
 
 @pytest.mark.anyio
-async def test_provider_clock_advance_past_deadline_returns_partial_when_evidence_was_saved(
+async def test_provider_clock_advance_past_deadline_fails_without_saved_ranking_snapshot(
     tmp_path: Path,
     execution_module: ModuleType,
 ) -> None:
@@ -4841,9 +5478,9 @@ async def test_provider_clock_advance_past_deadline_returns_partial_when_evidenc
         )
 
     assert step.operation_status == "succeeded"
-    assert step.run_status == "partial"
-    assert run is not None and run.status == "partial"
-    assert run.error_code == "agent_run_partial"
+    assert step.run_status == "failed"
+    assert run is not None and run.status == "failed"
+    assert run.error_code == "agent_run_deadline_exceeded"
     assert len(evidence) == 1
     assert gateway.provider_calls == 2
     await engine.dispose()
@@ -5340,10 +5977,28 @@ async def test_useful_confirmed_evidence_plus_failure_is_partial_but_none_is_fai
                 select(func.count()).select_from(agent_confirmed_offer_evidence_table)
             )
         ).scalar_one()
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+        ranking_operations = tuple(
+            operation
+            for operation in operations
+            if operation.kind is AgentOperationKind.RANKING
+            and operation.status is AgentOperationStatus.SUCCEEDED
+            and operation.result_type is AgentOperationResultType.RANKING_SNAPSHOT
+            and operation.result_id is not None
+        )
+        assert len(ranking_operations) == 1
+        ranking = await AgentEvidenceRepository(session).get_ranking_snapshot(
+            HOUSEHOLD_ID,
+            ranking_operations[0].result_id,
+        )
 
     assert evidence_count == 1
     assert partial.status == "partial"
     assert partial.error_code == "agent_run_partial"
+    assert ranking is not None and ranking.run_id == RUN_ID
     await engine.dispose()
 
     failed_engine, failed_sessions = await _session_factory(tmp_path, "failed.db")
@@ -5933,6 +6588,12 @@ async def _seed_run(
         },
         "clarifications": [],
     }
+    if {"split_ticket", "self_transfer"}.intersection(requested_strategies):
+        plan["composition"] = {
+            "version": "confirmed-hubs-v1",
+            "max_hubs_per_leg": 2,
+            "source": "confirmed_connection_airports",
+        }
     scope = {
         "coverage": coverage,
         "legs": [

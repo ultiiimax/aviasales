@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
+from typing import Any
 from uuid import UUID
 
+from flight_hunter.domain.agent_search import TripShape
 from flight_hunter.domain.money import Money
-from flight_hunter.domain.offers import FlightSegmentSummary
+from flight_hunter.domain.offers import (
+    FlightSegmentSummary,
+    PassengerMix,
+    PriceBasis,
+)
 
 _IATA_RE = re.compile(r"^[A-Z]{3}$")
+_ISO_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 
 class DiscoverySource(StrEnum):
@@ -27,6 +34,116 @@ class ProtectionStatus(StrEnum):
     EXPLICITLY_PROTECTED = "explicitly_protected"
     SELF_TRANSFER = "self_transfer"
     UNKNOWN = "unknown"
+
+
+class PriceComparisonStatus(StrEnum):
+    FULLY_PRICED = "fully_priced"
+    MANDATORY_COST_UNKNOWN = "mandatory_cost_unknown"
+    NON_COMPARABLE = "non_comparable"
+
+
+class UnknownCostKind(StrEnum):
+    GROUND_TRANSFER = "ground_transfer"
+    CURRENCY_CONVERSION = "currency_conversion"
+
+
+@dataclass(frozen=True, slots=True)
+class ComposedRouteLeg:
+    ordinal: int
+    origin: str
+    destination: str
+    departure_date: date
+    component_evidence_ids: tuple[UUID, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.ordinal) is not int or self.ordinal < 0:
+            raise ValueError("ordinal must be a non-negative integer")
+        origin, destination = _normalized_route(self.origin, self.destination)
+        if type(self.departure_date) is not date:
+            raise TypeError("departure_date must be a date")
+        component_ids = tuple(self.component_evidence_ids)
+        if not component_ids or not all(isinstance(value, UUID) for value in component_ids):
+            raise ValueError("component_evidence_ids must contain UUID values")
+        if len(set(component_ids)) != len(component_ids):
+            raise ValueError("component_evidence_ids must be unique within a leg")
+        object.__setattr__(self, "origin", origin)
+        object.__setattr__(self, "destination", destination)
+        object.__setattr__(self, "component_evidence_ids", component_ids)
+
+
+@dataclass(frozen=True, slots=True)
+class TicketBoundary:
+    ticket_index: int
+    leg_ordinal: int
+    component_evidence_id: UUID
+    segment_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.ticket_index) is not int or self.ticket_index < 0:
+            raise ValueError("ticket_index must be a non-negative integer")
+        if type(self.leg_ordinal) is not int or self.leg_ordinal < 0:
+            raise ValueError("leg_ordinal must be a non-negative integer")
+        if not isinstance(self.component_evidence_id, UUID):
+            raise TypeError("component_evidence_id must be UUID")
+        refs = _normalized_segment_ids(self.segment_refs, allow_empty=False)
+        object.__setattr__(self, "segment_refs", refs)
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionAssumption:
+    leg_ordinal: int
+    inbound_component_id: UUID
+    outbound_component_id: UUID
+    arrival_airport: str
+    departure_airport: str
+    layover: timedelta
+    required_minimum: timedelta
+    airport_change: bool
+    provenance: str | None = None
+    transfer_cost: Money | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.leg_ordinal) is not int or self.leg_ordinal < 0:
+            raise ValueError("leg_ordinal must be a non-negative integer")
+        if not isinstance(self.inbound_component_id, UUID) or not isinstance(
+            self.outbound_component_id, UUID
+        ):
+            raise TypeError("connection component IDs must be UUID values")
+        arrival, departure = _normalized_route(
+            self.arrival_airport,
+            self.departure_airport,
+        )
+        if not isinstance(self.layover, timedelta) or self.layover < timedelta(0):
+            raise ValueError("layover must be a non-negative timedelta")
+        if not isinstance(self.required_minimum, timedelta) or self.required_minimum <= timedelta(
+            0
+        ):
+            raise ValueError("required_minimum must be a positive timedelta")
+        if type(self.airport_change) is not bool:
+            raise TypeError("airport_change must be bool")
+        if self.airport_change != (arrival != departure):
+            raise ValueError("airport_change must match connection airports")
+        if self.airport_change and not self.provenance:
+            raise ValueError("airport changes require provenance")
+        if self.transfer_cost is not None:
+            _require_money(self.transfer_cost, "transfer_cost")
+        object.__setattr__(self, "arrival_airport", arrival)
+        object.__setattr__(self, "departure_airport", departure)
+
+
+@dataclass(frozen=True, slots=True)
+class UnknownCost:
+    kind: UnknownCostKind
+    leg_ordinal: int
+    description: str
+
+    def __post_init__(self) -> None:
+        kind = UnknownCostKind(self.kind)
+        if type(self.leg_ordinal) is not int or self.leg_ordinal < 0:
+            raise ValueError("leg_ordinal must be a non-negative integer")
+        if not self.description:
+            raise ValueError("unknown cost description is required")
+        object.__setattr__(self, "kind", kind)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +195,8 @@ class ConfirmedOfferEvidence:
     protection_status: ProtectionStatus
     seller_name: str | None = None
     baggage_summary: str | None = None
+    passenger_mix: PassengerMix | None = None
+    price_basis: PriceBasis = PriceBasis.TOTAL_FOR_PASSENGERS
 
     def __post_init__(self) -> None:
         _require_evidence_identity(self.id, self.provider_id)
@@ -92,10 +211,20 @@ class ConfirmedOfferEvidence:
         segments = _normalized_segments(self.segments)
         if len(segment_ids) != len(segments):
             raise ValueError("segment_ids must match segments")
+        passenger_mix = self.passenger_mix or PassengerMix(adults=self.passengers)
+        if not isinstance(passenger_mix, PassengerMix):
+            raise TypeError("passenger_mix must be PassengerMix")
+        if passenger_mix.total != self.passengers:
+            raise ValueError("passengers must match passenger_mix total")
+        price_basis = PriceBasis(self.price_basis)
+        if price_basis is PriceBasis.PROVIDER_SINGLE_ADULT_TICKET and self.passengers != 1:
+            raise ValueError("single-adult ticket prices require passengers=1")
         object.__setattr__(self, "origin", origin)
         object.__setattr__(self, "destination", destination)
         object.__setattr__(self, "segment_ids", segment_ids)
         object.__setattr__(self, "segments", segments)
+        object.__setattr__(self, "passenger_mix", passenger_mix)
+        object.__setattr__(self, "price_basis", price_basis)
         object.__setattr__(
             self,
             "protection_status",
@@ -111,12 +240,24 @@ class ConfirmedOfferEvidence:
 class ComposedRouteCandidate:
     id: UUID
     components: tuple[ConfirmedOfferEvidence, ...]
-    total_amount: Money
+    total_amount: Money | None
     passengers: int
     observed_at: datetime
     segment_ids: tuple[str, ...]
     segments: tuple[FlightSegmentSummary, ...]
     protection_status: ProtectionStatus
+    trip_shape: TripShape = TripShape.ONE_WAY
+    passenger_mix: PassengerMix | None = None
+    price_basis: PriceBasis = PriceBasis.TOTAL_FOR_PASSENGERS
+    target_currency: str | None = None
+    price_comparison_status: PriceComparisonStatus = PriceComparisonStatus.FULLY_PRICED
+    ordered_legs: tuple[ComposedRouteLeg, ...] = ()
+    ticket_boundaries: tuple[TicketBoundary, ...] = ()
+    connection_assumptions: tuple[ConnectionAssumption, ...] = ()
+    unknown_costs: tuple[UnknownCost, ...] = ()
+    fingerprint: str = ""
+    composition_version: str = "route-composer-v1"
+    ranking_reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, UUID):
@@ -129,16 +270,69 @@ class ComposedRouteCandidate:
         component_ids = tuple(component.id for component in components)
         if len(set(component_ids)) != len(component_ids):
             raise ValueError("components must be unique")
-        _require_money(self.total_amount, "total_amount")
+        comparison_status = PriceComparisonStatus(self.price_comparison_status)
+        if self.total_amount is None:
+            if comparison_status is not PriceComparisonStatus.NON_COMPARABLE:
+                raise ValueError("only non-comparable candidates may omit total_amount")
+        else:
+            _require_money(self.total_amount, "total_amount")
         _require_passengers(self.passengers)
         _require_aware_datetime(self.observed_at)
         segment_ids = _normalized_segment_ids(self.segment_ids, allow_empty=False)
         segments = _normalized_segments(self.segments)
         if len(segment_ids) != len(segments):
             raise ValueError("segment_ids must match segments")
+        passenger_mix = self.passenger_mix or PassengerMix(adults=self.passengers)
+        if not isinstance(passenger_mix, PassengerMix):
+            raise TypeError("passenger_mix must be PassengerMix")
+        if passenger_mix.total != self.passengers:
+            raise ValueError("passengers must match passenger_mix total")
+        price_basis = PriceBasis(self.price_basis)
+        target_currency = self.target_currency
+        if target_currency is None:
+            if self.total_amount is None:
+                raise ValueError("non-comparable candidates require target_currency")
+            target_currency = self.total_amount.currency
+        if not isinstance(target_currency, str):
+            raise TypeError("target_currency must be a string")
+        target_currency = target_currency.upper()
+        if not _ISO_CURRENCY_RE.fullmatch(target_currency):
+            raise ValueError("target_currency must be an ISO 4217 alpha-3 code")
+        trip_shape = TripShape(self.trip_shape)
+        ordered_legs = tuple(self.ordered_legs)
+        if not all(isinstance(leg, ComposedRouteLeg) for leg in ordered_legs):
+            raise TypeError("ordered_legs must contain ComposedRouteLeg values")
+        ticket_boundaries = tuple(self.ticket_boundaries)
+        if not all(isinstance(boundary, TicketBoundary) for boundary in ticket_boundaries):
+            raise TypeError("ticket_boundaries must contain TicketBoundary values")
+        connection_assumptions = tuple(self.connection_assumptions)
+        if not all(
+            isinstance(assumption, ConnectionAssumption) for assumption in connection_assumptions
+        ):
+            raise TypeError("connection_assumptions must contain ConnectionAssumption values")
+        unknown_costs = tuple(self.unknown_costs)
+        if not all(isinstance(cost, UnknownCost) for cost in unknown_costs):
+            raise TypeError("unknown_costs must contain UnknownCost values")
+        if self.fingerprint and not re.fullmatch(r"[0-9a-f]{64}", self.fingerprint):
+            raise ValueError("fingerprint must be a lowercase SHA-256 digest")
+        if not self.composition_version:
+            raise ValueError("composition_version is required")
+        ranking_reasons = tuple(self.ranking_reasons)
+        if not all(isinstance(reason, str) and reason for reason in ranking_reasons):
+            raise ValueError("ranking_reasons must contain non-empty strings")
         object.__setattr__(self, "components", components)
         object.__setattr__(self, "segment_ids", segment_ids)
         object.__setattr__(self, "segments", segments)
+        object.__setattr__(self, "passenger_mix", passenger_mix)
+        object.__setattr__(self, "price_basis", price_basis)
+        object.__setattr__(self, "target_currency", target_currency)
+        object.__setattr__(self, "trip_shape", trip_shape)
+        object.__setattr__(self, "price_comparison_status", comparison_status)
+        object.__setattr__(self, "ordered_legs", ordered_legs)
+        object.__setattr__(self, "ticket_boundaries", ticket_boundaries)
+        object.__setattr__(self, "connection_assumptions", connection_assumptions)
+        object.__setattr__(self, "unknown_costs", unknown_costs)
+        object.__setattr__(self, "ranking_reasons", ranking_reasons)
         object.__setattr__(
             self,
             "protection_status",
@@ -152,6 +346,97 @@ class ComposedRouteCandidate:
     @property
     def component_evidence_ids(self) -> tuple[UUID, ...]:
         return tuple(component.id for component in self.components)
+
+    @property
+    def known_total(self) -> Money | None:
+        return self.total_amount
+
+    @property
+    def component_amounts(self) -> tuple[Money, ...]:
+        return tuple(component.total_amount for component in self.components)
+
+    @property
+    def canonical_facts(self) -> dict[str, Any]:
+        amount = self.total_amount
+        passenger_mix = self.passenger_mix
+        if passenger_mix is None:  # Defensive narrowing for static callers.
+            raise RuntimeError("passenger_mix invariant was not normalized")
+        return {
+            "composition_version": self.composition_version,
+            "trip_shape": self.trip_shape.value,
+            "components": [str(value) for value in self.component_evidence_ids],
+            "component_amounts": [
+                {
+                    "minor_units": component.total_amount.minor_units,
+                    "currency": component.total_amount.currency,
+                }
+                for component in self.components
+            ],
+            "ordered_legs": [
+                {
+                    "ordinal": leg.ordinal,
+                    "origin": leg.origin,
+                    "destination": leg.destination,
+                    "departure_date": leg.departure_date.isoformat(),
+                    "components": [str(value) for value in leg.component_evidence_ids],
+                }
+                for leg in self.ordered_legs
+            ],
+            "passenger_mix": {
+                "adults": passenger_mix.adults,
+                "children": passenger_mix.children,
+                "infants": passenger_mix.infants,
+            },
+            "price_basis": self.price_basis.value,
+            "target_currency": self.target_currency,
+            "known_total": (
+                None
+                if amount is None
+                else {"minor_units": amount.minor_units, "currency": amount.currency}
+            ),
+            "price_comparison_status": self.price_comparison_status.value,
+            "tickets": [
+                {
+                    "ticket_index": boundary.ticket_index,
+                    "leg_ordinal": boundary.leg_ordinal,
+                    "component_evidence_id": str(boundary.component_evidence_id),
+                    "segment_refs": list(boundary.segment_refs),
+                }
+                for boundary in self.ticket_boundaries
+            ],
+            "connections": [
+                {
+                    "leg_ordinal": assumption.leg_ordinal,
+                    "inbound_component_id": str(assumption.inbound_component_id),
+                    "outbound_component_id": str(assumption.outbound_component_id),
+                    "arrival_airport": assumption.arrival_airport,
+                    "departure_airport": assumption.departure_airport,
+                    "layover_seconds": int(assumption.layover.total_seconds()),
+                    "required_minimum_seconds": int(assumption.required_minimum.total_seconds()),
+                    "airport_change": assumption.airport_change,
+                    "provenance": assumption.provenance,
+                    "transfer_cost": (
+                        None
+                        if assumption.transfer_cost is None
+                        else {
+                            "minor_units": assumption.transfer_cost.minor_units,
+                            "currency": assumption.transfer_cost.currency,
+                        }
+                    ),
+                }
+                for assumption in self.connection_assumptions
+            ],
+            "unknown_costs": [
+                {
+                    "kind": cost.kind.value,
+                    "leg_ordinal": cost.leg_ordinal,
+                    "description": cost.description,
+                }
+                for cost in self.unknown_costs
+            ],
+            "protection_status": self.protection_status.value,
+            "ranking_reasons": list(self.ranking_reasons),
+        }
 
 
 def require_confirmed_rank_input(

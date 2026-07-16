@@ -22,6 +22,7 @@ from flight_hunter.application.agent_operations import (
 from flight_hunter.domain.agent_evidence import DiscoverySource, ProtectionStatus
 from flight_hunter.domain.offers import Freshness, PriceBasis
 from flight_hunter.persistence.agent_repositories import (
+    AgentEvidenceError,
     AgentEvidenceRepository,
     AgentOperationConflict,
     AgentOperationKind,
@@ -37,6 +38,7 @@ from flight_hunter.persistence.agent_repositories import (
     AttemptKind,
     AttemptReservationStatus,
     CircuitPermitStatus,
+    NewAgentBookingActionDescriptor,
     NewAgentComposedRouteCandidate,
     NewAgentConfirmedOfferEvidence,
     NewAgentDiscoverySignal,
@@ -3735,6 +3737,266 @@ async def test_rereview_second_exact_poll_result_requires_source_provider_and_ac
 
 
 @pytest.mark.anyio
+async def test_composed_candidate_cannot_understate_confirmed_component_total(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "composition-total-mismatch.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=1)
+
+    async with sessions() as session:
+        repository = AgentEvidenceRepository(session)
+        component = await repository.append_confirmed_evidence(_confirmed_result())
+
+        with pytest.raises(AgentEvidenceError) as rejected:
+            await repository.append_composed_candidate(
+                NewAgentComposedRouteCandidate(
+                    id=UUID("eeeeeeee-3333-4333-8333-333333333333"),
+                    household_id=HOUSEHOLD_ID,
+                    run_id=RUN_ID,
+                    stage_id=STAGE_ID,
+                    component_evidence_ids=(component.id,),
+                    observed_at=NOW,
+                    passengers=1,
+                    passenger_basis=PriceBasis.PROVIDER_SINGLE_ADULT_TICKET,
+                    amount_minor=19_999,
+                    currency="RUB",
+                    itinerary_evidence={"components": [str(component.id)]},
+                    protection_status=ProtectionStatus.UNKNOWN,
+                    baggage_status=None,
+                    transfer_status=None,
+                    visa_status=None,
+                    fingerprint="sha256:" + "3" * 64,
+                    created_at=NOW,
+                )
+            )
+
+    assert rejected.value.code == "agent_composed_component_mismatch"
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "overstated_total",
+        "passenger_mix",
+        "ordered_leg",
+        "ticket_boundary",
+        "connection_utc",
+    ),
+)
+async def test_composed_candidate_recomputes_complete_canonical_facts_from_components(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, f"composition-{tamper}.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=1)
+    first_id = UUID("eeeeeeee-1111-4111-8111-111111111111")
+    second_id = UUID("eeeeeeee-2222-4222-8222-222222222222")
+    first_segment = f"segment-{first_id.hex[:12]}"
+    second_segment = f"segment-{second_id.hex[:12]}"
+
+    async with sessions() as session:
+        repository = AgentEvidenceRepository(session)
+        first = await repository.append_confirmed_evidence(
+            _confirmed_result(
+                id_value=first_id,
+                fingerprint="sha256:" + "1" * 64,
+                origin="LED",
+                destination="AMS",
+                depart_at_utc=datetime(2026, 9, 1, 8, tzinfo=UTC),
+                arrive_at_utc=datetime(2026, 9, 1, 10, tzinfo=UTC),
+            )
+        )
+        second = await repository.append_confirmed_evidence(
+            _confirmed_result(
+                id_value=second_id,
+                fingerprint="sha256:" + "2" * 64,
+                origin="AMS",
+                destination="CDG",
+                depart_at_utc=datetime(2026, 9, 1, 14, tzinfo=UTC),
+                arrive_at_utc=datetime(2026, 9, 1, 16, tzinfo=UTC),
+            )
+        )
+        facts: dict[str, object] = {
+            "composition_version": "route-composer-v1",
+            "trip_shape": "one_way",
+            "components": [str(first.id), str(second.id)],
+            "component_amounts": [
+                {"minor_units": 20_000, "currency": "RUB"},
+                {"minor_units": 20_000, "currency": "RUB"},
+            ],
+            "ordered_legs": [
+                {
+                    "ordinal": 0,
+                    "origin": "LED",
+                    "destination": "CDG",
+                    "departure_date": "2026-09-01",
+                    "components": [str(first.id), str(second.id)],
+                }
+            ],
+            "passenger_mix": {"adults": 1, "children": 0, "infants": 0},
+            "price_basis": PriceBasis.PROVIDER_SINGLE_ADULT_TICKET.value,
+            "target_currency": "RUB",
+            "known_total": {"minor_units": 40_000, "currency": "RUB"},
+            "price_comparison_status": "fully_priced",
+            "tickets": [
+                {
+                    "ticket_index": 0,
+                    "leg_ordinal": 0,
+                    "component_evidence_id": str(first.id),
+                    "segment_refs": [f"{first.id}#{first_segment}"],
+                },
+                {
+                    "ticket_index": 1,
+                    "leg_ordinal": 0,
+                    "component_evidence_id": str(second.id),
+                    "segment_refs": [f"{second.id}#{second_segment}"],
+                },
+            ],
+            "connections": [
+                {
+                    "leg_ordinal": 0,
+                    "inbound_component_id": str(first.id),
+                    "outbound_component_id": str(second.id),
+                    "arrival_airport": "AMS",
+                    "departure_airport": "AMS",
+                    "layover_seconds": 14_400,
+                    "required_minimum_seconds": 10_800,
+                    "airport_change": False,
+                    "provenance": None,
+                    "transfer_cost": None,
+                }
+            ],
+            "unknown_costs": [],
+            "protection_status": "self_transfer",
+            "ranking_reasons": ["confirmed_components"],
+        }
+        amount_minor = 40_000
+        if tamper == "overstated_total":
+            amount_minor = 40_001
+            facts["known_total"] = {"minor_units": amount_minor, "currency": "RUB"}
+        elif tamper == "passenger_mix":
+            facts["passenger_mix"] = {"adults": 2, "children": 0, "infants": 0}
+        elif tamper == "ordered_leg":
+            facts["ordered_legs"][0]["origin"] = "SVO"  # type: ignore[index]
+        elif tamper == "ticket_boundary":
+            facts["tickets"][0]["segment_refs"] = ["forged-segment"]  # type: ignore[index]
+        else:
+            facts["connections"][0]["layover_seconds"] = 1  # type: ignore[index]
+
+        with pytest.raises(AgentEvidenceError) as rejected:
+            await repository.append_composed_candidate(
+                NewAgentComposedRouteCandidate(
+                    id=UUID("eeeeeeee-3333-4333-8333-333333333333"),
+                    household_id=HOUSEHOLD_ID,
+                    run_id=RUN_ID,
+                    stage_id=STAGE_ID,
+                    component_evidence_ids=(first.id, second.id),
+                    observed_at=NOW,
+                    passengers=1,
+                    passenger_basis=PriceBasis.PROVIDER_SINGLE_ADULT_TICKET,
+                    amount_minor=amount_minor,
+                    currency="RUB",
+                    itinerary_evidence=facts,
+                    protection_status=ProtectionStatus.SELF_TRANSFER,
+                    baggage_status=None,
+                    transfer_status=None,
+                    visa_status=None,
+                    fingerprint="sha256:" + "3" * 64,
+                    created_at=NOW,
+                )
+            )
+
+    assert rejected.value.code == "agent_composed_component_mismatch"
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_booking_descriptor_pk_collision_is_cause_free_and_never_leaks_private_json(
+    tmp_path: Path,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "booking-descriptor-pk-race.db")
+    await _seed_run_and_stage(sessions, logical_budget=1, http_budget=1)
+    first_evidence_id = UUID("eeeeeeee-1111-4111-8111-111111111111")
+    second_evidence_id = UUID("eeeeeeee-2222-4222-8222-222222222222")
+    descriptor_id = UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+    canaries = (
+        "PRIVATE-search-race-canary",
+        "PRIVATE-proposal-race-canary",
+        "PRIVATE-results-race.example.test",
+    )
+
+    async with sessions() as session:
+        repository = AgentEvidenceRepository(session)
+        first = await repository.append_confirmed_evidence(
+            _confirmed_result(
+                id_value=first_evidence_id,
+                fingerprint="sha256:" + "1" * 64,
+            )
+        )
+        second = await repository.append_confirmed_evidence(
+            _confirmed_result(
+                id_value=second_evidence_id,
+                fingerprint="sha256:" + "2" * 64,
+            )
+        )
+        await repository.append_booking_action_descriptor(
+            NewAgentBookingActionDescriptor(
+                id=descriptor_id,
+                household_id=HOUSEHOLD_ID,
+                run_id=RUN_ID,
+                confirmed_evidence_id=first.id,
+                provider_id="aviasales_search",
+                private_descriptor={
+                    "provider_id": "aviasales_search",
+                    "search_id": "first-search",
+                    "proposal_id": "first-proposal",
+                    "results_url": "results.aviasales.ru",
+                },
+                fingerprint="sha256:" + "3" * 64,
+                created_at=NOW,
+                expires_at=NOW + timedelta(minutes=30),
+            )
+        )
+
+        with pytest.raises(AgentEvidenceError) as rejected:
+            await repository.append_booking_action_descriptor(
+                NewAgentBookingActionDescriptor(
+                    id=descriptor_id,
+                    household_id=HOUSEHOLD_ID,
+                    run_id=RUN_ID,
+                    confirmed_evidence_id=second.id,
+                    provider_id="aviasales_search",
+                    private_descriptor={
+                        "provider_id": "aviasales_search",
+                        "search_id": canaries[0],
+                        "proposal_id": canaries[1],
+                        "results_url": canaries[2],
+                    },
+                    fingerprint="sha256:" + "4" * 64,
+                    created_at=NOW,
+                    expires_at=NOW + timedelta(minutes=30),
+                )
+            )
+
+    assert rejected.value.code == "agent_booking_descriptor_conflict"
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__context__ is None
+    rendered = "".join(
+        traceback.format_exception(
+            type(rejected.value),
+            rejected.value,
+            rejected.value.__traceback__,
+        )
+    )
+    assert "IntegrityError" not in rendered
+    assert "private_descriptor_json" not in rendered
+    assert all(canary not in rendered for canary in canaries)
+    await engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_rereview_second_composition_and_ranking_keep_cross_provider_aggregation(
     tmp_path: Path,
 ) -> None:
@@ -3754,6 +4016,10 @@ async def test_rereview_second_composition_and_ranking_keep_cross_provider_aggre
                 id_value=first_id,
                 provider_id="aviasales_search",
                 fingerprint="sha256:" + "1" * 64,
+                origin="LED",
+                destination="AMS",
+                depart_at_utc=datetime(2026, 9, 1, 8, tzinfo=UTC),
+                arrive_at_utc=datetime(2026, 9, 1, 10, tzinfo=UTC),
             )
         )
         second = await evidence_repository.append_confirmed_evidence(
@@ -3761,8 +4027,14 @@ async def test_rereview_second_composition_and_ranking_keep_cross_provider_aggre
                 id_value=second_id,
                 provider_id="other_provider",
                 fingerprint="sha256:" + "2" * 64,
+                origin="AMS",
+                destination="CDG",
+                depart_at_utc=datetime(2026, 9, 1, 14, tzinfo=UTC),
+                arrive_at_utc=datetime(2026, 9, 1, 16, tzinfo=UTC),
             )
         )
+        first_segment = f"segment-{first_id.hex[:12]}"
+        second_segment = f"segment-{second_id.hex[:12]}"
         candidate = await evidence_repository.append_composed_candidate(
             NewAgentComposedRouteCandidate(
                 id=candidate_id,
@@ -3773,10 +4045,63 @@ async def test_rereview_second_composition_and_ranking_keep_cross_provider_aggre
                 observed_at=NOW,
                 passengers=1,
                 passenger_basis=PriceBasis.PROVIDER_SINGLE_ADULT_TICKET,
-                amount_minor=35_000,
+                amount_minor=40_000,
                 currency="RUB",
-                itinerary_evidence={"components": [str(first.id), str(second.id)]},
-                protection_status=ProtectionStatus.UNKNOWN,
+                itinerary_evidence={
+                    "composition_version": "route-composer-v1",
+                    "trip_shape": "one_way",
+                    "components": [str(first.id), str(second.id)],
+                    "component_amounts": [
+                        {"minor_units": 20_000, "currency": "RUB"},
+                        {"minor_units": 20_000, "currency": "RUB"},
+                    ],
+                    "ordered_legs": [
+                        {
+                            "ordinal": 0,
+                            "origin": "LED",
+                            "destination": "CDG",
+                            "departure_date": "2026-09-01",
+                            "components": [str(first.id), str(second.id)],
+                        }
+                    ],
+                    "passenger_mix": {"adults": 1, "children": 0, "infants": 0},
+                    "price_basis": PriceBasis.PROVIDER_SINGLE_ADULT_TICKET.value,
+                    "target_currency": "RUB",
+                    "known_total": {"minor_units": 40_000, "currency": "RUB"},
+                    "price_comparison_status": "fully_priced",
+                    "tickets": [
+                        {
+                            "ticket_index": 0,
+                            "leg_ordinal": 0,
+                            "component_evidence_id": str(first.id),
+                            "segment_refs": [f"{first.id}#{first_segment}"],
+                        },
+                        {
+                            "ticket_index": 1,
+                            "leg_ordinal": 0,
+                            "component_evidence_id": str(second.id),
+                            "segment_refs": [f"{second.id}#{second_segment}"],
+                        },
+                    ],
+                    "connections": [
+                        {
+                            "leg_ordinal": 0,
+                            "inbound_component_id": str(first.id),
+                            "outbound_component_id": str(second.id),
+                            "arrival_airport": "AMS",
+                            "departure_airport": "AMS",
+                            "layover_seconds": 14_400,
+                            "required_minimum_seconds": 10_800,
+                            "airport_change": False,
+                            "provenance": None,
+                            "transfer_cost": None,
+                        }
+                    ],
+                    "unknown_costs": [],
+                    "protection_status": "self_transfer",
+                    "ranking_reasons": ["confirmed_components"],
+                },
+                protection_status=ProtectionStatus.SELF_TRANSFER,
                 baggage_status=None,
                 transfer_status=None,
                 visa_status=None,
@@ -5027,7 +5352,14 @@ def _confirmed_result(
     id_value: UUID = EVIDENCE_RESULT_ID,
     provider_id: str = "aviasales_search",
     fingerprint: str = "sha256:" + "e" * 64,
+    origin: str = "LED",
+    destination: str = "CDG",
+    departure_date: date = date(2026, 9, 1),
+    depart_at_utc: datetime = datetime(2026, 9, 1, 8, tzinfo=UTC),
+    arrive_at_utc: datetime = datetime(2026, 9, 1, 10, tzinfo=UTC),
+    amount_minor: int = 20_000,
 ) -> NewAgentConfirmedOfferEvidence:
+    segment_ref = f"segment-{id_value.hex[:12]}"
     return NewAgentConfirmedOfferEvidence(
         id=id_value,
         household_id=HOUSEHOLD_ID,
@@ -5039,9 +5371,34 @@ def _confirmed_result(
         freshness=Freshness.LIVE_OBSERVED,
         passengers=1,
         passenger_basis=PriceBasis.PROVIDER_SINGLE_ADULT_TICKET,
-        amount_minor=20_000,
+        amount_minor=amount_minor,
         currency="RUB",
-        itinerary_evidence={"segments": [{"origin": "LED", "destination": "CDG"}]},
+        itinerary_evidence={
+            "leg_ordinal": 0,
+            "search_role": "base",
+            "origin": origin,
+            "destination": destination,
+            "departure_date": departure_date.isoformat(),
+            "return_date": None,
+            "passenger_mix": {"adults": 1, "children": 0, "infants": 0},
+            "price_basis": PriceBasis.PROVIDER_SINGLE_ADULT_TICKET.value,
+            "segments": [
+                {
+                    "segment_ref": segment_ref,
+                    "origin": origin,
+                    "destination": destination,
+                    "depart_at": depart_at_utc.strftime("%Y-%m-%d %H:%M"),
+                    "arrive_at": arrive_at_utc.strftime("%Y-%m-%d %H:%M"),
+                    "depart_at_utc": depart_at_utc.isoformat(),
+                    "arrive_at_utc": arrive_at_utc.isoformat(),
+                    "carrier": "FV",
+                    "flight_number": "FV100",
+                }
+            ],
+            "seller": "Fixture seller",
+            "ticket_structure": "provider_ticket",
+            "stops": 0,
+        },
         protection_status=ProtectionStatus.UNKNOWN,
         baggage_status=None,
         transfer_status=None,

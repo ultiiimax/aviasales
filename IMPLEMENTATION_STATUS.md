@@ -7,7 +7,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
 | Provider | Adapter | Credentials | Enabled | Background allowed | Merge allowed | Last verification |
 |---|---|---:|---:|---:|---:|---|
 | Fake | implemented offline demo | none | yes | yes | yes | n/a |
-| Aviasales Search | implemented mobile API, live | `AVIASALES_SEARCH_SIGNATURE`, `AVIASALES_SEARCH_MARKER` | env flag | yes | yes | 2026-07-14 sanitized schema checks: Suggest/start HTTP 200, poll list, Explore calendar `ru_RU` rows |
+| Aviasales Search | implemented mobile API, live | `AVIASALES_SEARCH_SIGNATURE`, `AVIASALES_SEARCH_MARKER` | env flag | yes | yes | 2026-07-16 exact mapping/booking boundary reverified against sanitized capture; last live schema checks remain 2026-07-14 |
 | SearXNG | implemented URL discovery | self-hosted optional | env flag | no, user action | candidate only | 2026-06-29 |
 | Crawl4AI | implemented markdown extraction | self-hosted optional | env flag | no, user action | candidate only | 2026-06-29 |
 | Deal discovery | implemented orchestrator | local components | component flags | no, user action | candidate only | 2026-06-29 |
@@ -41,6 +41,8 @@ This file is maintained by coding agents. Mark a slice done only after implement
     review at `0babb2a`, with no Critical/Important/Minor findings).
   - [x] Execute resumable Aviasales calendar/exact work in the worker (Task 9
     accepted at `c0d7de6`; clean-environment gates fixed at `98147bc`).
+  - [x] Execute every frozen finite pair and bounded ANYWHERE discovery binding
+    (Task 10 accepted at `39fcf60`; status acceptance at `db7798a`).
   - [ ] Compose and rank split, self-transfer, open-jaw and multi-city routes.
   - [ ] Isolate hidden-city research behind a second acknowledgement.
   - [ ] Add evidence-gated buy timing, anomaly and currency analysis.
@@ -189,6 +191,36 @@ and ranking snapshots, then expose cheapest, fastest, balanced, low-risk,
 split/self-transfer and risky views without leaking provider references or URLs.
 Implementation proceeds test-first through domain composition, execution,
 persistence, API reporting and focused/full quality gates.
+
+Task 11 seam audit amendment: composition chronology must use the provider's
+verified Unix instants, not local timestamp strings; every confirmed component
+must retain its immutable planned-leg binding; and split/self-transfer provider
+work must be frozen and included in the approved logical/HTTP budget before any
+call. Agent booking actions also require an opaque household-scoped descriptor:
+the legacy generic HMAC token embeds its `ref` in reversible base64 and therefore
+cannot be reused for agent results. The slice consequently includes provider
+timestamp normalization, planning tests and a forward private-descriptor
+migration in addition to the original Task 11 file map. No schema change is
+needed for composed candidates or ranking snapshots already created by `0024`.
+
+Task 11 implementation candidate on 2026-07-16 now composes only confirmed
+evidence with verified UTC chronology, bounded beam/Pareto growth and explicit
+ticket, protection, transfer and unknown-cost facts. Unknown native multi-leg
+capability executes frozen ordered per-leg searches; approved split work is
+derived only from confirmed hubs and reserved in the pre-execution budget.
+Immutable composed candidates and six-view ranking snapshots project through a
+typed API without reranking on reads. Normal confirmed results receive only an
+opaque household/run-scoped booking token; private Aviasales click descriptors
+stay server-side and resolve only after an authenticated explicit click.
+Completed/partial runs require a saved ranking snapshot, while typed persistence
+or local-analysis failures close their ledger operation instead of leaving a
+stale lease. Migration `0026_agent_booking_action_descriptors` is the single
+Alembic head. The final focused gate passes 464 tests, the full unit suite passes
+1,407 with 24 known external `aiosqlite` teardown warnings, integration passes
+4, migration/upgrade passes 13, mypy passes 121 source files, Ruff reports 296
+formatted files and no findings, the security scan reports zero findings, and
+`git diff --check` is clean. No live provider call or user database access was
+performed. Independent review and the final post-review rerun are still pending.
 
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic

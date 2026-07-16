@@ -33,12 +33,31 @@ from flight_hunter.application.agent_planning import (
     PlanBudgetExceededError,
     ProposedPlanRevision,
 )
+from flight_hunter.application.agent_reporting import (
+    CandidateKind,
+    CandidateReference,
+    FactReport,
+    FactReportBuilder,
+    ranking_snapshot_from_payload,
+)
+from flight_hunter.application.agent_result_records import (
+    StoredAgentEvidenceError,
+    composed_record_to_candidate,
+    confirmed_record_to_evidence,
+)
 from flight_hunter.application.agent_scope import (
     CoverageMode,
     FrozenAirportScope,
     finite_route_pairs,
 )
-from flight_hunter.domain.agent_evidence import DiscoverySource
+from flight_hunter.application.booking_actions import (
+    sign_agent_booking_action_token,
+)
+from flight_hunter.domain.agent_evidence import (
+    ComposedRouteCandidate,
+    ConfirmedOfferEvidence,
+    DiscoverySource,
+)
 from flight_hunter.domain.agent_search import (
     DateConstraint,
     DateMode,
@@ -47,7 +66,7 @@ from flight_hunter.domain.agent_search import (
     RouteStrategy,
     TripShape,
 )
-from flight_hunter.domain.offers import Freshness, PriceBasis
+from flight_hunter.domain.offers import Freshness, PassengerMix, PriceBasis
 from flight_hunter.persistence.agent_repositories import (
     AgentDiscoverySignalRecord,
     AgentEvidenceRepository,
@@ -343,8 +362,21 @@ class RunView:
 @dataclass(frozen=True, slots=True)
 class RunResultsView:
     run_id: UUID
-    state: Literal["not_ready"] = "not_ready"
+    state: Literal["not_ready", "ready", "unavailable"] = "not_ready"
     evidence_available: bool = False
+    report: FactReport | None = None
+    error_code: Literal["agent_results_unavailable"] | None = None
+
+    def __post_init__(self) -> None:
+        if self.state == "ready":
+            if self.report is None or self.error_code is not None:
+                raise ValueError("ready results require a report and no error")
+        elif self.report is not None:
+            raise ValueError("non-ready results cannot contain a report")
+        elif self.state == "unavailable" and self.error_code is None:
+            raise ValueError("unavailable results require an error code")
+        elif self.state == "not_ready" and self.error_code is not None:
+            raise ValueError("not-ready results cannot contain an error code")
 
 
 class AgentLifecycleService:
@@ -356,12 +388,14 @@ class AgentLifecycleService:
         builder: AgentPlanBuilder,
         clock: Callable[[], datetime] | None = None,
         provider_gateway: object | None = None,
+        booking_action_secret: str | None = None,
     ) -> None:
         self._session = session
         self._parser = parser
         self._builder = builder
         self._clock = clock or (lambda: datetime.now(UTC))
         self._provider_gateway = provider_gateway
+        self._booking_action_secret = booking_action_secret
         self._plans = AgentPlanRepository(session)
         self._runs = AgentRunRepository(session)
         self._operations = AgentOperationRepository(session)
@@ -628,7 +662,159 @@ class AgentLifecycleService:
             run = await self._runs.get_run(household_id, run_id)
             if run is None or run.plan_id != plan_id:
                 raise AgentLifecycleError("agent_plan_not_found")
-        return RunResultsView(run_id=run.id)
+            confirmed_records = await self._evidence.list_confirmed_evidence(
+                household_id,
+                run_id,
+            )
+            composed_records = await self._evidence.list_composed_candidates(
+                household_id,
+                run_id,
+            )
+            evidence_available = bool(confirmed_records or composed_records)
+            operations = await self._operations.list_operations(household_id, run_id)
+            ranking_operations = tuple(
+                operation
+                for operation in operations
+                if operation.kind is AgentOperationKind.RANKING
+                and operation.status is AgentOperationStatus.SUCCEEDED
+                and operation.result_type is AgentOperationResultType.RANKING_SNAPSHOT
+                and operation.result_id is not None
+            )
+            if not ranking_operations:
+                return RunResultsView(
+                    run_id=run.id,
+                    state=(
+                        "unavailable"
+                        if run.status in {"completed", "partial", "failed", "cancelled"}
+                        else "not_ready"
+                    ),
+                    evidence_available=evidence_available,
+                    error_code=(
+                        "agent_results_unavailable"
+                        if run.status in {"completed", "partial", "failed", "cancelled"}
+                        else None
+                    ),
+                )
+            if len(ranking_operations) != 1:
+                return RunResultsView(
+                    run_id=run.id,
+                    state="unavailable",
+                    evidence_available=evidence_available,
+                    error_code="agent_results_unavailable",
+                )
+            ranking_record = await self._evidence.get_ranking_snapshot(
+                household_id,
+                cast(UUID, ranking_operations[0].result_id),
+            )
+            revision = await self._plans.get_revision(household_id, run.revision_id)
+            try:
+                if ranking_record is None or revision is None:
+                    raise StoredAgentEvidenceError("ranking snapshot is missing")
+                passenger_mix = _revision_passenger_mix(revision)
+                confirmed = tuple(
+                    confirmed_record_to_evidence(
+                        record,
+                        fallback_passenger_mix=passenger_mix,
+                    )
+                    for record in confirmed_records
+                )
+                confirmed_by_id = {value.id: value for value in confirmed}
+                composed = tuple(
+                    composed_record_to_candidate(record, confirmed_by_id)
+                    for record in composed_records
+                )
+                ranking = ranking_snapshot_from_payload(ranking_record.ranking)
+                if (
+                    ranking_record.fingerprint != f"sha256:{ranking.fingerprint}"
+                    or ranking_record.confirmed_evidence_ids != ranking.confirmed_evidence_ids
+                    or ranking_record.composed_candidate_ids != ranking.composed_candidate_ids
+                ):
+                    raise StoredAgentEvidenceError("ranking snapshot references are invalid")
+                candidates_by_reference: dict[
+                    CandidateReference,
+                    ConfirmedOfferEvidence | ComposedRouteCandidate,
+                ] = {
+                    CandidateReference(
+                        CandidateKind.CONFIRMED_OFFER,
+                        candidate.id,
+                    ): candidate
+                    for candidate in confirmed
+                }
+                candidates_by_reference.update(
+                    {
+                        CandidateReference(
+                            CandidateKind.COMPOSED_ROUTE,
+                            candidate.id,
+                        ): candidate
+                        for candidate in composed
+                    }
+                )
+                report = FactReportBuilder().build(
+                    ranking,
+                    tuple(candidates_by_reference[reference] for reference in ranking.references),
+                    booking_action_tokens=await self._booking_action_tokens(
+                        household_id,
+                        run_id,
+                        ranking.references,
+                    ),
+                )
+            except (
+                KeyError,
+                RuntimeError,
+                StoredAgentEvidenceError,
+                TypeError,
+                ValueError,
+            ):
+                return RunResultsView(
+                    run_id=run.id,
+                    state="unavailable",
+                    evidence_available=evidence_available,
+                    error_code="agent_results_unavailable",
+                )
+            return RunResultsView(
+                run_id=run.id,
+                state="ready",
+                evidence_available=True,
+                report=report,
+            )
+
+    async def _booking_action_tokens(
+        self,
+        household_id: UUID,
+        run_id: UUID,
+        references: Sequence[CandidateReference],
+    ) -> Mapping[CandidateReference, str]:
+        if not self._booking_action_secret:
+            return {}
+        now = self._now()
+        descriptors = await self._evidence.list_booking_action_descriptors(
+            household_id,
+            run_id,
+            active_at=now,
+        )
+        descriptor_by_evidence = {
+            descriptor.confirmed_evidence_id: descriptor for descriptor in descriptors
+        }
+        tokens: dict[CandidateReference, str] = {}
+        for reference in references:
+            if reference.kind is not CandidateKind.CONFIRMED_OFFER:
+                continue
+            descriptor = descriptor_by_evidence.get(reference.id)
+            if descriptor is None:
+                continue
+            ttl_seconds = min(
+                900,
+                int((descriptor.expires_at - now).total_seconds()),
+            )
+            if ttl_seconds < 1:
+                continue
+            tokens[reference] = sign_agent_booking_action_token(
+                secret_key=self._booking_action_secret,
+                descriptor_id=descriptor.id,
+                now=now,
+                ttl_seconds=ttl_seconds,
+            )
+        return tokens
 
     async def _project_run(self, run: AgentPlanRunRecord) -> RunView:
         return (await self._project_runs(run.household_id, (run,)))[0]
@@ -1024,6 +1210,15 @@ def _plan_payload(
             "expires_at": proposed.expires_at.isoformat(),
         },
         "intent": _intent_payload(proposed.parsed_intent),
+        "composition": (
+            {
+                "version": proposed.composition_rule.version,
+                "max_hubs_per_leg": proposed.composition_rule.max_hubs_per_leg,
+                "source": proposed.composition_rule.source,
+            }
+            if proposed.composition_rule is not None
+            else None
+        ),
         "clarifications": [
             _clarification_payload(clarification) for clarification in proposed.clarifications
         ],
@@ -2096,6 +2291,15 @@ def _execution_error(error: AgentPlanConflict, prior_state: str) -> AgentLifecyc
 
 def _json_mapping(raw: str) -> Mapping[str, object]:
     return _mapping(json.loads(raw))
+
+
+def _revision_passenger_mix(revision: AgentPlanRevisionRecord) -> PassengerMix:
+    intent = _mapping(_json_mapping(revision.plan_json)["intent"])
+    return PassengerMix(
+        adults=_stored_int(intent["adults"], "adults"),
+        children=_stored_int(intent["children"], "children"),
+        infants=_stored_int(intent["infants"], "infants"),
+    )
 
 
 def _mapping(value: object) -> Mapping[str, object]:

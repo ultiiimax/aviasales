@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
@@ -20,10 +20,22 @@ AGENT_BOOTSTRAP_TOKEN = "agent-bootstrap-secret"
 class CountingAgentProviderGateway:
     def __init__(self) -> None:
         self.calls = 0
+        self.booking_calls = 0
 
     async def search(self, *_args: object, **_kwargs: object) -> None:
         self.calls += 1
         raise AssertionError("plan lifecycle must not call a provider")
+
+    async def resolve_booking_action(
+        self,
+        descriptor: Mapping[str, object],
+        *,
+        request_fingerprint: str,
+    ) -> str | None:
+        assert request_fingerprint.startswith("agent-booking:")
+        assert descriptor.get("provider_id") == "aviasales_search"
+        self.booking_calls += 1
+        return "https://tickets.example.test/opaque-purchase"
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +106,7 @@ async def agent_api_harness() -> AsyncIterator[AgentApiHarness]:
     provider = CountingAgentProviderGateway()
     settings = replace(
         AppSettings.from_env(),
+        app_secret_key="agent-test-secret",
         auth_allow_legacy_headers=False,
         auth_bootstrap_token=AGENT_BOOTSTRAP_TOKEN,
     )

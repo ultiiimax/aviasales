@@ -306,15 +306,325 @@ class AgentRunListResponse(BaseModel):
     runs: list[AgentRunResponse]
 
 
+class AgentMoneyResponse(BaseModel):
+    minor_units: int
+    currency: str
+
+
+class AgentCandidateReferenceResponse(BaseModel):
+    kind: Literal["confirmed_offer", "composed_route"]
+    id: UUID
+
+
+class AgentBalancedWeightsResponse(BaseModel):
+    price: int
+    duration: int
+    risk: int
+
+
+class AgentRankedCandidateResponse(BaseModel):
+    reference: AgentCandidateReferenceResponse
+    rank: int
+    reasons: list[str]
+
+
+class AgentRankingViewResponse(BaseModel):
+    name: Literal[
+        "cheapest",
+        "fastest",
+        "low_risk",
+        "balanced",
+        "split_self_transfer",
+        "risky",
+    ]
+    candidates: list[AgentRankedCandidateResponse]
+    weights: AgentBalancedWeightsResponse | None = None
+
+
+class AgentRankingSnapshotResponse(BaseModel):
+    confirmed_evidence_ids: list[UUID]
+    composed_candidate_ids: list[UUID]
+    comparison_currency: str | None
+    views: list[AgentRankingViewResponse]
+    fingerprint: str
+
+
+class AgentSegmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    airline_code: str
+    airline_name: str | None
+    flight_number: str | None
+    origin: str
+    destination: str
+    depart_at: str
+    arrive_at: str
+    depart_at_utc: datetime | None
+    arrive_at_utc: datetime | None
+
+
+class AgentPassengerMixResponse(BaseModel):
+    adults: int
+    children: int
+    infants: int
+    total: int
+
+
+class AgentOrderedLegResponse(BaseModel):
+    ordinal: int
+    origin: str
+    destination: str
+    departure_date: Date
+    component_evidence_ids: list[UUID]
+
+
+class AgentTicketBoundaryResponse(BaseModel):
+    ticket_index: int
+    leg_ordinals: list[int]
+    confirmed_evidence_id: UUID
+    segment_ids: list[str]
+    protection_status: Literal[
+        "explicitly_protected",
+        "self_transfer",
+        "unknown",
+    ]
+
+
+class AgentConnectionAssumptionResponse(BaseModel):
+    leg_ordinal: int
+    inbound_component_id: UUID
+    outbound_component_id: UUID
+    arrival_airport: str
+    departure_airport: str
+    layover_seconds: int
+    required_minimum_seconds: int
+    airport_change: bool
+    provenance: str | None
+    transfer_cost: AgentMoneyResponse | None
+
+
+class AgentUnknownCostResponse(BaseModel):
+    kind: Literal["ground_transfer", "currency_conversion"]
+    leg_ordinal: int
+    description: str
+
+
+class AgentRankingPlacementResponse(BaseModel):
+    view: Literal[
+        "cheapest",
+        "fastest",
+        "low_risk",
+        "balanced",
+        "split_self_transfer",
+        "risky",
+    ]
+    rank: int
+    reasons: list[str]
+
+
+class AgentBookingActionResponse(BaseModel):
+    available: bool
+    token: str | None
+
+
+class AgentBookingResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=1, max_length=4096)
+
+
+class AgentBookingResolveResponse(BaseModel):
+    status: Literal["resolved", "unavailable"]
+    url: str | None = None
+
+
+class AgentCandidateFactResponse(BaseModel):
+    reference: AgentCandidateReferenceResponse
+    passengers: int
+    passenger_mix: AgentPassengerMixResponse
+    trip_shape: Literal["one_way", "round_trip", "open_jaw", "multi_city"]
+    price_basis: Literal[
+        "total_for_passengers",
+        "provider_single_adult_ticket",
+    ]
+    total_amount: AgentMoneyResponse | None
+    sources: list[str]
+    observed_at: datetime
+    segments: list[AgentSegmentResponse]
+    ticket_boundaries: list[AgentTicketBoundaryResponse]
+    ordered_legs: list[AgentOrderedLegResponse]
+    connection_assumptions: list[AgentConnectionAssumptionResponse]
+    price_comparison_status: Literal[
+        "fully_priced",
+        "mandatory_cost_unknown",
+        "non_comparable",
+    ]
+    unknown_costs: list[AgentUnknownCostResponse]
+    protection_status: Literal[
+        "explicitly_protected",
+        "self_transfer",
+        "unknown",
+    ]
+    baggage_summaries: list[str | None]
+    unknowns: list[str]
+    rankings: list[AgentRankingPlacementResponse]
+    booking_action: AgentBookingActionResponse
+
+
 class AgentRunResultsResponse(BaseModel):
     run_id: UUID
-    state: Literal["not_ready"]
+    state: Literal["not_ready", "ready", "unavailable"]
     evidence_available: bool
+    ranking: AgentRankingSnapshotResponse | None = None
+    candidates: list[AgentCandidateFactResponse] | None = None
+    error_code: Literal["agent_results_unavailable"] | None = None
 
     @classmethod
     def from_view(cls, view: RunResultsView) -> AgentRunResultsResponse:
+        report = view.report
         return cls(
             run_id=view.run_id,
             state=view.state,
             evidence_available=view.evidence_available,
+            ranking=(
+                None
+                if report is None
+                else AgentRankingSnapshotResponse(
+                    confirmed_evidence_ids=list(report.ranking.confirmed_evidence_ids),
+                    composed_candidate_ids=list(report.ranking.composed_candidate_ids),
+                    comparison_currency=report.ranking.comparison_currency,
+                    views=[
+                        AgentRankingViewResponse(
+                            name=ranking_view.name.value,
+                            candidates=[
+                                AgentRankedCandidateResponse(
+                                    reference=AgentCandidateReferenceResponse(
+                                        kind=candidate.reference.kind.value,
+                                        id=candidate.reference.id,
+                                    ),
+                                    rank=candidate.rank,
+                                    reasons=list(candidate.reasons),
+                                )
+                                for candidate in ranking_view.candidates
+                            ],
+                            weights=(
+                                None
+                                if ranking_view.weights is None
+                                else AgentBalancedWeightsResponse(
+                                    price=ranking_view.weights.price,
+                                    duration=ranking_view.weights.duration,
+                                    risk=ranking_view.weights.risk,
+                                )
+                            ),
+                        )
+                        for ranking_view in report.ranking.views
+                    ],
+                    fingerprint=report.ranking.fingerprint,
+                )
+            ),
+            candidates=(
+                None
+                if report is None
+                else [
+                    AgentCandidateFactResponse(
+                        reference=AgentCandidateReferenceResponse(
+                            kind=candidate.reference.kind.value,
+                            id=candidate.reference.id,
+                        ),
+                        passengers=candidate.passengers,
+                        passenger_mix=AgentPassengerMixResponse(
+                            adults=candidate.passenger_mix.adults,
+                            children=candidate.passenger_mix.children,
+                            infants=candidate.passenger_mix.infants,
+                            total=candidate.passenger_mix.total,
+                        ),
+                        trip_shape=candidate.trip_shape.value,
+                        price_basis=candidate.price_basis.value,
+                        total_amount=(
+                            None
+                            if candidate.total_amount is None
+                            else AgentMoneyResponse(
+                                minor_units=candidate.total_amount.minor_units,
+                                currency=candidate.total_amount.currency,
+                            )
+                        ),
+                        sources=list(candidate.sources),
+                        observed_at=candidate.observed_at,
+                        segments=[
+                            AgentSegmentResponse.model_validate(segment)
+                            for segment in candidate.segments
+                        ],
+                        ticket_boundaries=[
+                            AgentTicketBoundaryResponse(
+                                ticket_index=boundary.ticket_index,
+                                leg_ordinals=list(boundary.leg_ordinals),
+                                confirmed_evidence_id=boundary.confirmed_evidence_id,
+                                segment_ids=list(boundary.segment_ids),
+                                protection_status=boundary.protection_status.value,
+                            )
+                            for boundary in candidate.ticket_boundaries
+                        ],
+                        ordered_legs=[
+                            AgentOrderedLegResponse(
+                                ordinal=leg.ordinal,
+                                origin=leg.origin,
+                                destination=leg.destination,
+                                departure_date=leg.departure_date,
+                                component_evidence_ids=list(leg.component_evidence_ids),
+                            )
+                            for leg in candidate.ordered_legs
+                        ],
+                        connection_assumptions=[
+                            AgentConnectionAssumptionResponse(
+                                leg_ordinal=assumption.leg_ordinal,
+                                inbound_component_id=assumption.inbound_component_id,
+                                outbound_component_id=assumption.outbound_component_id,
+                                arrival_airport=assumption.arrival_airport,
+                                departure_airport=assumption.departure_airport,
+                                layover_seconds=int(assumption.layover.total_seconds()),
+                                required_minimum_seconds=int(
+                                    assumption.required_minimum.total_seconds()
+                                ),
+                                airport_change=assumption.airport_change,
+                                provenance=assumption.provenance,
+                                transfer_cost=(
+                                    None
+                                    if assumption.transfer_cost is None
+                                    else AgentMoneyResponse(
+                                        minor_units=assumption.transfer_cost.minor_units,
+                                        currency=assumption.transfer_cost.currency,
+                                    )
+                                ),
+                            )
+                            for assumption in candidate.connection_assumptions
+                        ],
+                        price_comparison_status=(candidate.price_comparison_status.value),
+                        unknown_costs=[
+                            AgentUnknownCostResponse(
+                                kind=cost.kind.value,
+                                leg_ordinal=cost.leg_ordinal,
+                                description=cost.description,
+                            )
+                            for cost in candidate.unknown_costs
+                        ],
+                        protection_status=candidate.protection_status.value,
+                        baggage_summaries=list(candidate.baggage_summaries),
+                        unknowns=list(candidate.unknowns),
+                        rankings=[
+                            AgentRankingPlacementResponse(
+                                view=placement.view.value,
+                                rank=placement.rank,
+                                reasons=list(placement.reasons),
+                            )
+                            for placement in candidate.rankings
+                        ],
+                        booking_action=AgentBookingActionResponse(
+                            available=candidate.booking_action.available,
+                            token=candidate.booking_action.token,
+                        ),
+                    )
+                    for candidate in report.candidates
+                ]
+            ),
+            error_code=view.error_code,
         )

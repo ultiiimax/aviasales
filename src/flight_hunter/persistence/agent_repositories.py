@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
+from itertools import pairwise
 from types import MappingProxyType
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
@@ -20,10 +21,17 @@ from sqlalchemy.engine import CursorResult, RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from flight_hunter.domain.agent_evidence import DiscoverySource, ProtectionStatus
+from flight_hunter.domain.agent_evidence import (
+    DiscoverySource,
+    PriceComparisonStatus,
+    ProtectionStatus,
+    UnknownCostKind,
+)
+from flight_hunter.domain.agent_search import TripShape
 from flight_hunter.domain.money import MAX_MONEY_MINOR_UNITS
 from flight_hunter.domain.offers import Freshness, PriceBasis
 from flight_hunter.persistence.models import (
+    agent_booking_action_descriptors_table,
     agent_composed_route_candidates_table,
     agent_confirmed_offer_evidence_table,
     agent_discovery_signals_table,
@@ -760,6 +768,45 @@ class AgentConfirmedOfferEvidenceRecord:
             "itinerary_evidence",
             cast(Mapping[str, object], _deep_freeze(self.itinerary_evidence)),
         )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class NewAgentBookingActionDescriptor:
+    id: UUID
+    household_id: UUID
+    run_id: UUID
+    confirmed_evidence_id: UUID
+    provider_id: str
+    private_descriptor: Mapping[str, object] = field(repr=False)
+    fingerprint: str
+    created_at: datetime
+    expires_at: datetime
+
+    def __repr__(self) -> str:
+        return "NewAgentBookingActionDescriptor(<private>)"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AgentBookingActionDescriptorRecord:
+    id: UUID
+    household_id: UUID
+    run_id: UUID
+    confirmed_evidence_id: UUID
+    provider_id: str
+    private_descriptor: Mapping[str, object] = field(repr=False)
+    fingerprint: str
+    created_at: datetime
+    expires_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "private_descriptor",
+            cast(Mapping[str, object], _deep_freeze(self.private_descriptor)),
+        )
+
+    def __repr__(self) -> str:
+        return "AgentBookingActionDescriptorRecord(<private>)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -4164,6 +4211,134 @@ class AgentEvidenceRepository:
         ).mappings()
         return tuple(_confirmed_evidence_record(row) for row in rows)
 
+    async def append_booking_action_descriptor(
+        self,
+        descriptor: NewAgentBookingActionDescriptor,
+    ) -> AgentBookingActionDescriptorRecord:
+        private_json = _validate_booking_action_descriptor(descriptor)
+        await self._acquire_write_transaction()
+        existing = await self.get_booking_action_descriptor_for_evidence(
+            descriptor.household_id,
+            descriptor.confirmed_evidence_id,
+        )
+        if existing is not None:
+            if _booking_action_descriptor_matches(existing, descriptor):
+                return existing
+            raise AgentEvidenceError("agent_booking_descriptor_conflict")
+        await self._require_confirmed_references(
+            descriptor.household_id,
+            descriptor.run_id,
+            (descriptor.confirmed_evidence_id,),
+        )
+        integrity_collision = False
+        try:
+            async with self._session.begin_nested():
+                await self._session.execute(
+                    insert(agent_booking_action_descriptors_table).values(
+                        id=str(descriptor.id),
+                        household_id=str(descriptor.household_id),
+                        run_id=str(descriptor.run_id),
+                        confirmed_evidence_id=str(descriptor.confirmed_evidence_id),
+                        provider_id=descriptor.provider_id,
+                        private_descriptor_json=private_json,
+                        fingerprint=descriptor.fingerprint,
+                        created_at=_utc_datetime(descriptor.created_at),
+                        expires_at=_utc_datetime(descriptor.expires_at),
+                    )
+                )
+        except IntegrityError:
+            integrity_collision = True
+        if integrity_collision:
+            existing_by_evidence = await self.get_booking_action_descriptor_for_evidence(
+                descriptor.household_id,
+                descriptor.confirmed_evidence_id,
+            )
+            if existing_by_evidence is not None and _booking_action_descriptor_matches(
+                existing_by_evidence,
+                descriptor,
+            ):
+                return existing_by_evidence
+            existing_by_id = await self.get_booking_action_descriptor(
+                descriptor.household_id,
+                descriptor.id,
+            )
+            if existing_by_id is not None and _booking_action_descriptor_matches(
+                existing_by_id, descriptor
+            ):
+                return existing_by_id
+            raise AgentEvidenceError("agent_booking_descriptor_conflict")
+        stored = await self.get_booking_action_descriptor(
+            descriptor.household_id,
+            descriptor.id,
+        )
+        if stored is None:
+            raise RuntimeError("created booking descriptor is missing")
+        return stored
+
+    async def get_booking_action_descriptor(
+        self,
+        household_id: UUID,
+        descriptor_id: UUID,
+    ) -> AgentBookingActionDescriptorRecord | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(agent_booking_action_descriptors_table)
+                    .where(agent_booking_action_descriptors_table.c.id == str(descriptor_id))
+                    .where(
+                        agent_booking_action_descriptors_table.c.household_id == str(household_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return _booking_action_descriptor_record(row) if row is not None else None
+
+    async def get_booking_action_descriptor_for_evidence(
+        self,
+        household_id: UUID,
+        confirmed_evidence_id: UUID,
+    ) -> AgentBookingActionDescriptorRecord | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(agent_booking_action_descriptors_table)
+                    .where(
+                        agent_booking_action_descriptors_table.c.confirmed_evidence_id
+                        == str(confirmed_evidence_id)
+                    )
+                    .where(
+                        agent_booking_action_descriptors_table.c.household_id == str(household_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return _booking_action_descriptor_record(row) if row is not None else None
+
+    async def list_booking_action_descriptors(
+        self,
+        household_id: UUID,
+        run_id: UUID,
+        *,
+        active_at: datetime,
+    ) -> tuple[AgentBookingActionDescriptorRecord, ...]:
+        _require_aware(active_at, "active_at")
+        rows = (
+            await self._session.execute(
+                select(agent_booking_action_descriptors_table)
+                .where(agent_booking_action_descriptors_table.c.household_id == str(household_id))
+                .where(agent_booking_action_descriptors_table.c.run_id == str(run_id))
+                .where(
+                    agent_booking_action_descriptors_table.c.expires_at > _utc_datetime(active_at)
+                )
+                .order_by(agent_booking_action_descriptors_table.c.confirmed_evidence_id.asc())
+            )
+        ).mappings()
+        return tuple(_booking_action_descriptor_record(row) for row in rows)
+
     async def append_composed_candidate(
         self,
         candidate: NewAgentComposedRouteCandidate,
@@ -4178,11 +4353,12 @@ class AgentEvidenceRepository:
         if existing is not None:
             return existing
         await self._require_stage(candidate.household_id, candidate.run_id, candidate.stage_id)
-        await self._require_confirmed_references(
+        components = await self._require_confirmed_references(
             candidate.household_id,
             candidate.run_id,
             candidate.component_evidence_ids,
         )
+        _validate_composed_component_consistency(candidate, components)
         try:
             async with self._session.begin_nested():
                 await self._session.execute(
@@ -4250,6 +4426,24 @@ class AgentEvidenceRepository:
             .one_or_none()
         )
         return _composed_candidate_record(row) if row is not None else None
+
+    async def list_composed_candidates(
+        self,
+        household_id: UUID,
+        run_id: UUID,
+    ) -> tuple[AgentComposedRouteCandidateRecord, ...]:
+        rows = (
+            await self._session.execute(
+                select(agent_composed_route_candidates_table)
+                .where(agent_composed_route_candidates_table.c.household_id == str(household_id))
+                .where(agent_composed_route_candidates_table.c.run_id == str(run_id))
+                .order_by(
+                    agent_composed_route_candidates_table.c.observed_at.asc(),
+                    agent_composed_route_candidates_table.c.id.asc(),
+                )
+            )
+        ).mappings()
+        return tuple(_composed_candidate_record(row) for row in rows)
 
     async def create_ranking_snapshot(
         self,
@@ -4360,23 +4554,23 @@ class AgentEvidenceRepository:
         household_id: UUID,
         run_id: UUID,
         evidence_ids: tuple[UUID, ...],
-    ) -> None:
-        stored = set(
-            (
-                await self._session.execute(
-                    select(agent_confirmed_offer_evidence_table.c.id)
-                    .where(agent_confirmed_offer_evidence_table.c.household_id == str(household_id))
-                    .where(agent_confirmed_offer_evidence_table.c.run_id == str(run_id))
-                    .where(
-                        agent_confirmed_offer_evidence_table.c.id.in_(
-                            [str(value) for value in evidence_ids]
-                        )
+    ) -> tuple[AgentConfirmedOfferEvidenceRecord, ...]:
+        rows = (
+            await self._session.execute(
+                select(agent_confirmed_offer_evidence_table)
+                .where(agent_confirmed_offer_evidence_table.c.household_id == str(household_id))
+                .where(agent_confirmed_offer_evidence_table.c.run_id == str(run_id))
+                .where(
+                    agent_confirmed_offer_evidence_table.c.id.in_(
+                        [str(value) for value in evidence_ids]
                     )
                 )
-            ).scalars()
-        )
-        if stored != {str(value) for value in evidence_ids}:
+            )
+        ).mappings()
+        by_id = {record.id: record for record in (_confirmed_evidence_record(row) for row in rows)}
+        if set(by_id) != set(evidence_ids):
             raise AgentEvidenceError("agent_evidence_reference_not_found")
+        return tuple(by_id[value] for value in evidence_ids)
 
     async def _require_ranking_references(self, snapshot: NewAgentRankingSnapshot) -> None:
         requested_confirmed = {str(value) for value in snapshot.confirmed_evidence_ids}
@@ -4997,6 +5191,10 @@ _OPERATION_INPUT_KEYS = frozenset(
         "seed_limit",
         "source_id",
         "source_signal_id",
+        "leg_ordinal",
+        "search_role",
+        "split_source_evidence_id",
+        "split_component_ordinal",
         "passengers",
         "adults",
         "children",
@@ -5047,16 +5245,37 @@ _SCOPE_SNAPSHOT_KEYS = frozenset(
     }
 )
 _DISCOVERY_EVIDENCE_KEYS = frozenset(
-    {"value", "calendar_bucket", "route_key", "source_id", "source_version"}
+    {
+        "value",
+        "calendar_bucket",
+        "route_key",
+        "source_id",
+        "source_version",
+        "leg_ordinal",
+    }
 )
 _CONFIRMED_ITINERARY_KEYS = frozenset(
     {
         "value",
+        "leg_ordinal",
+        "search_role",
+        "split_source_evidence_id",
+        "split_component_ordinal",
         "segments",
         "origin",
         "destination",
+        "departure_date",
+        "return_date",
+        "passenger_mix",
+        "price_basis",
+        "adults",
+        "children",
+        "infants",
         "depart_at",
         "arrive_at",
+        "depart_at_utc",
+        "arrive_at_utc",
+        "segment_ref",
         "carrier",
         "flight_number",
         "duration_seconds",
@@ -5069,22 +5288,71 @@ _CONFIRMED_ITINERARY_KEYS = frozenset(
 _COMPOSED_ITINERARY_KEYS = frozenset(
     {
         "value",
+        "composition_version",
+        "trip_shape",
         "components",
-        "segments",
+        "component_amounts",
+        "minor_units",
+        "currency",
+        "ordered_legs",
+        "ordinal",
         "origin",
         "destination",
-        "depart_at",
-        "arrive_at",
-        "carrier",
-        "flight_number",
-        "duration_seconds",
-        "stops",
-        "ticket_boundaries",
-        "assumptions",
+        "departure_date",
+        "passenger_mix",
+        "adults",
+        "children",
+        "infants",
+        "price_basis",
+        "target_currency",
+        "known_total",
+        "price_comparison_status",
+        "tickets",
+        "ticket_index",
+        "leg_ordinal",
+        "component_evidence_id",
+        "segment_refs",
+        "connections",
+        "inbound_component_id",
+        "outbound_component_id",
+        "arrival_airport",
+        "departure_airport",
+        "layover_seconds",
+        "required_minimum_seconds",
+        "airport_change",
+        "provenance",
+        "transfer_cost",
         "unknown_costs",
+        "kind",
+        "description",
+        "protection_status",
+        "ranking_reasons",
     }
 )
-_RANKING_KEYS = frozenset({"value", "ordered", "version", "profile", "scores", "reasons"})
+_RANKING_KEYS = frozenset(
+    {
+        "value",
+        "ordered",
+        "version",
+        "profile",
+        "scores",
+        "reasons",
+        "comparison_currency",
+        "confirmed_evidence_ids",
+        "composed_candidate_ids",
+        "views",
+        "fingerprint",
+        "name",
+        "weights",
+        "price",
+        "duration",
+        "risk",
+        "candidates",
+        "kind",
+        "id",
+        "rank",
+    }
+)
 
 
 def _bounded_uuid_ids(values: Sequence[UUID], field_name: str) -> tuple[UUID, ...]:
@@ -5793,6 +6061,69 @@ def _validate_confirmed_evidence(evidence: NewAgentConfirmedOfferEvidence) -> st
     return _canonical_confirmed_itinerary_json(evidence.itinerary_evidence)
 
 
+def _validate_booking_action_descriptor(
+    descriptor: NewAgentBookingActionDescriptor,
+) -> str:
+    _validate_evidence_ownership(
+        descriptor.id,
+        descriptor.household_id,
+        descriptor.run_id,
+        None,
+    )
+    if not isinstance(descriptor.confirmed_evidence_id, UUID):
+        raise TypeError("confirmed_evidence_id must be UUID")
+    _validate_provider_id(descriptor.provider_id)
+    _require_aware(descriptor.created_at, "created_at")
+    _require_aware(descriptor.expires_at, "expires_at")
+    if descriptor.expires_at <= descriptor.created_at:
+        raise ValueError("booking descriptor expiry must follow creation")
+    _validate_fingerprint(descriptor.fingerprint, "fingerprint")
+    payload = descriptor.private_descriptor
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "provider_id",
+        "search_id",
+        "proposal_id",
+        "results_url",
+    }:
+        raise ValueError("booking descriptor fields are invalid")
+    if payload.get("provider_id") != descriptor.provider_id:
+        raise ValueError("booking descriptor provider is inconsistent")
+    for key in ("search_id", "proposal_id", "results_url"):
+        value = payload.get(key)
+        if not isinstance(value, str) or not value:
+            raise ValueError("booking descriptor value is invalid")
+    results_url = cast(str, payload["results_url"])
+    if (
+        "://" in results_url
+        or "/" in results_url
+        or not re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]{1,5})?", results_url)
+    ):
+        raise ValueError("booking descriptor results host is invalid")
+    return json.dumps(
+        dict(payload),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _booking_action_descriptor_matches(
+    existing: AgentBookingActionDescriptorRecord,
+    candidate: NewAgentBookingActionDescriptor,
+) -> bool:
+    return (
+        existing.id == candidate.id
+        and existing.household_id == candidate.household_id
+        and existing.run_id == candidate.run_id
+        and existing.confirmed_evidence_id == candidate.confirmed_evidence_id
+        and existing.provider_id == candidate.provider_id
+        and existing.private_descriptor == candidate.private_descriptor
+        and existing.fingerprint == candidate.fingerprint
+        and existing.created_at == _utc_datetime(candidate.created_at)
+        and existing.expires_at == _utc_datetime(candidate.expires_at)
+    )
+
+
 def _validate_composed_candidate(candidate: NewAgentComposedRouteCandidate) -> str:
     _validate_evidence_ownership(
         candidate.id,
@@ -5816,6 +6147,582 @@ def _validate_composed_candidate(candidate: NewAgentComposedRouteCandidate) -> s
     _validate_evidence_times(candidate.observed_at, candidate.created_at)
     _validate_fingerprint(candidate.fingerprint, "fingerprint")
     return _canonical_composed_itinerary_json(candidate.itinerary_evidence)
+
+
+def _validate_composed_component_consistency(
+    candidate: NewAgentComposedRouteCandidate,
+    components: Sequence[AgentConfirmedOfferEvidenceRecord],
+) -> None:
+    try:
+        _validate_composed_component_facts(candidate, components)
+    except AgentEvidenceError:
+        raise
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise AgentEvidenceError("agent_composed_component_mismatch") from None
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredCompositionSegment:
+    segment_ref: str
+    origin: str
+    destination: str
+    depart_at_utc: datetime | None
+    arrive_at_utc: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredCompositionComponent:
+    id: UUID
+    origin: str
+    destination: str
+    departure_date: date
+    passenger_mix: tuple[int, int, int]
+    price_basis: PriceBasis
+    amount_minor: int
+    currency: str
+    segments: tuple[_StoredCompositionSegment, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredCompositionLeg:
+    ordinal: int
+    origin: str
+    destination: str
+    departure_date: date
+    component_ids: tuple[UUID, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredCompositionMoney:
+    minor_units: int
+    currency: str
+
+
+def _validate_composed_component_facts(
+    candidate: NewAgentComposedRouteCandidate,
+    components: Sequence[AgentConfirmedOfferEvidenceRecord],
+) -> None:
+    if tuple(component.id for component in components) != candidate.component_evidence_ids:
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+    if candidate.observed_at != min(component.observed_at for component in components):
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+
+    stored_components = tuple(_stored_composition_component(component) for component in components)
+    expected_mix = stored_components[0].passenger_mix
+    expected_basis = stored_components[0].price_basis
+    if (
+        any(component.passenger_mix != expected_mix for component in stored_components)
+        or any(component.price_basis is not expected_basis for component in stored_components)
+        or sum(expected_mix) != candidate.passengers
+        or PriceBasis(candidate.passenger_basis) is not expected_basis
+    ):
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+
+    facts = _composition_mapping(candidate.itinerary_evidence, "composed itinerary")
+    if _composition_text(facts["composition_version"], "composition version") != (
+        "route-composer-v1"
+    ):
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+
+    expected_component_ids = candidate.component_evidence_ids
+    raw_component_ids = tuple(
+        _composition_uuid(value, "component id")
+        for value in _composition_sequence(facts["components"], "components")
+    )
+    if raw_component_ids != expected_component_ids:
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+
+    expected_component_amounts = tuple(
+        _StoredCompositionMoney(component.amount_minor, component.currency)
+        for component in stored_components
+    )
+    component_amounts = tuple(
+        _composition_money(value, "component amount")
+        for value in _composition_sequence(facts["component_amounts"], "component amounts")
+    )
+    if component_amounts != expected_component_amounts:
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+
+    passenger_mix = _composition_mapping(facts["passenger_mix"], "passenger mix")
+    stored_mix = (
+        _composition_non_negative_int(passenger_mix["adults"], "passenger adults"),
+        _composition_non_negative_int(passenger_mix["children"], "passenger children"),
+        _composition_non_negative_int(passenger_mix["infants"], "passenger infants"),
+    )
+    if stored_mix != expected_mix:
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+    if PriceBasis(_composition_text(facts["price_basis"], "price basis")) is not expected_basis:
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+
+    trip_shape = TripShape(_composition_text(facts["trip_shape"], "trip shape"))
+    legs = tuple(
+        _stored_composition_leg(value)
+        for value in _composition_sequence(facts["ordered_legs"], "ordered legs")
+    )
+    _validate_composition_legs(trip_shape, legs, stored_components)
+
+    component_by_id = {component.id: component for component in stored_components}
+    expected_tickets: list[dict[str, object]] = []
+    expected_connections: list[dict[str, object]] = []
+    expected_unknown_costs: list[dict[str, object]] = []
+    transfer_costs: list[_StoredCompositionMoney] = []
+    ticket_index = 0
+    for leg in legs:
+        for component_id in leg.component_ids:
+            component = component_by_id[component_id]
+            expected_tickets.append(
+                {
+                    "ticket_index": ticket_index,
+                    "leg_ordinal": leg.ordinal,
+                    "component_evidence_id": str(component.id),
+                    "segment_refs": [
+                        f"{component.id}#{segment.segment_ref}" for segment in component.segments
+                    ],
+                }
+            )
+            ticket_index += 1
+        for inbound_id, outbound_id in zip(
+            leg.component_ids,
+            leg.component_ids[1:],
+            strict=False,
+        ):
+            inbound = component_by_id[inbound_id]
+            outbound = component_by_id[outbound_id]
+            connection = _validated_stored_connection(
+                leg.ordinal,
+                inbound,
+                outbound,
+                facts,
+                len(expected_connections),
+            )
+            expected_connections.append(connection)
+            transfer_cost = connection["transfer_cost"]
+            if isinstance(transfer_cost, _StoredCompositionMoney):
+                transfer_costs.append(transfer_cost)
+            if connection["airport_change"] is True and transfer_cost is None:
+                expected_unknown_costs.append(
+                    {
+                        "kind": UnknownCostKind.GROUND_TRANSFER.value,
+                        "leg_ordinal": leg.ordinal,
+                        "description": (
+                            f"Ground transfer {connection['arrival_airport']}-"
+                            f"{connection['departure_airport']}"
+                        ),
+                    }
+                )
+
+    _validate_composition_tickets(facts, expected_tickets)
+    _validate_composition_connections(facts, expected_connections)
+
+    target_currency = _composition_currency(facts["target_currency"], "target currency")
+    priced_items = [*expected_component_amounts, *transfer_costs]
+    currencies = {item.currency for item in priced_items}
+    expected_reasons: tuple[str, ...]
+    if currencies != {target_currency}:
+        expected_status = PriceComparisonStatus.NON_COMPARABLE
+        expected_total = None
+        expected_unknown_costs.append(
+            {
+                "kind": UnknownCostKind.CURRENCY_CONVERSION.value,
+                "leg_ordinal": legs[0].ordinal,
+                "description": "Fresh deterministic FX is unavailable",
+            }
+        )
+        expected_reasons = ("confirmed_components", "mixed_currency_without_fx")
+    else:
+        total_minor = sum(item.minor_units for item in priced_items)
+        if total_minor > MAX_MONEY_MINOR_UNITS:
+            raise AgentEvidenceError("agent_composed_component_mismatch")
+        expected_total = _StoredCompositionMoney(total_minor, target_currency)
+        if expected_unknown_costs:
+            expected_status = PriceComparisonStatus.MANDATORY_COST_UNKNOWN
+            expected_reasons = ("confirmed_components", "mandatory_cost_unknown")
+        else:
+            expected_status = PriceComparisonStatus.FULLY_PRICED
+            expected_reasons = ("confirmed_components",)
+
+    actual_total = (
+        None
+        if facts["known_total"] is None
+        else _composition_money(facts["known_total"], "known total")
+    )
+    candidate_total = (
+        None
+        if candidate.amount_minor is None
+        else _StoredCompositionMoney(
+            candidate.amount_minor,
+            _composition_currency(candidate.currency, "candidate currency"),
+        )
+    )
+    if actual_total != expected_total or candidate_total != expected_total:
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+    if (
+        PriceComparisonStatus(
+            _composition_text(facts["price_comparison_status"], "price comparison status")
+        )
+        is not expected_status
+    ):
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+
+    _validate_composition_unknown_costs(facts, expected_unknown_costs)
+    expected_protection = (
+        ProtectionStatus.SELF_TRANSFER if expected_connections else ProtectionStatus.UNKNOWN
+    )
+    if (
+        candidate.protection_status is not expected_protection
+        or ProtectionStatus(_composition_text(facts["protection_status"], "protection status"))
+        is not expected_protection
+    ):
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+    ranking_reasons = tuple(
+        _composition_text(value, "ranking reason")
+        for value in _composition_sequence(facts["ranking_reasons"], "ranking reasons")
+    )
+    if ranking_reasons != expected_reasons:
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+
+
+def _stored_composition_component(
+    record: AgentConfirmedOfferEvidenceRecord,
+) -> _StoredCompositionComponent:
+    if record.amount_minor is None or record.currency is None:
+        raise ValueError("composition components require typed totals")
+    itinerary = _composition_mapping(record.itinerary_evidence, "confirmed itinerary")
+    origin = _composition_iata(itinerary["origin"], "component origin")
+    destination = _composition_iata(itinerary["destination"], "component destination")
+    departure_date = _composition_date(itinerary["departure_date"], "component departure date")
+    if itinerary.get("return_date") is not None:
+        raise ValueError("composition components must be one-way evidence")
+    passenger_mix = _composition_mapping(itinerary["passenger_mix"], "component passenger mix")
+    mix = (
+        _composition_non_negative_int(passenger_mix["adults"], "component adults"),
+        _composition_non_negative_int(passenger_mix["children"], "component children"),
+        _composition_non_negative_int(passenger_mix["infants"], "component infants"),
+    )
+    if sum(mix) != record.passengers:
+        raise ValueError("component passenger mix mismatch")
+    basis = PriceBasis(_composition_text(itinerary["price_basis"], "component price basis"))
+    if basis is not record.passenger_basis:
+        raise ValueError("component price basis mismatch")
+    segments = tuple(
+        _stored_composition_segment(value)
+        for value in _composition_sequence(itinerary["segments"], "component segments")
+    )
+    if not segments or len({segment.segment_ref for segment in segments}) != len(segments):
+        raise ValueError("composition component segments are invalid")
+    if segments[0].origin != origin or segments[-1].destination != destination:
+        raise ValueError("composition component route mismatch")
+    if any(previous.destination != current.origin for previous, current in pairwise(segments)):
+        raise ValueError("composition component segments are discontinuous")
+    return _StoredCompositionComponent(
+        id=record.id,
+        origin=origin,
+        destination=destination,
+        departure_date=departure_date,
+        passenger_mix=mix,
+        price_basis=basis,
+        amount_minor=record.amount_minor,
+        currency=_composition_currency(record.currency, "component currency"),
+        segments=segments,
+    )
+
+
+def _stored_composition_segment(value: object) -> _StoredCompositionSegment:
+    segment = _composition_mapping(value, "component segment")
+    depart_at_utc = _composition_optional_datetime(
+        segment.get("depart_at_utc"),
+        "segment departure UTC",
+    )
+    arrive_at_utc = _composition_optional_datetime(
+        segment.get("arrive_at_utc"),
+        "segment arrival UTC",
+    )
+    if (depart_at_utc is None) != (arrive_at_utc is None):
+        raise ValueError("segment UTC instants must be complete")
+    if depart_at_utc is not None and arrive_at_utc is not None and arrive_at_utc < depart_at_utc:
+        raise ValueError("segment arrival cannot precede departure")
+    return _StoredCompositionSegment(
+        segment_ref=_composition_text(segment["segment_ref"], "segment ref"),
+        origin=_composition_iata(segment["origin"], "segment origin"),
+        destination=_composition_iata(segment["destination"], "segment destination"),
+        depart_at_utc=depart_at_utc,
+        arrive_at_utc=arrive_at_utc,
+    )
+
+
+def _stored_composition_leg(value: object) -> _StoredCompositionLeg:
+    leg = _composition_mapping(value, "ordered leg")
+    return _StoredCompositionLeg(
+        ordinal=_composition_non_negative_int(leg["ordinal"], "leg ordinal"),
+        origin=_composition_iata(leg["origin"], "leg origin"),
+        destination=_composition_iata(leg["destination"], "leg destination"),
+        departure_date=_composition_date(leg["departure_date"], "leg departure date"),
+        component_ids=tuple(
+            _composition_uuid(component_id, "leg component id")
+            for component_id in _composition_sequence(leg["components"], "leg components")
+        ),
+    )
+
+
+def _validate_composition_legs(
+    trip_shape: TripShape,
+    legs: tuple[_StoredCompositionLeg, ...],
+    components: tuple[_StoredCompositionComponent, ...],
+) -> None:
+    required_legs = {
+        TripShape.ONE_WAY: 1,
+        TripShape.ROUND_TRIP: 2,
+        TripShape.OPEN_JAW: 2,
+    }.get(trip_shape)
+    if (
+        not legs
+        or (required_legs is not None and len(legs) != required_legs)
+        or (trip_shape is TripShape.MULTI_CITY and len(legs) < 2)
+        or tuple(leg.ordinal for leg in legs) != tuple(range(len(legs)))
+        or any(not leg.component_ids for leg in legs)
+    ):
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+    flattened = tuple(component_id for leg in legs for component_id in leg.component_ids)
+    if flattened != tuple(component.id for component in components):
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+    component_by_id = {component.id: component for component in components}
+    for leg in legs:
+        first = component_by_id[leg.component_ids[0]]
+        last = component_by_id[leg.component_ids[-1]]
+        if (
+            leg.origin != first.origin
+            or leg.destination != last.destination
+            or leg.departure_date != first.departure_date
+        ):
+            raise AgentEvidenceError("agent_composed_component_mismatch")
+
+
+def _validated_stored_connection(
+    leg_ordinal: int,
+    inbound: _StoredCompositionComponent,
+    outbound: _StoredCompositionComponent,
+    facts: Mapping[str, object],
+    connection_index: int,
+) -> dict[str, object]:
+    connections = _composition_sequence(facts["connections"], "connections")
+    if connection_index >= len(connections):
+        raise ValueError("missing composed connection")
+    raw = _composition_mapping(connections[connection_index], "connection")
+    arrival_segment = inbound.segments[-1]
+    departure_segment = outbound.segments[0]
+    if arrival_segment.arrive_at_utc is None or departure_segment.depart_at_utc is None:
+        raise ValueError("connection UTC instants are required")
+    layover_seconds = int(
+        (departure_segment.depart_at_utc - arrival_segment.arrive_at_utc).total_seconds()
+    )
+    airport_change = arrival_segment.destination != departure_segment.origin
+    required_minimum_seconds = 21_600 if airport_change else 10_800
+    if layover_seconds < required_minimum_seconds or layover_seconds > 64_800:
+        raise ValueError("connection is outside composer policy")
+    provenance = raw.get("provenance")
+    if airport_change:
+        provenance = _composition_text(provenance, "airport change provenance")
+    elif provenance is not None:
+        raise ValueError("same-airport connection cannot have provenance")
+    transfer_cost = (
+        None
+        if raw.get("transfer_cost") is None
+        else _composition_money(raw["transfer_cost"], "connection transfer cost")
+    )
+    if not airport_change and transfer_cost is not None:
+        raise ValueError("same-airport connection cannot have transfer cost")
+    expected = {
+        "leg_ordinal": leg_ordinal,
+        "inbound_component_id": str(inbound.id),
+        "outbound_component_id": str(outbound.id),
+        "arrival_airport": arrival_segment.destination,
+        "departure_airport": departure_segment.origin,
+        "layover_seconds": layover_seconds,
+        "required_minimum_seconds": required_minimum_seconds,
+        "airport_change": airport_change,
+        "provenance": provenance,
+        "transfer_cost": transfer_cost,
+    }
+    if (
+        _composition_non_negative_int(raw["leg_ordinal"], "connection leg ordinal")
+        != expected["leg_ordinal"]
+        or str(_composition_uuid(raw["inbound_component_id"], "inbound component id"))
+        != expected["inbound_component_id"]
+        or str(_composition_uuid(raw["outbound_component_id"], "outbound component id"))
+        != expected["outbound_component_id"]
+        or _composition_iata(raw["arrival_airport"], "connection arrival airport")
+        != expected["arrival_airport"]
+        or _composition_iata(raw["departure_airport"], "connection departure airport")
+        != expected["departure_airport"]
+        or _composition_non_negative_int(raw["layover_seconds"], "layover seconds")
+        != expected["layover_seconds"]
+        or _composition_non_negative_int(
+            raw["required_minimum_seconds"],
+            "required minimum seconds",
+        )
+        != expected["required_minimum_seconds"]
+        or _composition_bool(raw["airport_change"], "airport change") != expected["airport_change"]
+    ):
+        raise ValueError("composed connection mismatch")
+    return expected
+
+
+def _validate_composition_tickets(
+    facts: Mapping[str, object],
+    expected: Sequence[Mapping[str, object]],
+) -> None:
+    tickets = _composition_sequence(facts["tickets"], "tickets")
+    if len(tickets) != len(expected):
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+    for raw_value, expected_ticket in zip(tickets, expected, strict=True):
+        raw = _composition_mapping(raw_value, "ticket")
+        normalized = {
+            "ticket_index": _composition_non_negative_int(
+                raw["ticket_index"],
+                "ticket index",
+            ),
+            "leg_ordinal": _composition_non_negative_int(
+                raw["leg_ordinal"],
+                "ticket leg ordinal",
+            ),
+            "component_evidence_id": str(
+                _composition_uuid(raw["component_evidence_id"], "ticket component id")
+            ),
+            "segment_refs": [
+                _composition_text(value, "ticket segment ref")
+                for value in _composition_sequence(raw["segment_refs"], "ticket segment refs")
+            ],
+        }
+        if normalized != expected_ticket:
+            raise AgentEvidenceError("agent_composed_component_mismatch")
+
+
+def _validate_composition_connections(
+    facts: Mapping[str, object],
+    expected: Sequence[Mapping[str, object]],
+) -> None:
+    connections = _composition_sequence(facts["connections"], "connections")
+    if len(connections) != len(expected):
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+    for raw_value, expected_connection in zip(connections, expected, strict=True):
+        raw = _composition_mapping(raw_value, "connection")
+        actual_transfer = (
+            None
+            if raw.get("transfer_cost") is None
+            else _composition_money(raw["transfer_cost"], "connection transfer cost")
+        )
+        if (
+            raw.get("provenance") != expected_connection["provenance"]
+            or actual_transfer != expected_connection["transfer_cost"]
+        ):
+            raise AgentEvidenceError("agent_composed_component_mismatch")
+
+
+def _validate_composition_unknown_costs(
+    facts: Mapping[str, object],
+    expected: Sequence[Mapping[str, object]],
+) -> None:
+    unknown_costs = _composition_sequence(facts["unknown_costs"], "unknown costs")
+    normalized: list[dict[str, object]] = []
+    for raw_value in unknown_costs:
+        raw = _composition_mapping(raw_value, "unknown cost")
+        normalized.append(
+            {
+                "kind": UnknownCostKind(_composition_text(raw["kind"], "unknown cost kind")).value,
+                "leg_ordinal": _composition_non_negative_int(
+                    raw["leg_ordinal"],
+                    "unknown cost leg ordinal",
+                ),
+                "description": _composition_text(
+                    raw["description"],
+                    "unknown cost description",
+                ),
+            }
+        )
+    if normalized != list(expected):
+        raise AgentEvidenceError("agent_composed_component_mismatch")
+
+
+def _composition_mapping(value: object, field_name: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+        raise TypeError(f"{field_name} must be an object")
+    return value
+
+
+def _composition_sequence(value: object, field_name: str) -> Sequence[object]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise TypeError(f"{field_name} must be an ordered collection")
+    return value
+
+
+def _composition_text(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value
+
+
+def _composition_iata(value: object, field_name: str) -> str:
+    text = _composition_text(value, field_name)
+    if not re.fullmatch(r"[A-Z0-9]{3}", text):
+        raise ValueError(f"{field_name} must be a normalized IATA code")
+    return text
+
+
+def _composition_currency(value: object, field_name: str) -> str:
+    text = _composition_text(value, field_name)
+    if not re.fullmatch(r"[A-Z]{3}", text):
+        raise ValueError(f"{field_name} must be an uppercase ISO code")
+    return text
+
+
+def _composition_non_negative_int(value: object, field_name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return value
+
+
+def _composition_bool(value: object, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise TypeError(f"{field_name} must be bool")
+    return value
+
+
+def _composition_uuid(value: object, field_name: str) -> UUID:
+    text = _composition_text(value, field_name)
+    parsed = UUID(text)
+    if str(parsed) != text:
+        raise ValueError(f"{field_name} must be a canonical UUID")
+    return parsed
+
+
+def _composition_date(value: object, field_name: str) -> date:
+    text = _composition_text(value, field_name)
+    parsed = date.fromisoformat(text)
+    if parsed.isoformat() != text:
+        raise ValueError(f"{field_name} must be a canonical ISO date")
+    return parsed
+
+
+def _composition_optional_datetime(value: object, field_name: str) -> datetime | None:
+    if value is None:
+        return None
+    text = _composition_text(value, field_name)
+    parsed = datetime.fromisoformat(text)
+    _require_aware(parsed, field_name)
+    if parsed.isoformat() != text:
+        raise ValueError(f"{field_name} must be a canonical ISO datetime")
+    return parsed
+
+
+def _composition_money(value: object, field_name: str) -> _StoredCompositionMoney:
+    money = _composition_mapping(value, field_name)
+    minor_units = _composition_non_negative_int(money["minor_units"], f"{field_name} amount")
+    if minor_units > MAX_MONEY_MINOR_UNITS:
+        raise ValueError(f"{field_name} amount is too large")
+    return _StoredCompositionMoney(
+        minor_units=minor_units,
+        currency=_composition_currency(money["currency"], f"{field_name} currency"),
+    )
 
 
 def _validate_ranking_snapshot(snapshot: NewAgentRankingSnapshot) -> str:
@@ -5912,6 +6819,22 @@ def _confirmed_evidence_record(row: RowMapping) -> AgentConfirmedOfferEvidenceRe
         visa_status=_optional_visa_status(row["visa_status"]),
         fingerprint=str(row["fingerprint"]),
         created_at=_aware_datetime(row["created_at"]),
+    )
+
+
+def _booking_action_descriptor_record(
+    row: RowMapping,
+) -> AgentBookingActionDescriptorRecord:
+    return AgentBookingActionDescriptorRecord(
+        id=UUID(str(row["id"])),
+        household_id=UUID(str(row["household_id"])),
+        run_id=UUID(str(row["run_id"])),
+        confirmed_evidence_id=UUID(str(row["confirmed_evidence_id"])),
+        provider_id=str(row["provider_id"]),
+        private_descriptor=_json_object(str(row["private_descriptor_json"])),
+        fingerprint=str(row["fingerprint"]),
+        created_at=_aware_datetime(row["created_at"]),
+        expires_at=_aware_datetime(row["expires_at"]),
     )
 
 

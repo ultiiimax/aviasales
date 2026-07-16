@@ -30,6 +30,7 @@ from flight_hunter.domain.agent_search import (
     PlanBudget,
     ProviderCapabilitySnapshot,
     ProviderHttpCostModel,
+    RouteStrategy,
     TravelIntent,
     TripShape,
     inclusive_month_count,
@@ -147,6 +148,21 @@ class FrozenPlanLeg:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenCompositionRule:
+    version: str
+    max_hubs_per_leg: int
+    source: str = "confirmed_connection_airports"
+
+    def __post_init__(self) -> None:
+        if self.version != "confirmed-hubs-v1":
+            raise ValueError("unsupported composition rule version")
+        if type(self.max_hubs_per_leg) is not int or self.max_hubs_per_leg <= 0:
+            raise ValueError("max_hubs_per_leg must be a positive integer")
+        if self.source != "confirmed_connection_airports":
+            raise ValueError("unsupported composition hub source")
+
+
+@dataclass(frozen=True, slots=True)
 class ProposedPlanRevision:
     status: PlanRevisionStatus
     parsed_intent: ParsedIntent
@@ -158,6 +174,7 @@ class ProposedPlanRevision:
     clarifications: tuple[IntentClarification, ...]
     created_at: datetime
     expires_at: datetime
+    composition_rule: FrozenCompositionRule | None = None
     builder_version: str = "agent-plan-builder-v4"
 
 
@@ -345,12 +362,33 @@ class AgentPlanBuilder:
                 expires_at=expires_at,
             )
 
+        composition_rule = _composition_rule(travel_intent, normalized_coverage)
+        if composition_rule is not None and any(
+            leg.anywhere_rule is not None for leg in frozen_legs
+        ):
+            return _draft_revision(
+                parsed=parsed,
+                travel_intent=travel_intent,
+                coverage=normalized_coverage,
+                snapshot=snapshot,
+                frozen_legs=frozen_legs,
+                composition_rule=composition_rule,
+                clarifications=(_split_anywhere_unsupported_clarification(),),
+                created_at=created_at,
+                expires_at=expires_at,
+            )
         surface = _surface_for_frozen_legs(
             frozen_legs,
             normalized_coverage,
             trip_shape=travel_intent.trip_shape,
             capability_snapshot=snapshot,
         )
+        if composition_rule is not None:
+            surface = _surface_with_composition_budget(
+                surface,
+                frozen_legs,
+                composition_rule,
+            )
         try:
             estimate = self._estimator.estimate(surface, snapshot.cost_model)
         except PlanBudgetExceededError as error:
@@ -365,6 +403,7 @@ class AgentPlanBuilder:
                 coverage=normalized_coverage,
                 snapshot=snapshot,
                 frozen_legs=frozen_legs,
+                composition_rule=composition_rule,
                 clarifications=(
                     _quick_budget_clarification(
                         surface,
@@ -382,6 +421,7 @@ class AgentPlanBuilder:
                 snapshot=snapshot,
                 estimate=estimate,
                 frozen_legs=frozen_legs,
+                composition_rule=composition_rule,
                 clarifications=(
                     _budget_revision_clarification(
                         estimate,
@@ -402,6 +442,7 @@ class AgentPlanBuilder:
             clarifications=(),
             created_at=created_at,
             expires_at=expires_at,
+            composition_rule=composition_rule,
         )
 
     async def _freeze_legs(
@@ -595,6 +636,50 @@ def _surface_for_frozen_legs(
     )
 
 
+def _composition_rule(
+    intent: TravelIntent,
+    coverage: CoverageMode,
+) -> FrozenCompositionRule | None:
+    if not {
+        RouteStrategy.SPLIT_TICKET,
+        RouteStrategy.SELF_TRANSFER,
+    }.intersection(intent.requested_strategies):
+        return None
+    return FrozenCompositionRule(
+        version="confirmed-hubs-v1",
+        max_hubs_per_leg=2 if coverage is CoverageMode.QUICK else 4,
+    )
+
+
+def _surface_with_composition_budget(
+    surface: SearchSurface,
+    frozen_legs: tuple[FrozenPlanLeg, ...],
+    rule: FrozenCompositionRule,
+) -> SearchSurface:
+    split_exact_searches = 0
+    for frozen_leg in frozen_legs:
+        if frozen_leg.reciprocal_anywhere_return:
+            continue
+        if frozen_leg.anywhere_rule is not None:
+            raise ValueError("split anywhere must be rejected before estimation")
+        assert frozen_leg.origin_scope is not None
+        assert frozen_leg.destination_scope is not None
+        route_pair_count = len(
+            finite_route_pairs(
+                frozen_leg.origin_scope.airport_codes,
+                frozen_leg.destination_scope.airport_codes,
+            )
+        )
+        split_exact_searches += (
+            route_pair_count * _date_count(frozen_leg.date_constraint) * rule.max_hubs_per_leg * 2
+        )
+    return SearchSurface(
+        coverage=surface.coverage,
+        calendar_searches=surface.calendar_searches,
+        exact_searches=surface.exact_searches + split_exact_searches,
+    )
+
+
 def _native_round_trip_outbound(
     frozen_legs: tuple[FrozenPlanLeg, ...],
     trip_shape: TripShape,
@@ -660,6 +745,7 @@ def _draft_revision(
     travel_intent: TravelIntent | None = None,
     estimate: PlanEstimate | None = None,
     frozen_legs: tuple[FrozenPlanLeg, ...] = (),
+    composition_rule: FrozenCompositionRule | None = None,
 ) -> ProposedPlanRevision:
     return ProposedPlanRevision(
         status=PlanRevisionStatus.DRAFT,
@@ -672,6 +758,7 @@ def _draft_revision(
         clarifications=clarifications,
         created_at=created_at,
         expires_at=expires_at,
+        composition_rule=composition_rule,
     )
 
 
@@ -719,6 +806,17 @@ def _catalog_changed_clarification(leg_index: int) -> IntentClarification:
         field=f"legs.{leg_index}.scope",
         code="catalog_changed_during_planning",
         message_ru="Каталог аэропортов изменился. Повторите построение плана.",
+    )
+
+
+def _split_anywhere_unsupported_clarification() -> IntentClarification:
+    return IntentClarification(
+        field="requested_strategies",
+        code="split_anywhere_unsupported",
+        message_ru=(
+            "Сначала ограничьте направление: split/self-transfer требует "
+            "замороженного конечного маршрута и бюджета узлов пересадки."
+        ),
     )
 
 

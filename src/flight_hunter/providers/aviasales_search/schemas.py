@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from itertools import pairwise
 from typing import Any
 
@@ -46,6 +47,8 @@ class ParsedSegment:
     destination: str
     depart_at: str
     arrive_at: str
+    depart_at_utc: datetime | None = None
+    arrive_at_utc: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +191,7 @@ def _parse_segment(leg: dict[str, Any], airlines: dict[str, Any]) -> ParsedSegme
     airline_code = str(carrier.get("carrier") or "")
     number = str(carrier.get("number") or "")
     airline_name = _airline_name(airlines.get(airline_code))
+    depart_at_utc, arrive_at_utc = _segment_instants(leg)
     return ParsedSegment(
         airline_code=airline_code,
         airline_name=airline_name,
@@ -196,7 +200,30 @@ def _parse_segment(leg: dict[str, Any], airlines: dict[str, Any]) -> ParsedSegme
         destination=str(leg.get("destination") or ""),
         depart_at=str(leg.get("local_departure_date_time") or ""),
         arrive_at=str(leg.get("local_arrival_date_time") or ""),
+        depart_at_utc=depart_at_utc,
+        arrive_at_utc=arrive_at_utc,
     )
+
+
+def _segment_instants(leg: dict[str, Any]) -> tuple[datetime | None, datetime | None]:
+    raw_depart = leg.get("departure_unix_timestamp")
+    raw_arrive = leg.get("arrival_unix_timestamp")
+    if raw_depart is None and raw_arrive is None:
+        return None, None
+    if (
+        type(raw_depart) is not int
+        or type(raw_arrive) is not int
+        or raw_depart < 0
+        or raw_arrive <= raw_depart
+    ):
+        raise AviasalesSearchParseError("aviasales_search_invalid_segment_instants")
+    try:
+        return (
+            datetime.fromtimestamp(raw_depart, tz=UTC),
+            datetime.fromtimestamp(raw_arrive, tz=UTC),
+        )
+    except (OverflowError, OSError, ValueError):
+        raise AviasalesSearchParseError("aviasales_search_invalid_segment_instants") from None
 
 
 def _cheapest_proposal(

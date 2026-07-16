@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
+from uuid import UUID
 
 
 class BookingActionTokenError(ValueError):
@@ -17,6 +18,12 @@ class BookingActionTokenError(ValueError):
 class BookingActionPayload:
     provider_id: str
     ref: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AgentBookingActionPayload:
+    descriptor_id: UUID
     expires_at: datetime
 
 
@@ -82,6 +89,79 @@ def verify_booking_action_token(
     if checked_at >= expires_at:
         raise BookingActionTokenError("booking_action_token_expired")
     return BookingActionPayload(provider_id=provider_id, ref=ref, expires_at=expires_at)
+
+
+def sign_agent_booking_action_token(
+    *,
+    secret_key: str,
+    descriptor_id: UUID,
+    now: datetime | None = None,
+    ttl_seconds: int = 900,
+) -> str:
+    if not secret_key:
+        raise ValueError("secret_key is required")
+    if not isinstance(descriptor_id, UUID):
+        raise TypeError("descriptor_id must be UUID")
+    issued_at = now or datetime.now(UTC)
+    if issued_at.tzinfo is None or issued_at.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    expires_at = issued_at + timedelta(seconds=max(1, ttl_seconds))
+    encoded_payload = _b64encode(
+        json.dumps(
+            {
+                "descriptor_id": str(descriptor_id),
+                "exp": int(expires_at.timestamp()),
+                "version": "agent-booking-v1",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    return f"{encoded_payload}.{_signature(encoded_payload, secret_key)}"
+
+
+def verify_agent_booking_action_token(
+    token: str,
+    *,
+    secret_key: str,
+    now: datetime | None = None,
+) -> AgentBookingActionPayload:
+    if not secret_key:
+        raise ValueError("secret_key is required")
+    checked_at = now or datetime.now(UTC)
+    if checked_at.tzinfo is None or checked_at.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    try:
+        encoded_payload, signature = token.split(".", 1)
+    except ValueError as exc:
+        raise BookingActionTokenError("agent_booking_token_malformed") from exc
+    if not hmac.compare_digest(
+        signature,
+        _signature(encoded_payload, secret_key),
+    ):
+        raise BookingActionTokenError("agent_booking_token_tampered")
+    try:
+        payload = json.loads(_b64decode(encoded_payload))
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise BookingActionTokenError("agent_booking_token_malformed") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != "agent-booking-v1"
+        or not isinstance(payload.get("descriptor_id"), str)
+        or not isinstance(payload.get("exp"), int)
+    ):
+        raise BookingActionTokenError("agent_booking_token_malformed")
+    try:
+        descriptor_id = UUID(payload["descriptor_id"])
+    except ValueError as exc:
+        raise BookingActionTokenError("agent_booking_token_malformed") from exc
+    expires_at = datetime.fromtimestamp(payload["exp"], tz=UTC)
+    if checked_at >= expires_at:
+        raise BookingActionTokenError("agent_booking_token_expired")
+    return AgentBookingActionPayload(
+        descriptor_id=descriptor_id,
+        expires_at=expires_at,
+    )
 
 
 def decode_booking_ref(ref: str) -> dict[str, Any]:

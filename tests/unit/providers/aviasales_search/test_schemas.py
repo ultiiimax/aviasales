@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,20 @@ def test_parse_chunks_first_ticket_segments_carry_airline_and_route() -> None:
     assert segment.origin in {"SVO", "DME", "VKO", "ZIA", "BKA"}
     assert segment.airline_code
     assert segment.flight_number.startswith(segment.airline_code)
+    assert segment.depart_at_utc is not None
+    assert segment.arrive_at_utc is not None
+    assert segment.depart_at_utc.tzinfo is UTC
+    assert segment.arrive_at_utc > segment.depart_at_utc
+
+
+def test_parse_chunks_rejects_inverted_verified_unix_segment_instants() -> None:
+    chunk = _load_chunk()
+    legs = chunk["flight_legs"]
+    assert isinstance(legs, list) and isinstance(legs[0], dict)
+    legs[0]["arrival_unix_timestamp"] = legs[0]["departure_unix_timestamp"] - 1
+
+    with pytest.raises(AviasalesSearchParseError, match="invalid_segment_instants"):
+        parse_chunks([chunk])
 
 
 def test_parse_chunks_empty_input_returns_empty() -> None:

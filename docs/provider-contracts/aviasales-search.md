@@ -12,6 +12,12 @@ Hot offers: APK contract statically verified 2026-07-15. No live hot-offer smoke
 was run, so the hot-offer section makes no claim of current upstream availability
 or of having captured an observed live payload.
 
+Exact-search mapping and lazy booking-action boundaries were reverified
+2026-07-16 against the sanitized 2026-07-04 capture and the local APK sources.
+This verification covered Unix departure/arrival instants, deterministic
+evidence identity, duplicate-ticket handling and the private click descriptor.
+No live provider request was made.
+
 Source: reverse-engineered from Aviasales Android APK `Aviasales_7.24.0` (local
 hobby project, not a partner integration). The mobile API endpoints below are
 used directly — no authorization, no partner token, no official ToS gating. See
@@ -314,6 +320,10 @@ seller/segments, unknown protection and `None` for baggage when the response
 does not provide it. Evidence UUIDs use UUIDv5 under the caller-supplied
 operation namespace: retrying the same operation and provider content is
 idempotent, while a new operation produces a distinct append-only observation.
+Composition chronology uses only the verified
+`departure_unix_timestamp`/`arrival_unix_timestamp` values normalized to aware
+UTC datetimes. Local timestamp strings remain display evidence and never decide
+connection feasibility.
 Public evidence contains no raw DTO, proposal or click payload, booking URL,
 signature, marker, cookie or token.
 
@@ -326,6 +336,15 @@ GET `https://tickets-api.aviasales.ru/searches/{search_id}/clicks/{proposal_id}?
 Response: `{"url": "https://www.kupibilet.ru/booking/..."}` — direct booking URL
 on the gate's site. The adapter resolves this **lazily on user click**, not
 preloaded for every offer.
+
+Agent-search results do not reuse the legacy reversible booking reference.
+For each confirmed offer the provider boundary emits a repr-redacted private
+descriptor (`search_id`, `proposal_id`, results host) tied to the sanitized
+evidence UUID. The server stores it in the household/run scope and exposes only
+a short-lived HMAC token containing an opaque descriptor UUID and expiry. An
+authenticated explicit click rechecks household, plan, run, provider and expiry
+before resolving the URL. Composed multi-ticket candidates remain unavailable
+unless a later flow can represent every required purchase action unambiguously.
 
 ## Marker / identification
 

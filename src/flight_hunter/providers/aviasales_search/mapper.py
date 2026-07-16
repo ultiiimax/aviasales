@@ -285,6 +285,8 @@ def _segment_summaries(ticket: ParsedTicket) -> tuple[FlightSegmentSummary, ...]
             destination=segment.destination,
             depart_at=segment.depart_at,
             arrive_at=segment.arrive_at,
+            depart_at_utc=segment.depart_at_utc,
+            arrive_at_utc=segment.arrive_at_utc,
         )
         for group in ticket.segments
         for segment in group
@@ -300,12 +302,31 @@ def _booking_action_ref(
     if not search_id or not results_url:
         return None
     return json.dumps(
-        {
-            "provider_id": "aviasales_search",
-            "search_id": search_id,
-            "proposal_id": ticket.best_proposal.proposal_id,
-            "results_url": results_url,
-        },
+        private_booking_action_descriptor(
+            ticket,
+            search_id=search_id,
+            results_url=results_url,
+        ),
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def private_booking_action_descriptor(
+    ticket: ParsedTicket,
+    *,
+    search_id: str,
+    results_url: str,
+) -> dict[str, str]:
+    if not isinstance(ticket, ParsedTicket):
+        raise TypeError("ticket must be ParsedTicket")
+    if not isinstance(search_id, str) or not search_id:
+        raise ValueError("search_id is required")
+    if not isinstance(results_url, str) or not results_url:
+        raise ValueError("results_url is required")
+    return {
+        "provider_id": "aviasales_search",
+        "search_id": search_id,
+        "proposal_id": ticket.best_proposal.proposal_id,
+        "results_url": results_url,
+    }

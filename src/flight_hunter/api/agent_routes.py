@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -14,6 +15,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from flight_hunter.api.agent_schemas import (
+    AgentBookingResolveRequest,
+    AgentBookingResolveResponse,
     AgentPlanResponse,
     AgentRunListResponse,
     AgentRunResponse,
@@ -35,9 +38,21 @@ from flight_hunter.application.agent_lifecycle import (
 )
 from flight_hunter.application.agent_planning import AgentPlanBuilder
 from flight_hunter.application.agent_scope import ScopeResolver
+from flight_hunter.application.booking_actions import (
+    BookingActionTokenError,
+    verify_agent_booking_action_token,
+)
 from flight_hunter.config import AppSettings
 from flight_hunter.domain.auth import AuthSession, token_hash
-from flight_hunter.persistence.repositories import AirportReferenceRepository, IdentityRepository
+from flight_hunter.persistence.agent_repositories import (
+    AgentEvidenceRepository,
+    AgentRunRepository,
+)
+from flight_hunter.persistence.repositories import (
+    AirportReferenceRepository,
+    IdentityRepository,
+)
+from flight_hunter.providers.aviasales_search.client import AviasalesSearchError
 
 ERROR_STATUS = {
     "auth_context_missing": 401,
@@ -59,6 +74,7 @@ ERROR_STATUS = {
     "agent_run_cancelled": 409,
     "agent_plan_duplicate_revision": 409,
     "agent_plan_conflict": 409,
+    "agent_booking_token_invalid": 400,
 }
 
 _BEARER = HTTPBearer(auto_error=False)
@@ -69,6 +85,16 @@ class AgentRouteError(RuntimeError):
         self.code = code
         self.status_code = _status_for_error(code)
         super().__init__(code)
+
+
+@runtime_checkable
+class AgentBookingResolver(Protocol):
+    async def resolve_booking_action(
+        self,
+        descriptor: Mapping[str, object],
+        *,
+        request_fingerprint: str,
+    ) -> str | None: ...
 
 
 async def agent_route_error_handler(
@@ -142,6 +168,7 @@ def create_agent_router(
             ),
             clock=lifecycle_clock,
             provider_gateway=provider_gateway,
+            booking_action_secret=lifecycle_settings.app_secret_key,
         )
 
     @router.post("", response_model=AgentPlanResponse, status_code=201)
@@ -176,6 +203,57 @@ def create_agent_router(
             except AgentLifecycleError as error:
                 raise _route_lifecycle_error(error) from error
         return AgentPlanResponse.from_view(view)
+
+    @router.post(
+        "/{plan_id}/runs/{run_id}/booking-actions/resolve",
+        response_model=AgentBookingResolveResponse,
+        response_model_exclude_none=True,
+    )
+    async def resolve_agent_booking_action(
+        plan_id: UUID,
+        run_id: UUID,
+        body: AgentBookingResolveRequest,
+        auth: AuthSession = Depends(require_bearer_session),
+    ) -> AgentBookingResolveResponse:
+        if not lifecycle_settings.app_secret_key:
+            return AgentBookingResolveResponse(status="unavailable")
+        now = lifecycle_clock()
+        try:
+            payload = verify_agent_booking_action_token(
+                body.token,
+                secret_key=lifecycle_settings.app_secret_key,
+                now=now,
+            )
+        except BookingActionTokenError as error:
+            raise AgentRouteError("agent_booking_token_invalid") from error
+        async with session_factory() as session:
+            run = await AgentRunRepository(session).get_run(auth.household_id, run_id)
+            descriptor = await AgentEvidenceRepository(session).get_booking_action_descriptor(
+                auth.household_id,
+                payload.descriptor_id,
+            )
+        if (
+            run is None
+            or run.plan_id != plan_id
+            or descriptor is None
+            or descriptor.run_id != run_id
+            or descriptor.expires_at <= now
+            or descriptor.provider_id != "aviasales_search"
+        ):
+            raise AgentRouteError("agent_booking_token_invalid")
+        if not isinstance(provider_gateway, AgentBookingResolver):
+            return AgentBookingResolveResponse(status="unavailable")
+        try:
+            url = await provider_gateway.resolve_booking_action(
+                descriptor.private_descriptor,
+                request_fingerprint=f"agent-booking:{descriptor.id}",
+            )
+        except (AviasalesSearchError, TypeError, ValueError):
+            return AgentBookingResolveResponse(status="unavailable")
+        return AgentBookingResolveResponse(
+            status="resolved" if url else "unavailable",
+            url=url,
+        )
 
     @router.patch("/{plan_id}", response_model=AgentPlanResponse)
     async def edit_plan(
@@ -317,7 +395,11 @@ def create_agent_router(
                 raise _route_lifecycle_error(error) from error
         return AgentRunResponse.from_view(view)
 
-    @router.get("/{plan_id}/runs/{run_id}/results", response_model=AgentRunResultsResponse)
+    @router.get(
+        "/{plan_id}/runs/{run_id}/results",
+        response_model=AgentRunResultsResponse,
+        response_model_exclude_none=True,
+    )
     async def get_run_results(
         plan_id: UUID,
         run_id: UUID,
@@ -366,5 +448,6 @@ def _error_message(code: str) -> str:
         "agent_plan_not_found": "agent plan or run was not found",
         "agent_run_not_found": "agent run was not found",
         "agent_plan_invalid_input": "agent plan input is invalid",
+        "agent_booking_token_invalid": "booking action token is invalid",
     }
     return messages.get(code, "agent lifecycle transition was rejected")

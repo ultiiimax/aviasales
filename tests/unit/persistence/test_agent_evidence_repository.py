@@ -94,9 +94,8 @@ async def test_confirmed_evidence_and_candidate_retries_deduplicate_without_upda
         assert discovery_duplicate.amount_minor == 18_000
         assert duplicate.id == original.id == EVIDENCE_ID
         assert duplicate.amount_minor == 20_000
-        assert duplicate.itinerary_evidence == {
-            "segments": ({"destination": "CDG", "origin": "LED"},)
-        }
+        assert duplicate.itinerary_evidence == original.itinerary_evidence
+        assert duplicate.itinerary_evidence["destination"] == "CDG"
         assert candidate_duplicate.id == candidate.id == CANDIDATE_ID
         assert candidate_duplicate.amount_minor == 20_000
 
@@ -448,20 +447,23 @@ async def test_review_current_safe_discovery_segment_component_and_ranking_field
             replace(
                 _confirmed(),
                 itinerary_evidence={
+                    **_confirmed().itinerary_evidence,
                     "segments": [
                         {
-                            "origin": "LED",
-                            "destination": "CDG",
+                            **_confirmed().itinerary_evidence["segments"][0],  # type: ignore[index]
                             "value": "segment-1",
                         }
-                    ]
+                    ],
                 },
             )
         )
         candidate = await repository.append_composed_candidate(
             replace(
                 _candidate(),
-                itinerary_evidence={"components": [str(confirmed.id)], "value": 1},
+                itinerary_evidence={
+                    **_candidate().itinerary_evidence,
+                    "value": 1,
+                },
             )
         )
         ranking = await repository.create_ranking_snapshot(
@@ -639,6 +641,7 @@ def _discovery(*, id_value: UUID = DISCOVERY_ID) -> NewAgentDiscoverySignal:
 
 
 def _confirmed(*, id_value: UUID = EVIDENCE_ID) -> NewAgentConfirmedOfferEvidence:
+    segment_ref = f"segment-{id_value.hex[:12]}"
     return NewAgentConfirmedOfferEvidence(
         id=id_value,
         household_id=HOUSEHOLD_ID,
@@ -652,7 +655,32 @@ def _confirmed(*, id_value: UUID = EVIDENCE_ID) -> NewAgentConfirmedOfferEvidenc
         passenger_basis=PriceBasis.PROVIDER_SINGLE_ADULT_TICKET,
         amount_minor=20_000,
         currency="RUB",
-        itinerary_evidence={"segments": [{"origin": "LED", "destination": "CDG"}]},
+        itinerary_evidence={
+            "leg_ordinal": 0,
+            "search_role": "base",
+            "origin": "LED",
+            "destination": "CDG",
+            "departure_date": "2026-09-01",
+            "return_date": None,
+            "passenger_mix": {"adults": 1, "children": 0, "infants": 0},
+            "price_basis": PriceBasis.PROVIDER_SINGLE_ADULT_TICKET.value,
+            "segments": [
+                {
+                    "segment_ref": segment_ref,
+                    "origin": "LED",
+                    "destination": "CDG",
+                    "depart_at": "2026-09-01 08:00",
+                    "arrive_at": "2026-09-01 10:00",
+                    "depart_at_utc": "2026-09-01T08:00:00+00:00",
+                    "arrive_at_utc": "2026-09-01T10:00:00+00:00",
+                    "carrier": "FV",
+                    "flight_number": "FV100",
+                }
+            ],
+            "seller": "Fixture seller",
+            "ticket_structure": "provider_ticket",
+            "stops": 0,
+        },
         protection_status=ProtectionStatus.UNKNOWN,
         baggage_status=None,
         transfer_status=None,
@@ -663,6 +691,7 @@ def _confirmed(*, id_value: UUID = EVIDENCE_ID) -> NewAgentConfirmedOfferEvidenc
 
 
 def _candidate(*, id_value: UUID = CANDIDATE_ID) -> NewAgentComposedRouteCandidate:
+    segment_ref = f"segment-{EVIDENCE_ID.hex[:12]}"
     return NewAgentComposedRouteCandidate(
         id=id_value,
         household_id=HOUSEHOLD_ID,
@@ -674,7 +703,38 @@ def _candidate(*, id_value: UUID = CANDIDATE_ID) -> NewAgentComposedRouteCandida
         passenger_basis=PriceBasis.PROVIDER_SINGLE_ADULT_TICKET,
         amount_minor=20_000,
         currency="RUB",
-        itinerary_evidence={"components": [str(EVIDENCE_ID)]},
+        itinerary_evidence={
+            "composition_version": "route-composer-v1",
+            "trip_shape": "one_way",
+            "components": [str(EVIDENCE_ID)],
+            "component_amounts": [{"minor_units": 20_000, "currency": "RUB"}],
+            "ordered_legs": [
+                {
+                    "ordinal": 0,
+                    "origin": "LED",
+                    "destination": "CDG",
+                    "departure_date": "2026-09-01",
+                    "components": [str(EVIDENCE_ID)],
+                }
+            ],
+            "passenger_mix": {"adults": 1, "children": 0, "infants": 0},
+            "price_basis": PriceBasis.PROVIDER_SINGLE_ADULT_TICKET.value,
+            "target_currency": "RUB",
+            "known_total": {"minor_units": 20_000, "currency": "RUB"},
+            "price_comparison_status": "fully_priced",
+            "tickets": [
+                {
+                    "ticket_index": 0,
+                    "leg_ordinal": 0,
+                    "component_evidence_id": str(EVIDENCE_ID),
+                    "segment_refs": [f"{EVIDENCE_ID}#{segment_ref}"],
+                }
+            ],
+            "connections": [],
+            "unknown_costs": [],
+            "protection_status": "unknown",
+            "ranking_reasons": ["confirmed_components"],
+        },
         protection_status=ProtectionStatus.UNKNOWN,
         baggage_status=None,
         transfer_status=None,

@@ -11,20 +11,39 @@ from uuid import UUID, uuid5
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from flight_hunter.application.agent_composition import (
+    CompositionPolicy,
+    CompositionRequest,
+    FrozenCompositionLeg,
+    LegEvidencePool,
+    RouteComposer,
+)
 from flight_hunter.application.agent_operations import (
     OperationScheduler,
     OperationSpec,
     ProviderFailureClass,
     retry_decision,
 )
+from flight_hunter.application.agent_reporting import (
+    CandidateRanker,
+    ranking_snapshot_to_payload,
+)
+from flight_hunter.application.agent_result_records import (
+    StoredAgentEvidenceError,
+    composed_record_to_candidate,
+    confirmed_record_to_evidence,
+    new_composed_candidate,
+)
 from flight_hunter.application.agent_scope import finite_route_pairs
 from flight_hunter.domain.agent_evidence import (
+    ComposedRouteCandidate,
     ConfirmedOfferEvidence,
     DiscoverySignal,
     DiscoverySource,
 )
 from flight_hunter.domain.agent_search import (
     MAX_ANYWHERE_DISCOVERY_MONTHS,
+    CapabilityState,
     DateConstraint,
     DateMode,
     LocationScopeKind,
@@ -32,11 +51,18 @@ from flight_hunter.domain.agent_search import (
     TripShape,
     inclusive_month_count,
 )
-from flight_hunter.domain.offers import FlightSegmentSummary, Freshness, PriceBasis
+from flight_hunter.domain.offers import (
+    FlightSegmentSummary,
+    Freshness,
+    PassengerMix,
+    PriceBasis,
+)
 from flight_hunter.execution_limits import MAX_AGENT_EXECUTION_INTERVAL_SECONDS
 from flight_hunter.persistence.agent_repositories import (
+    AgentComposedRouteCandidateRecord,
     AgentConfirmedOfferEvidenceRecord,
     AgentDiscoverySignalRecord,
+    AgentEvidenceError,
     AgentEvidenceRepository,
     AgentOperationConflict,
     AgentOperationKind,
@@ -56,6 +82,7 @@ from flight_hunter.persistence.agent_repositories import (
     AttemptKind,
     AttemptReservationStatus,
     CircuitPermitStatus,
+    NewAgentBookingActionDescriptor,
     NewAgentConfirmedOfferEvidence,
     NewAgentDiscoverySignal,
     NewAgentPlanStage,
@@ -81,12 +108,14 @@ from flight_hunter.providers.aviasales_search.gateway import (
     CalendarSearchParams,
     ExactPollOutcome,
     ExactSearchContinuation,
+    PrivateBookingActionDescriptor,
 )
 from flight_hunter.providers.aviasales_search.schemas import ProviderLocation
 
 _PROVIDER_ID = "aviasales_search"
 _EXACT_POLL_EVIDENCE_LIMIT = 50
 _PROVIDER_CLOCK_SKEW = timedelta(minutes=5)
+_BOOKING_DESCRIPTOR_TTL = timedelta(minutes=30)
 _TERMINAL_RUN_STATUSES = frozenset({"completed", "partial", "failed", "cancelled"})
 _ACTIVE_OPERATION_STATUSES = frozenset(
     {
@@ -200,7 +229,19 @@ class _AnywhereRule:
 
 
 @dataclass(frozen=True, slots=True)
+class _SearchLeg:
+    ordinal: int
+    route_pairs: tuple[_RoutePair, ...]
+    date_mode: str
+    departure_date: date
+    departure_end_date: date
+    return_date: date | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _Workflow:
+    trip_shape: TripShape
+    search_legs: tuple[_SearchLeg, ...]
     origin: str
     destination: str
     route_pairs: tuple[_RoutePair, ...]
@@ -220,6 +261,9 @@ class _Workflow:
     poll_rounds: int
     attempts_per_poll: int
     approved_provider_rpm: int
+    composition_rule_version: str | None = None
+    max_split_hubs_per_leg: int = 0
+    split_bindings: tuple[_SplitBinding, ...] = ()
     anywhere_rule: _AnywhereRule | None = None
     anywhere_signals: tuple[AgentDiscoverySignalRecord, ...] = ()
 
@@ -230,6 +274,7 @@ class _Workflow:
 
 @dataclass(frozen=True, slots=True)
 class _ExactBinding:
+    leg_ordinal: int
     origin: str
     destination: str
     departure_date: date
@@ -239,6 +284,13 @@ class _ExactBinding:
     infants: int
     passengers: int
     currency: str
+
+
+@dataclass(frozen=True, slots=True)
+class _SplitBinding:
+    binding: _ExactBinding
+    source_evidence_id: UUID
+    component_ordinal: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,7 +407,7 @@ class AgentExecutionService:
             lease_seconds=self._policy.operation_lease_seconds,
         )
         if lease is None:
-            terminal = await self._advance_workflow(run, now)
+            terminal = await self._advance_or_fail(run, now)
             return AgentExecutionStep(False, None, terminal.status if terminal else run.status)
 
         if lease.operation.kind in {
@@ -369,12 +421,28 @@ class AgentExecutionService:
             status = await self._run_local_operation(run, lease, now)
         post_operation_now = self._now()
         await self._refresh_stage_statuses(run, post_operation_now)
-        terminal = await self._advance_workflow(run, post_operation_now)
+        terminal = await self._advance_or_fail(run, post_operation_now)
         return AgentExecutionStep(
             True,
             status.value,
             terminal.status if terminal is not None else "running",
         )
+
+    async def _advance_or_fail(
+        self,
+        run: AgentPlanRunRecord,
+        now: datetime,
+    ) -> AgentPlanRunRecord | None:
+        try:
+            return await self._advance_workflow(run, now)
+        except (AgentExecutionError, AgentEvidenceError) as error:
+            return await self._runs.set_status(
+                household_id=run.household_id,
+                run_id=run.id,
+                status="failed",
+                changed_at=now,
+                error_code=error.code,
+            )
 
     async def _finish_cancel_requested(
         self,
@@ -424,8 +492,14 @@ class AgentExecutionService:
         if any(operation.status in _ACTIVE_OPERATION_STATUSES for operation in operations):
             return AgentExecutionStep(False, None, run.status)
         confirmed = await self._evidence.list_confirmed_evidence(run.household_id, run.id)
-        terminal_status: Literal["partial", "failed"] = "partial" if confirmed else "failed"
-        error_code = "agent_run_partial" if confirmed else "agent_run_deadline_exceeded"
+        ranking_id = await self._saved_ranking_result_id(run, operations)
+        has_publishable_results = bool(confirmed) and ranking_id is not None
+        terminal_status: Literal["partial", "failed"] = (
+            "partial" if has_publishable_results else "failed"
+        )
+        error_code = (
+            "agent_run_partial" if has_publishable_results else "agent_run_deadline_exceeded"
+        )
         failed = await self._runs.set_status(
             household_id=run.household_id,
             run_id=run.id,
@@ -453,25 +527,29 @@ class AgentExecutionService:
             if not materialized:
                 raise AgentExecutionError("agent_plan_snapshot_invalid")
             return
-        if workflow.date_mode == "exact":
+        if all(leg.date_mode == "exact" for leg in workflow.search_legs):
             stage = await self._stage(
                 run,
                 AgentPlanStageKind.EXACT_SEARCH,
                 prefix=0x02,
                 now=now,
             )
-            for ordinal, route_pair in enumerate(workflow.route_pairs):
-                await self._materialize_exact_start(
-                    run,
-                    stage.id,
-                    workflow,
-                    origin=route_pair.origin,
-                    destination=route_pair.destination,
-                    departure_date=workflow.departure_date,
-                    return_date=workflow.return_date,
-                    ordinal=ordinal,
-                    now=now,
-                )
+            ordinal = 0
+            for search_leg in workflow.search_legs:
+                for route_pair in search_leg.route_pairs:
+                    await self._materialize_exact_start(
+                        run,
+                        stage.id,
+                        workflow,
+                        origin=route_pair.origin,
+                        destination=route_pair.destination,
+                        departure_date=search_leg.departure_date,
+                        return_date=search_leg.return_date,
+                        ordinal=ordinal,
+                        leg_ordinal=search_leg.ordinal,
+                        now=now,
+                    )
+                    ordinal += 1
             return
         stage = await self._stage(
             run,
@@ -480,47 +558,52 @@ class AgentExecutionService:
             now=now,
         )
         ordinal = 0
-        date_count = (workflow.departure_end_date - workflow.departure_date).days + 1
-        for route_pair in workflow.route_pairs:
-            for date_offset in range(date_count):
-                departure_date = workflow.departure_date + timedelta(days=date_offset)
-                immutable_input = {
-                    "origin": route_pair.origin,
-                    "destination": route_pair.destination,
-                    "departure_date": departure_date.isoformat(),
-                    "return_date": (
-                        workflow.return_date.isoformat() if workflow.return_date else None
-                    ),
-                    "passengers": workflow.passengers,
-                    "currency": workflow.currency,
-                    "phase": "calendar",
-                }
-                await self._scheduler.materialize(
-                    OperationSpec(
-                        id=_stable_uuid(
-                            run.id,
-                            0x10 + min(ordinal, 0x0F),
-                            (
-                                f"calendar:{route_pair.origin}:{route_pair.destination}:"
-                                f"{departure_date}:{workflow.return_date}"
-                            ),
+        for search_leg in workflow.search_legs:
+            date_count = (search_leg.departure_end_date - search_leg.departure_date).days + 1
+            for route_pair in search_leg.route_pairs:
+                for date_offset in range(date_count):
+                    departure_date = search_leg.departure_date + timedelta(days=date_offset)
+                    immutable_input = {
+                        "leg_ordinal": search_leg.ordinal,
+                        "origin": route_pair.origin,
+                        "destination": route_pair.destination,
+                        "departure_date": departure_date.isoformat(),
+                        "return_date": (
+                            search_leg.return_date.isoformat() if search_leg.return_date else None
                         ),
-                        household_id=run.household_id,
-                        run_id=run.id,
-                        stage_id=stage.id,
-                        provider_id=_PROVIDER_ID,
-                        kind=AgentOperationKind.CALENDAR_SEARCH,
-                        immutable_input=immutable_input,
-                        logical_workflow_input={
-                            key: value for key, value in immutable_input.items() if key != "phase"
-                        },
-                        consumes_logical_unit=True,
-                        private_continuation=None,
-                        max_attempts=workflow.start_attempts,
-                        created_at=now,
+                        "passengers": workflow.passengers,
+                        "currency": workflow.currency,
+                        "phase": "calendar",
+                    }
+                    await self._scheduler.materialize(
+                        OperationSpec(
+                            id=_stable_uuid(
+                                run.id,
+                                0x10 + min(ordinal, 0x0F),
+                                (
+                                    f"calendar:{search_leg.ordinal}:{route_pair.origin}:"
+                                    f"{route_pair.destination}:{departure_date}:"
+                                    f"{search_leg.return_date}"
+                                ),
+                            ),
+                            household_id=run.household_id,
+                            run_id=run.id,
+                            stage_id=stage.id,
+                            provider_id=_PROVIDER_ID,
+                            kind=AgentOperationKind.CALENDAR_SEARCH,
+                            immutable_input=immutable_input,
+                            logical_workflow_input={
+                                key: value
+                                for key, value in immutable_input.items()
+                                if key != "phase"
+                            },
+                            consumes_logical_unit=True,
+                            private_continuation=None,
+                            max_attempts=workflow.start_attempts,
+                            created_at=now,
+                        )
                     )
-                )
-                ordinal += 1
+                    ordinal += 1
 
     async def _run_network_operation(
         self,
@@ -835,12 +918,20 @@ class AgentExecutionService:
             )
             if inactive is not None:
                 return inactive
-        return await self._persist_provider_outcome(
-            run,
-            lease,
-            outcome,
-            outcome_checkpoint_now,
-        )
+        try:
+            return await self._persist_provider_outcome(
+                run,
+                lease,
+                outcome,
+                outcome_checkpoint_now,
+            )
+        except (AgentExecutionError, AgentEvidenceError) as error:
+            return await self._fail_claimed_operation(
+                run,
+                lease.operation,
+                error.code,
+                outcome_checkpoint_now,
+            )
 
     async def _validated_existing_anywhere_capacity(
         self,
@@ -1246,6 +1337,19 @@ class AgentExecutionService:
                     for evidence in eligible_evidence
                 ]
             )
+            descriptors_by_evidence = {
+                descriptor.evidence_id: descriptor
+                for descriptor in poll_outcome.booking_descriptors
+            }
+            for stored in stored_evidence:
+                descriptor = descriptors_by_evidence.get(stored.id)
+                if descriptor is not None:
+                    await self._append_booking_descriptor(
+                        run,
+                        stored,
+                        descriptor,
+                        now,
+                    )
             succeeded = await self._operations.mark_operation_succeeded(
                 household_id=run.household_id,
                 operation_id=operation.id,
@@ -1365,15 +1469,13 @@ class AgentExecutionService:
         if operation.kind is AgentOperationKind.SCOPE_FREEZE:
             try:
                 snapshot = await self._freeze_anywhere_scope(run, now)
-            except AgentExecutionError as error:
-                failed = await self._operations.mark_operation_failed(
-                    household_id=run.household_id,
-                    operation_id=operation.id,
-                    worker_id=self._worker_id,
-                    error_code=error.code,
-                    now=now,
+            except (AgentExecutionError, AgentEvidenceError) as error:
+                return await self._fail_claimed_operation(
+                    run,
+                    operation,
+                    error.code,
+                    now,
                 )
-                return failed.status
             succeeded = await self._operations.mark_operation_succeeded(
                 household_id=run.household_id,
                 operation_id=operation.id,
@@ -1384,7 +1486,15 @@ class AgentExecutionService:
             )
             return succeeded.status
         if operation.kind is AgentOperationKind.RANKING:
-            ranking = await self._create_minimal_ranking(run, now)
+            try:
+                ranking = await self._create_ranking(run, now)
+            except (AgentExecutionError, AgentEvidenceError) as error:
+                return await self._fail_claimed_operation(
+                    run,
+                    operation,
+                    error.code,
+                    now,
+                )
             succeeded = await self._operations.mark_operation_succeeded(
                 household_id=run.household_id,
                 operation_id=operation.id,
@@ -1394,8 +1504,48 @@ class AgentExecutionService:
                 now=now,
             )
             return succeeded.status
+        if operation.kind is AgentOperationKind.COMPOSITION:
+            try:
+                candidates = await self._persist_composed_candidates(
+                    run,
+                    operation,
+                    now,
+                )
+            except (AgentExecutionError, AgentEvidenceError) as error:
+                return await self._fail_claimed_operation(
+                    run,
+                    operation,
+                    error.code,
+                    now,
+                )
+            if not candidates:
+                failed = await self._operations.mark_operation_failed(
+                    household_id=run.household_id,
+                    operation_id=operation.id,
+                    worker_id=self._worker_id,
+                    error_code="agent_no_composed_route",
+                    now=now,
+                )
+                return failed.status
+            succeeded = await self._operations.mark_operation_succeeded(
+                household_id=run.household_id,
+                operation_id=operation.id,
+                worker_id=self._worker_id,
+                result_type=AgentOperationResultType.COMPOSED_CANDIDATE,
+                result_id=candidates[0].id,
+                now=now,
+            )
+            return succeeded.status
         if operation.kind is AgentOperationKind.ANALYSIS:
-            ranking_id = await self._ranking_result_id(run)
+            try:
+                ranking_id = await self._ranking_result_id(run)
+            except (AgentExecutionError, AgentEvidenceError) as error:
+                return await self._fail_claimed_operation(
+                    run,
+                    operation,
+                    error.code,
+                    now,
+                )
             succeeded = await self._operations.mark_operation_succeeded(
                 household_id=run.household_id,
                 operation_id=operation.id,
@@ -1406,6 +1556,22 @@ class AgentExecutionService:
             )
             return succeeded.status
         raise AgentExecutionError("agent_operation_kind_unsupported")
+
+    async def _fail_claimed_operation(
+        self,
+        run: AgentPlanRunRecord,
+        operation: AgentRunOperationRecord,
+        error_code: str,
+        now: datetime,
+    ) -> AgentOperationStatus:
+        failed = await self._operations.mark_operation_failed(
+            household_id=run.household_id,
+            operation_id=operation.id,
+            worker_id=self._worker_id,
+            error_code=error_code,
+            now=now,
+        )
+        return failed.status
 
     async def _advance_workflow(
         self,
@@ -1494,6 +1660,50 @@ class AgentExecutionService:
                     )
         confirmed = await self._evidence.list_confirmed_evidence(run.household_id, run.id)
         if confirmed:
+            if (
+                workflow.composition_rule_version is not None
+                and await self._materialize_split_exact(
+                    current,
+                    workflow,
+                    operations,
+                    now,
+                )
+            ):
+                await self._refresh_stage_statuses(current, now)
+                return None
+            composed = await self._composition_candidates(current, workflow, confirmed)
+            composition_operations = tuple(
+                operation
+                for operation in operations
+                if operation.kind is AgentOperationKind.COMPOSITION
+            )
+            if composed and not composition_operations:
+                await self._materialize_composition(
+                    current,
+                    confirmed,
+                    now,
+                )
+                return None
+            if composition_operations:
+                composition = composition_operations[0]
+                if (
+                    composition.status is not AgentOperationStatus.SUCCEEDED
+                    and workflow.trip_shape in {TripShape.OPEN_JAW, TripShape.MULTI_CITY}
+                ):
+                    return await self._finish_from_failures(
+                        run,
+                        operations,
+                        confirmed,
+                        now,
+                    )
+            elif workflow.trip_shape in {TripShape.OPEN_JAW, TripShape.MULTI_CITY}:
+                return await self._runs.set_status(
+                    household_id=run.household_id,
+                    run_id=run.id,
+                    status="failed",
+                    changed_at=now,
+                    error_code="agent_no_composed_route",
+                )
             ranking_operations = tuple(
                 operation
                 for operation in operations
@@ -1598,13 +1808,29 @@ class AgentExecutionService:
         failed = tuple(
             operation for operation in operations if operation.status is AgentOperationStatus.FAILED
         )
+        skipped = tuple(
+            operation
+            for operation in operations
+            if operation.status is AgentOperationStatus.SKIPPED
+        )
         if confirmed:
+            if await self._saved_ranking_result_id(run, operations) is None:
+                error_code = next(
+                    (
+                        operation.error_code
+                        for operation in (*failed, *skipped)
+                        if operation.error_code is not None
+                    ),
+                    "agent_ranking_result_missing",
+                )
+                return await self._runs.set_status(
+                    household_id=run.household_id,
+                    run_id=run.id,
+                    status="failed",
+                    changed_at=now,
+                    error_code=error_code,
+                )
             workflow = await self._workflow(run)
-            skipped = tuple(
-                operation
-                for operation in operations
-                if operation.status is AgentOperationStatus.SKIPPED
-            )
             if failed or skipped or not _expected_coverage_is_confirmed(workflow, operations):
                 return await self._runs.set_status(
                     household_id=run.household_id,
@@ -1619,11 +1845,6 @@ class AgentExecutionService:
                 status="completed",
                 changed_at=now,
             )
-        skipped = tuple(
-            operation
-            for operation in operations
-            if operation.status is AgentOperationStatus.SKIPPED
-        )
         error_code = next(
             (
                 operation.error_code
@@ -1786,7 +2007,13 @@ class AgentExecutionService:
                         "source_version": "aviasales_hot_offers-v1",
                     }
                     if signal.source_kind is DiscoverySource.HOT_OFFER
-                    else {"calendar_bucket": signal.departure_date.strftime("%Y-%m")}
+                    else {
+                        "calendar_bucket": signal.departure_date.strftime("%Y-%m"),
+                        "leg_ordinal": _non_negative_int(
+                            operation.immutable_input.get("leg_ordinal", 0),
+                            "leg_ordinal",
+                        ),
+                    }
                 ),
                 fingerprint=_evidence_fingerprint(signal.id),
                 created_at=max(now, signal.observed_at),
@@ -1811,10 +2038,49 @@ class AgentExecutionService:
                 observed_at=evidence.observed_at,
                 freshness=Freshness.LIVE,
                 passengers=evidence.passengers,
-                passenger_basis=PriceBasis.TOTAL_FOR_PASSENGERS,
+                passenger_basis=evidence.price_basis,
                 amount_minor=evidence.total_amount.minor_units,
                 currency=evidence.total_amount.currency,
-                itinerary_evidence=_confirmed_itinerary_evidence(evidence),
+                itinerary_evidence=_confirmed_itinerary_evidence(
+                    evidence,
+                    leg_ordinal=_non_negative_int(
+                        operation.immutable_input.get("leg_ordinal", 0),
+                        "leg_ordinal",
+                    ),
+                    search_role=_text(
+                        operation.immutable_input.get("search_role", "base"),
+                        "search_role",
+                    ),
+                    split_source_evidence_id=(
+                        UUID(
+                            _text(
+                                operation.immutable_input["split_source_evidence_id"],
+                                "split_source_evidence_id",
+                            )
+                        )
+                        if operation.immutable_input.get("split_source_evidence_id") is not None
+                        else None
+                    ),
+                    split_component_ordinal=(
+                        _non_negative_int(
+                            operation.immutable_input["split_component_ordinal"],
+                            "split_component_ordinal",
+                        )
+                        if operation.immutable_input.get("split_component_ordinal") is not None
+                        else None
+                    ),
+                    passenger_mix=PassengerMix(
+                        adults=_positive_int(operation.immutable_input["adults"], "adults"),
+                        children=_non_negative_int(
+                            operation.immutable_input["children"],
+                            "children",
+                        ),
+                        infants=_non_negative_int(
+                            operation.immutable_input["infants"],
+                            "infants",
+                        ),
+                    ),
+                ),
                 protection_status=evidence.protection_status,
                 baggage_status=None,
                 transfer_status=None,
@@ -1823,6 +2089,42 @@ class AgentExecutionService:
                 created_at=max(now, evidence.observed_at),
             )
         )
+
+    async def _append_booking_descriptor(
+        self,
+        run: AgentPlanRunRecord,
+        evidence: AgentConfirmedOfferEvidenceRecord,
+        descriptor: PrivateBookingActionDescriptor,
+        now: datetime,
+    ) -> None:
+        if descriptor.evidence_id != evidence.id or descriptor.provider_id != evidence.provider_id:
+            raise AgentExecutionError("agent_booking_descriptor_invalid")
+        private_json = json.dumps(
+            dict(descriptor.value),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        try:
+            await self._evidence.append_booking_action_descriptor(
+                NewAgentBookingActionDescriptor(
+                    id=_stable_uuid(
+                        run.id,
+                        0xE2,
+                        f"booking-descriptor:{evidence.id}",
+                    ),
+                    household_id=run.household_id,
+                    run_id=run.id,
+                    confirmed_evidence_id=evidence.id,
+                    provider_id=descriptor.provider_id,
+                    private_descriptor=descriptor.value,
+                    fingerprint=_fingerprint(f"booking-descriptor|{evidence.id}|{private_json}"),
+                    created_at=now,
+                    expires_at=now + _BOOKING_DESCRIPTOR_TTL,
+                )
+            )
+        except (AgentEvidenceError, TypeError, ValueError) as error:
+            raise AgentExecutionError("agent_booking_descriptor_invalid") from error
 
     async def _materialize_shortlist(
         self,
@@ -1840,14 +2142,24 @@ class AgentExecutionService:
             ),
         )
         shortlist: list[AgentDiscoverySignalRecord] = []
-        seen_date_pairs: set[tuple[date, date | None]] = set()
+        seen_bindings: set[tuple[int, str, str, date, date | None]] = set()
         for signal in ordered:
             if not _discovery_matches_workflow(signal, workflow):
                 continue
-            date_pair = (signal.departure_date, signal.return_date)
-            if date_pair in seen_date_pairs:
+            leg_ordinal = _non_negative_int(
+                signal.signal_evidence.get("leg_ordinal", 0),
+                "leg_ordinal",
+            )
+            binding = (
+                leg_ordinal,
+                signal.origin,
+                signal.destination,
+                signal.departure_date,
+                signal.return_date,
+            )
+            if binding in seen_bindings:
                 continue
-            seen_date_pairs.add(date_pair)
+            seen_bindings.add(binding)
             shortlist.append(signal)
             if len(shortlist) >= workflow.exact_limit:
                 break
@@ -1869,6 +2181,10 @@ class AgentExecutionService:
                 departure_date=signal.departure_date,
                 return_date=signal.return_date,
                 ordinal=ordinal,
+                leg_ordinal=_non_negative_int(
+                    signal.signal_evidence.get("leg_ordinal", 0),
+                    "leg_ordinal",
+                ),
                 now=now,
             )
 
@@ -1885,6 +2201,9 @@ class AgentExecutionService:
         ordinal: int,
         now: datetime,
         source_signal_id: UUID | None = None,
+        leg_ordinal: int = 0,
+        split_source_evidence_id: UUID | None = None,
+        split_component_ordinal: int | None = None,
     ) -> AgentRunOperationRecord:
         if origin is None:
             origin = workflow.origin
@@ -1896,13 +2215,31 @@ class AgentExecutionService:
             destination=destination,
             departure_date=departure_date,
             return_date=return_date,
+            leg_ordinal=leg_ordinal,
         )
+        if split_source_evidence_id is not None:
+            if split_component_ordinal not in {0, 1}:
+                raise AgentExecutionError("agent_operation_input_invalid")
+            logical_input.update(
+                {
+                    "search_role": "split_component",
+                    "split_source_evidence_id": str(split_source_evidence_id),
+                    "split_component_ordinal": split_component_ordinal,
+                }
+            )
+        elif split_component_ordinal is not None:
+            raise AgentExecutionError("agent_operation_input_invalid")
+        operation_identity = (
+            f"exact-start:{leg_ordinal}:{origin}:{destination}:{departure_date}:{return_date}"
+        )
+        if split_source_evidence_id is not None:
+            operation_identity += f":split:{split_source_evidence_id}:{split_component_ordinal}"
         return await self._scheduler.materialize(
             OperationSpec(
                 id=_stable_uuid(
                     run.id,
                     0x20 + min(ordinal, 0x1F),
-                    f"exact-start:{origin}:{destination}:{departure_date}:{return_date}",
+                    operation_identity,
                 ),
                 household_id=run.household_id,
                 run_id=run.id,
@@ -1927,6 +2264,94 @@ class AgentExecutionService:
             )
         )
 
+    async def _materialize_split_exact(
+        self,
+        run: AgentPlanRunRecord,
+        workflow: _Workflow,
+        operations: Sequence[AgentRunOperationRecord],
+        now: datetime,
+    ) -> bool:
+        planned = workflow.split_bindings
+        if not planned:
+            return False
+
+        exact_starts = tuple(
+            operation
+            for operation in operations
+            if operation.kind is AgentOperationKind.EXACT_START
+        )
+        existing: set[tuple[_ExactBinding, UUID, int]] = set()
+        for operation in exact_starts:
+            if operation.immutable_input.get("search_role", "base") != "split_component":
+                continue
+            try:
+                binding = _exact_binding_from_immutable(operation.immutable_input, workflow)
+                source_evidence_id = UUID(
+                    _text(
+                        operation.immutable_input["split_source_evidence_id"],
+                        "split_source_evidence_id",
+                    )
+                )
+                component_ordinal = _non_negative_int(
+                    operation.immutable_input["split_component_ordinal"],
+                    "split_component_ordinal",
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise AgentExecutionError("agent_operation_input_invalid") from error
+            key = (binding, source_evidence_id, component_ordinal)
+            if key in existing:
+                raise AgentExecutionError("agent_operation_input_invalid")
+            existing.add(key)
+
+        missing = tuple(
+            split
+            for split in planned
+            if (
+                split.binding,
+                split.source_evidence_id,
+                split.component_ordinal,
+            )
+            not in existing
+        )
+        if not missing:
+            return False
+        if len(exact_starts) + len(missing) > workflow.exact_limit:
+            raise AgentExecutionError("agent_operation_budget_exhausted")
+
+        stage = await self._stage(
+            run,
+            AgentPlanStageKind.EXACT_SEARCH,
+            prefix=0x02,
+            now=now,
+        )
+        base_count = len(exact_starts) - len(existing)
+        planned_ordinals = {
+            (
+                split.binding,
+                split.source_evidence_id,
+                split.component_ordinal,
+            ): base_count + ordinal
+            for ordinal, split in enumerate(planned)
+        }
+        for split in missing:
+            binding = split.binding
+            key = (binding, split.source_evidence_id, split.component_ordinal)
+            await self._materialize_exact_start(
+                run,
+                stage.id,
+                workflow,
+                origin=binding.origin,
+                destination=binding.destination,
+                departure_date=binding.departure_date,
+                return_date=binding.return_date,
+                ordinal=planned_ordinals[key],
+                leg_ordinal=binding.leg_ordinal,
+                split_source_evidence_id=split.source_evidence_id,
+                split_component_ordinal=split.component_ordinal,
+                now=now,
+            )
+        return True
+
     async def _materialize_poll(
         self,
         run: AgentPlanRunRecord,
@@ -1944,7 +2369,25 @@ class AgentExecutionService:
             destination=continuation.expected_destination,
             departure_date=continuation.expected_departure_date,
             return_date=continuation.expected_return_date,
+            leg_ordinal=_non_negative_int(
+                root.immutable_input.get("leg_ordinal", 0),
+                "leg_ordinal",
+            ),
         )
+        if root.immutable_input.get("search_role") == "split_component":
+            logical_input.update(
+                {
+                    "search_role": "split_component",
+                    "split_source_evidence_id": _text(
+                        root.immutable_input["split_source_evidence_id"],
+                        "split_source_evidence_id",
+                    ),
+                    "split_component_ordinal": _non_negative_int(
+                        root.immutable_input["split_component_ordinal"],
+                        "split_component_ordinal",
+                    ),
+                }
+            )
         private_continuation = _private_continuation(continuation, poll_round)
         continuation_digest = _private_continuation_digest(private_continuation)
         return await self._scheduler.materialize(
@@ -1983,6 +2426,275 @@ class AgentExecutionService:
                 now=now,
             )
 
+    def _confirmed_domain_evidence(
+        self,
+        workflow: _Workflow,
+        records: Sequence[AgentConfirmedOfferEvidenceRecord],
+    ) -> tuple[ConfirmedOfferEvidence, ...]:
+        passenger_mix = PassengerMix(
+            adults=workflow.adults,
+            children=workflow.children,
+            infants=workflow.infants,
+        )
+        converted: list[ConfirmedOfferEvidence] = []
+        try:
+            for record in records:
+                search_role = record.itinerary_evidence.get("search_role", "base")
+                leg_ordinal = _non_negative_int(
+                    record.itinerary_evidence.get("leg_ordinal", 0),
+                    "leg_ordinal",
+                )
+                approved_legs = (
+                    _composition_search_legs(workflow)
+                    if search_role == "split_component"
+                    else workflow.search_legs
+                )
+                search_leg = next(
+                    (leg for leg in approved_legs if leg.ordinal == leg_ordinal),
+                    None,
+                )
+                if search_leg is None:
+                    raise StoredAgentEvidenceError("confirmed evidence leg is not approved")
+                converted.append(
+                    confirmed_record_to_evidence(
+                        record,
+                        fallback_passenger_mix=passenger_mix,
+                        fallback_departure_date=search_leg.departure_date,
+                        fallback_return_date=search_leg.return_date,
+                    )
+                )
+        except (StoredAgentEvidenceError, TypeError, ValueError) as error:
+            raise AgentExecutionError("agent_confirmed_evidence_invalid") from error
+        return tuple(converted)
+
+    async def _composition_candidates(
+        self,
+        run: AgentPlanRunRecord,
+        workflow: _Workflow,
+        records: Sequence[AgentConfirmedOfferEvidenceRecord],
+    ) -> tuple[ComposedRouteCandidate, ...]:
+        evidence = self._confirmed_domain_evidence(workflow, records)
+        by_id = {record.id: item for record, item in zip(records, evidence, strict=True)}
+        composition_legs = _composition_search_legs(workflow)
+        groups_by_base_id: dict[
+            UUID,
+            frozenset[tuple[int, str, str, date]],
+        ] = {}
+        grouped: dict[
+            tuple[int, str, str, date],
+            list[ConfirmedOfferEvidence],
+        ] = {}
+        for record, item in zip(records, evidence, strict=True):
+            role = record.itinerary_evidence.get("search_role", "base")
+            if role != "base":
+                continue
+            if workflow.trip_shape is TripShape.ROUND_TRIP:
+                directions = _confirmed_directions(item)
+                if directions is None or len(directions) != 2:
+                    raise AgentExecutionError("agent_confirmed_evidence_invalid")
+                base_groups = frozenset(
+                    (
+                        ordinal,
+                        direction[0].origin,
+                        direction[-1].destination,
+                        _segment_local_date(direction[0]),
+                    )
+                    for ordinal, direction in enumerate(directions)
+                )
+            else:
+                leg_ordinal = _non_negative_int(
+                    record.itinerary_evidence.get("leg_ordinal", 0),
+                    "leg_ordinal",
+                )
+                base_groups = frozenset(
+                    {
+                        (
+                            leg_ordinal,
+                            item.origin,
+                            item.destination,
+                            item.departure_date,
+                        )
+                    }
+                )
+                grouped.setdefault(next(iter(base_groups)), []).append(item)
+            if any(
+                not _composition_group_is_approved(group, composition_legs) for group in base_groups
+            ):
+                raise AgentExecutionError("agent_confirmed_evidence_invalid")
+            groups_by_base_id[record.id] = base_groups
+        for record, item in zip(records, evidence, strict=True):
+            role = record.itinerary_evidence.get("search_role", "base")
+            if role == "base":
+                continue
+            if role != "split_component":
+                raise AgentExecutionError("agent_confirmed_evidence_invalid")
+            try:
+                source_id = UUID(
+                    _text(
+                        record.itinerary_evidence["split_source_evidence_id"],
+                        "split_source_evidence_id",
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise AgentExecutionError("agent_confirmed_evidence_invalid") from error
+            leg_ordinal = _non_negative_int(
+                record.itinerary_evidence.get("leg_ordinal", 0),
+                "leg_ordinal",
+            )
+            source_groups = groups_by_base_id.get(source_id)
+            matching_groups = (
+                ()
+                if source_groups is None
+                else tuple(group for group in source_groups if group[0] == leg_ordinal)
+            )
+            if len(matching_groups) != 1 or source_id not in by_id:
+                raise AgentExecutionError("agent_confirmed_evidence_invalid")
+            grouped.setdefault(matching_groups[0], []).append(item)
+
+        pools_by_leg: dict[int, list[LegEvidencePool]] = {
+            leg.ordinal: [] for leg in composition_legs
+        }
+        for (leg_ordinal, origin, destination, departure_date), items in sorted(
+            grouped.items(),
+            key=lambda value: value[0],
+        ):
+            search_leg = next(
+                (leg for leg in composition_legs if leg.ordinal == leg_ordinal),
+                None,
+            )
+            if (
+                search_leg is None
+                or _RoutePair(origin, destination) not in search_leg.route_pairs
+                or not (
+                    search_leg.departure_date <= departure_date <= search_leg.departure_end_date
+                )
+            ):
+                raise AgentExecutionError("agent_confirmed_evidence_invalid")
+            unique = {item.id: item for item in items}
+            pools_by_leg[leg_ordinal].append(
+                LegEvidencePool(
+                    leg=FrozenCompositionLeg(
+                        leg_ordinal,
+                        origin,
+                        destination,
+                        departure_date,
+                    ),
+                    evidence=tuple(unique[key] for key in sorted(unique, key=str)),
+                )
+            )
+        if any(not pools_by_leg[leg.ordinal] for leg in composition_legs):
+            return ()
+
+        policy = CompositionPolicy()
+        combinations = _bounded_composition_pool_combinations(
+            tuple(tuple(pools_by_leg[leg.ordinal]) for leg in composition_legs),
+            beam_width=policy.beam_width,
+        )
+        composer = RouteComposer(policy=policy)
+        candidates: dict[UUID, ComposedRouteCandidate] = {}
+        passenger_mix = PassengerMix(
+            adults=workflow.adults,
+            children=workflow.children,
+            infants=workflow.infants,
+        )
+        for pools in combinations:
+            result = composer.compose(
+                CompositionRequest(
+                    namespace=run.id,
+                    trip_shape=workflow.trip_shape,
+                    legs=pools,
+                    passenger_mix=passenger_mix,
+                    target_currency=workflow.currency,
+                )
+            )
+            for candidate in result.composed:
+                candidates[candidate.id] = candidate
+        return tuple(
+            candidates[key]
+            for key in sorted(
+                candidates,
+                key=lambda candidate_id: _composed_candidate_order(candidates[candidate_id]),
+            )
+        )
+
+    async def _materialize_composition(
+        self,
+        run: AgentPlanRunRecord,
+        confirmed: Sequence[AgentConfirmedOfferEvidenceRecord],
+        now: datetime,
+    ) -> AgentRunOperationRecord:
+        stage = await self._stage(
+            run,
+            AgentPlanStageKind.COMPOSITION,
+            prefix=0x04,
+            now=now,
+        )
+        evidence_ids = sorted((record.id for record in confirmed), key=str)
+        immutable_input = {
+            "component_evidence_ids": [str(value) for value in evidence_ids],
+            "workflow_version": "route-composer-v1",
+            "version": "task11-v1",
+        }
+        return await self._scheduler.materialize(
+            OperationSpec(
+                id=_stable_uuid(run.id, 0xE1, "composition"),
+                household_id=run.household_id,
+                run_id=run.id,
+                stage_id=stage.id,
+                provider_id=None,
+                kind=AgentOperationKind.COMPOSITION,
+                immutable_input=immutable_input,
+                logical_workflow_input=immutable_input,
+                consumes_logical_unit=False,
+                private_continuation=None,
+                max_attempts=1,
+                created_at=now,
+            )
+        )
+
+    async def _persist_composed_candidates(
+        self,
+        run: AgentPlanRunRecord,
+        operation: AgentRunOperationRecord,
+        now: datetime,
+    ) -> tuple[AgentComposedRouteCandidateRecord, ...]:
+        workflow = await self._workflow(run)
+        confirmed = await self._evidence.list_confirmed_evidence(
+            run.household_id,
+            run.id,
+        )
+        try:
+            bound_ids = tuple(
+                UUID(_text(value, "component evidence id"))
+                for value in _sequence(
+                    operation.immutable_input["component_evidence_ids"],
+                    "component_evidence_ids",
+                )
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise AgentExecutionError("agent_operation_input_invalid") from error
+        if (
+            operation.immutable_input.get("workflow_version") != "route-composer-v1"
+            or operation.immutable_input.get("version") != "task11-v1"
+            or bound_ids != tuple(sorted((record.id for record in confirmed), key=str))
+        ):
+            raise AgentExecutionError("agent_operation_input_invalid")
+        candidates = await self._composition_candidates(run, workflow, confirmed)
+        stored: list[AgentComposedRouteCandidateRecord] = []
+        for candidate in candidates:
+            stored.append(
+                await self._evidence.append_composed_candidate(
+                    new_composed_candidate(
+                        candidate,
+                        household_id=run.household_id,
+                        run_id=run.id,
+                        stage_id=operation.stage_id,
+                        created_at=max(now, candidate.observed_at),
+                    )
+                )
+            )
+        return tuple(stored)
+
     async def _materialize_ranking(
         self,
         run: AgentPlanRunRecord,
@@ -2003,12 +2715,12 @@ class AgentExecutionService:
                 provider_id=None,
                 kind=AgentOperationKind.RANKING,
                 immutable_input={
-                    "ranking_profile": "confirmed_amount",
-                    "version": "task9-v1",
+                    "ranking_profile": "typed_candidate_views",
+                    "version": "candidate-ranker-v1",
                 },
                 logical_workflow_input={
-                    "ranking_profile": "confirmed_amount",
-                    "version": "task9-v1",
+                    "ranking_profile": "typed_candidate_views",
+                    "version": "candidate-ranker-v1",
                 },
                 consumes_logical_unit=False,
                 private_continuation=None,
@@ -2048,46 +2760,77 @@ class AgentExecutionService:
             )
         )
 
-    async def _create_minimal_ranking(
+    async def _create_ranking(
         self,
         run: AgentPlanRunRecord,
         now: datetime,
     ) -> AgentRankingSnapshotRecord:
-        confirmed = await self._evidence.list_confirmed_evidence(run.household_id, run.id)
-        ordered = tuple(
-            sorted(
-                confirmed,
-                key=lambda evidence: (
-                    evidence.amount_minor if evidence.amount_minor is not None else 2**63 - 1,
-                    -evidence.observed_at.timestamp(),
-                    str(evidence.id),
-                ),
+        workflow = await self._workflow(run)
+        confirmed_records = await self._evidence.list_confirmed_evidence(
+            run.household_id,
+            run.id,
+        )
+        confirmed = self._confirmed_domain_evidence(workflow, confirmed_records)
+        confirmed_by_id = {candidate.id: candidate for candidate in confirmed}
+        composed_records = await self._evidence.list_composed_candidates(
+            run.household_id,
+            run.id,
+        )
+        try:
+            composed = tuple(
+                composed_record_to_candidate(record, confirmed_by_id) for record in composed_records
+            )
+        except StoredAgentEvidenceError as error:
+            raise AgentExecutionError("agent_composed_evidence_invalid") from error
+        rankable_confirmed = (
+            ()
+            if workflow.trip_shape in {TripShape.OPEN_JAW, TripShape.MULTI_CITY}
+            else tuple(
+                evidence
+                for record, evidence in zip(
+                    confirmed_records,
+                    confirmed,
+                    strict=True,
+                )
+                if record.itinerary_evidence.get("search_role", "base") == "base"
             )
         )
-        if not ordered:
+        candidates: tuple[
+            ConfirmedOfferEvidence | ComposedRouteCandidate,
+            ...,
+        ] = (*rankable_confirmed, *composed)
+        if not candidates:
             raise AgentExecutionError("agent_ranking_requires_confirmed_evidence")
-        ordered_ids = tuple(evidence.id for evidence in ordered)
+        snapshot = CandidateRanker().rank(
+            candidates,
+            comparison_currency=workflow.currency,
+        )
         return await self._evidence.create_ranking_snapshot(
             NewAgentRankingSnapshot(
                 id=_stable_uuid(run.id, 0xE0, "ranking-snapshot"),
                 household_id=run.household_id,
                 run_id=run.id,
-                confirmed_evidence_ids=ordered_ids,
-                composed_candidate_ids=(),
-                ranking={
-                    "version": "task9-v1",
-                    "profile": "confirmed_amount",
-                    "ordered": [str(evidence_id) for evidence_id in ordered_ids],
-                },
-                fingerprint=_fingerprint(
-                    "ranking|" + "|".join(str(evidence_id) for evidence_id in ordered_ids)
-                ),
+                confirmed_evidence_ids=snapshot.confirmed_evidence_ids,
+                composed_candidate_ids=snapshot.composed_candidate_ids,
+                ranking=ranking_snapshot_to_payload(snapshot),
+                fingerprint=f"sha256:{snapshot.fingerprint}",
                 created_at=now,
             )
         )
 
     async def _ranking_result_id(self, run: AgentPlanRunRecord) -> UUID:
         operations = await self._operations.list_operations(run.household_id, run.id)
+        result_id = await self._saved_ranking_result_id(run, operations)
+        if result_id is not None:
+            return result_id
+        raise AgentExecutionError("agent_ranking_result_missing")
+
+    async def _saved_ranking_result_id(
+        self,
+        run: AgentPlanRunRecord,
+        operations: Sequence[AgentRunOperationRecord],
+    ) -> UUID | None:
+        result_ids: list[UUID] = []
         for operation in operations:
             if (
                 operation.kind is AgentOperationKind.RANKING
@@ -2095,8 +2838,16 @@ class AgentExecutionService:
                 and operation.result_type is AgentOperationResultType.RANKING_SNAPSHOT
                 and operation.result_id is not None
             ):
-                return operation.result_id
-        raise AgentExecutionError("agent_ranking_result_missing")
+                result_ids.append(operation.result_id)
+        if len(result_ids) != 1:
+            return None
+        snapshot = await self._evidence.get_ranking_snapshot(
+            run.household_id,
+            result_ids[0],
+        )
+        if snapshot is None or snapshot.run_id != run.id:
+            return None
+        return snapshot.id
 
     async def _required_root(
         self,
@@ -2266,9 +3017,39 @@ class AgentExecutionService:
             supported_strategies = {
                 RouteStrategy.DIRECT,
                 RouteStrategy.THROUGH_TICKET,
+                RouteStrategy.SPLIT_TICKET,
+                RouteStrategy.SELF_TRANSFER,
             }
             if not set(requested_strategies) <= supported_strategies:
                 raise AgentExecutionError("agent_strategy_unsupported")
+            split_requested = bool(
+                {
+                    RouteStrategy.SPLIT_TICKET,
+                    RouteStrategy.SELF_TRANSFER,
+                }.intersection(requested_strategies)
+            )
+            composition_rule_version: str | None = None
+            max_split_hubs_per_leg = 0
+            raw_composition = plan.get("composition")
+            if split_requested:
+                composition = _mapping(raw_composition, "composition rule")
+                composition_rule_version = _text(
+                    composition["version"],
+                    "composition rule version",
+                )
+                max_split_hubs_per_leg = _positive_int(
+                    composition["max_hubs_per_leg"],
+                    "max_hubs_per_leg",
+                )
+                if (
+                    composition_rule_version != "confirmed-hubs-v1"
+                    or _text(composition["source"], "composition hub source")
+                    != "confirmed_connection_airports"
+                    or max_split_hubs_per_leg > 16
+                ):
+                    raise AgentExecutionError("agent_composition_rule_invalid")
+            elif raw_composition is not None:
+                raise AgentExecutionError("agent_composition_rule_invalid")
             analysis_modes = intent.get("analysis_modes", ())
             if isinstance(analysis_modes, (str, bytes, bytearray)) or not isinstance(
                 analysis_modes,
@@ -2280,10 +3061,18 @@ class AgentExecutionService:
                 raise AgentExecutionError("agent_analysis_unsupported")
 
             trip_shape = TripShape(_text(intent.get("trip_shape", "one_way"), "trip_shape"))
-            if trip_shape in {TripShape.OPEN_JAW, TripShape.MULTI_CITY}:
-                raise AgentExecutionError("agent_trip_shape_unsupported")
-            expected_leg_count = 1 if trip_shape is TripShape.ONE_WAY else 2
-            if len(plan_legs) != expected_leg_count or len(scope_legs) != expected_leg_count:
+            expected_leg_count = {
+                TripShape.ONE_WAY: 1,
+                TripShape.ROUND_TRIP: 2,
+                TripShape.OPEN_JAW: 2,
+            }.get(trip_shape)
+            if (
+                expected_leg_count is not None
+                and (len(plan_legs) != expected_leg_count or len(scope_legs) != expected_leg_count)
+            ) or (
+                trip_shape is TripShape.MULTI_CITY
+                and (len(plan_legs) < 2 or len(plan_legs) != len(scope_legs))
+            ):
                 raise ValueError("approved workflow leg count is invalid")
             if _text(plan["coverage"], "plan coverage") != _text(
                 scope["coverage"],
@@ -2301,9 +3090,21 @@ class AgentExecutionService:
                 != "supported"
             ):
                 raise ValueError("airport location semantics are unsupported")
-            trip_capability_key = "one_way" if trip_shape is TripShape.ONE_WAY else "round_trip"
-            if _text(capability[trip_capability_key], trip_capability_key) != "supported":
-                raise ValueError("trip shape capability is unsupported")
+            if trip_shape is TripShape.ROUND_TRIP:
+                if _text(capability["round_trip"], "round_trip") != "supported":
+                    raise ValueError("trip shape capability is unsupported")
+            else:
+                if _text(capability["one_way"], "one_way") != "supported":
+                    raise ValueError("per-leg one-way capability is unsupported")
+                if trip_shape in {TripShape.OPEN_JAW, TripShape.MULTI_CITY}:
+                    native_key = (
+                        "native_open_jaw"
+                        if trip_shape is TripShape.OPEN_JAW
+                        else "native_multi_city"
+                    )
+                    native_state = CapabilityState(_text(capability[native_key], native_key))
+                    if native_state is CapabilityState.SUPPORTED:
+                        raise AgentExecutionError("agent_native_multi_leg_gateway_unsupported")
             first_scope_leg = _mapping(scope_legs[0], "scope leg")
             first_plan_leg = _mapping(plan_legs[0], "intent leg")
             origin_codes = _finite_frozen_airport_codes(
@@ -2382,6 +3183,7 @@ class AgentExecutionService:
                 )
                 origin, destination = route_pairs[0].origin, route_pairs[0].destination
             return_date: date | None = None
+            search_legs: tuple[_SearchLeg, ...]
             if trip_shape is TripShape.ROUND_TRIP:
                 second_plan_leg = _mapping(plan_legs[1], "return intent leg")
                 second_scope_leg = _mapping(scope_legs[1], "return scope leg")
@@ -2435,6 +3237,57 @@ class AgentExecutionService:
                 ):
                     raise ValueError("round-trip return date is not approved")
                 return_date = return_scope_constraint.start_date
+                search_legs = (
+                    _SearchLeg(
+                        ordinal=0,
+                        route_pairs=route_pairs,
+                        date_mode=scope_constraint.mode.value,
+                        departure_date=departure,
+                        departure_end_date=departure_end,
+                        return_date=return_date,
+                    ),
+                )
+            elif trip_shape in {TripShape.OPEN_JAW, TripShape.MULTI_CITY}:
+                if anywhere_rule is not None:
+                    raise AgentExecutionError("agent_multi_leg_anywhere_unsupported")
+                ordered_legs = [
+                    _SearchLeg(
+                        ordinal=0,
+                        route_pairs=route_pairs,
+                        date_mode=scope_constraint.mode.value,
+                        departure_date=departure,
+                        departure_end_date=departure_end,
+                    )
+                ]
+                for leg_ordinal in range(1, len(plan_legs)):
+                    ordered_legs.append(
+                        _finite_search_leg_from_snapshots(
+                            ordinal=leg_ordinal,
+                            scope_leg=_mapping(scope_legs[leg_ordinal], "scope leg"),
+                            intent_leg=_mapping(plan_legs[leg_ordinal], "intent leg"),
+                        )
+                    )
+                if any(
+                    current.departure_date < previous.departure_date
+                    for previous, current in pairwise(ordered_legs)
+                ):
+                    raise ValueError("multi-leg dates must preserve requested order")
+                search_legs = tuple(ordered_legs)
+                route_pairs = tuple(
+                    route_pair
+                    for search_leg in search_legs
+                    for route_pair in search_leg.route_pairs
+                )
+            else:
+                search_legs = (
+                    _SearchLeg(
+                        ordinal=0,
+                        route_pairs=route_pairs,
+                        date_mode=scope_constraint.mode.value,
+                        departure_date=departure,
+                        departure_end_date=departure_end,
+                    ),
+                )
             start_attempts = _positive_int(cost.get("start_attempts", 1), "start_attempts")
             poll_rounds = _positive_int(cost.get("poll_rounds", 1), "poll_rounds")
             attempts_per_poll = _positive_int(
@@ -2452,8 +3305,9 @@ class AgentExecutionService:
                 exact_estimate * worst_case_exact_http_attempts + calendar_estimate * start_attempts
             ):
                 raise ValueError("http estimate is inconsistent")
-            approved_date_surface = (departure_end - departure).days + 1
             if anywhere_rule is not None:
+                if split_requested:
+                    raise AgentExecutionError("agent_split_anywhere_unsupported")
                 discovery_query_work = len(anywhere_rule.origins) * len(
                     anywhere_rule.discovery_source_ids
                 )
@@ -2463,15 +3317,59 @@ class AgentExecutionService:
                     or exact_estimate != anywhere_rule.exact_verification_limit
                 ):
                     raise ValueError("anywhere workflow estimates are inconsistent")
-            elif scope_constraint.mode is DateMode.EXACT:
-                if calendar_estimate != 0 or exact_estimate != len(route_pairs):
-                    raise ValueError("exact workflow estimates are inconsistent")
-            elif calendar_estimate != approved_date_surface * len(
-                route_pairs
-            ) or exact_estimate != approved_date_surface * len(route_pairs):
-                raise ValueError("calendar workflow estimates are inconsistent")
+            else:
+                expected_calendar = sum(
+                    0
+                    if search_leg.date_mode == DateMode.EXACT.value
+                    else ((search_leg.departure_end_date - search_leg.departure_date).days + 1)
+                    * len(search_leg.route_pairs)
+                    for search_leg in search_legs
+                )
+                expected_exact = sum(
+                    (
+                        1
+                        if search_leg.date_mode == DateMode.EXACT.value
+                        else (search_leg.departure_end_date - search_leg.departure_date).days + 1
+                    )
+                    * len(search_leg.route_pairs)
+                    for search_leg in search_legs
+                )
+                if split_requested:
+                    split_surface = 0
+                    for leg_ordinal in range(len(plan_legs)):
+                        split_leg = _finite_search_leg_from_snapshots(
+                            ordinal=leg_ordinal,
+                            scope_leg=_mapping(scope_legs[leg_ordinal], "scope leg"),
+                            intent_leg=_mapping(plan_legs[leg_ordinal], "intent leg"),
+                        )
+                        split_surface += len(split_leg.route_pairs) * (
+                            (split_leg.departure_end_date - split_leg.departure_date).days + 1
+                        )
+                    expected_exact += split_surface * max_split_hubs_per_leg * 2
+                if calendar_estimate != expected_calendar or exact_estimate != expected_exact:
+                    raise ValueError("per-leg workflow estimates are inconsistent")
             effective_strategies = requested_strategies or (RouteStrategy.THROUGH_TICKET,)
+            split_bindings = (
+                _split_bindings_from_confirmed_records(
+                    await self._evidence.list_confirmed_evidence(household_id, run_id),
+                    trip_shape=trip_shape,
+                    search_legs=_composition_search_legs_from_parts(
+                        trip_shape,
+                        search_legs,
+                        return_date,
+                    ),
+                    max_hubs_per_leg=max_split_hubs_per_leg,
+                    adults=adults,
+                    children=children,
+                    infants=infants,
+                    currency=currency,
+                )
+                if split_requested
+                else ()
+            )
             workflow = _Workflow(
+                trip_shape=trip_shape,
+                search_legs=search_legs,
                 origin=origin,
                 destination=destination,
                 route_pairs=route_pairs,
@@ -2494,6 +3392,9 @@ class AgentExecutionService:
                     cost.get("requests_per_minute"),
                     "requests_per_minute",
                 ),
+                composition_rule_version=composition_rule_version,
+                max_split_hubs_per_leg=max_split_hubs_per_leg,
+                split_bindings=split_bindings,
                 anywhere_rule=anywhere_rule,
                 anywhere_signals=anywhere_signals,
             )
@@ -2784,15 +3685,22 @@ def _validated_provider_outcome(
                 raise ValueError("exact poll cursor did not advance")
             if len(outcome.evidence) > _EXACT_POLL_EVIDENCE_LIMIT:
                 raise ValueError("exact poll exceeded its provider result limit")
+            validated_evidence = _validated_exact_evidence(
+                outcome.evidence,
+                run=run,
+                continuation=continuation,
+                observed_by=observed_by,
+            )
+            validated_ids = {item.id for item in validated_evidence}
             return ExactPollOutcome(
-                evidence=_validated_exact_evidence(
-                    outcome.evidence,
-                    run=run,
-                    continuation=continuation,
-                    observed_by=observed_by,
-                ),
+                evidence=validated_evidence,
                 next_cursor=outcome.next_cursor,
                 complete=outcome.complete,
+                booking_descriptors=tuple(
+                    descriptor
+                    for descriptor in outcome.booking_descriptors
+                    if descriptor.evidence_id in validated_ids
+                ),
             )
         raise TypeError("network operation returned an unsupported outcome")
     except (AgentExecutionError, OverflowError, TypeError, ValueError):
@@ -3139,10 +4047,22 @@ def _discovery_matches_workflow(
     signal: AgentDiscoverySignalRecord,
     workflow: _Workflow,
 ) -> bool:
+    try:
+        leg_ordinal = _non_negative_int(
+            signal.signal_evidence.get("leg_ordinal", 0),
+            "leg_ordinal",
+        )
+    except (TypeError, ValueError):
+        return False
+    search_leg = next(
+        (leg for leg in workflow.search_legs if leg.ordinal == leg_ordinal),
+        None,
+    )
     return (
-        _RoutePair(signal.origin, signal.destination) in workflow.route_pairs
-        and workflow.departure_date <= signal.departure_date <= workflow.departure_end_date
-        and signal.return_date == workflow.return_date
+        search_leg is not None
+        and _RoutePair(signal.origin, signal.destination) in search_leg.route_pairs
+        and search_leg.departure_date <= signal.departure_date <= search_leg.departure_end_date
+        and signal.return_date == search_leg.return_date
         and (signal.return_date is None or signal.departure_date <= signal.return_date)
         and signal.currency == workflow.currency
         and signal.passengers == 1
@@ -3157,6 +4077,7 @@ def _expected_coverage_is_confirmed(
     if workflow.anywhere_rule is not None:
         expected = {
             _ExactBinding(
+                leg_ordinal=0,
                 origin=signal.origin,
                 destination=signal.destination,
                 departure_date=signal.departure_date,
@@ -3172,18 +4093,22 @@ def _expected_coverage_is_confirmed(
     else:
         expected = {
             _ExactBinding(
+                leg_ordinal=search_leg.ordinal,
                 origin=route_pair.origin,
                 destination=route_pair.destination,
-                departure_date=workflow.departure_date + timedelta(days=offset),
-                return_date=workflow.return_date,
+                departure_date=search_leg.departure_date + timedelta(days=offset),
+                return_date=search_leg.return_date,
                 adults=workflow.adults,
                 children=workflow.children,
                 infants=workflow.infants,
                 passengers=workflow.passengers,
                 currency=workflow.currency,
             )
-            for route_pair in workflow.route_pairs
-            for offset in range((workflow.departure_end_date - workflow.departure_date).days + 1)
+            for search_leg in workflow.search_legs
+            for route_pair in search_leg.route_pairs
+            for offset in range(
+                (search_leg.departure_end_date - search_leg.departure_date).days + 1
+            )
         }
     confirmed_root_ids = {
         operation.logical_root_operation_id
@@ -3217,24 +4142,68 @@ def _evidence_allowed_by_strategy(
     return not direct_only or _confirmed_stop_count(evidence) == 0
 
 
-def _confirmed_itinerary_evidence(evidence: ConfirmedOfferEvidence) -> dict[str, object]:
+def _confirmed_itinerary_evidence(
+    evidence: ConfirmedOfferEvidence,
+    *,
+    leg_ordinal: int = 0,
+    search_role: str = "base",
+    split_source_evidence_id: UUID | None = None,
+    split_component_ordinal: int | None = None,
+    passenger_mix: PassengerMix | None = None,
+) -> dict[str, object]:
+    if search_role not in {"base", "split_component"}:
+        raise ValueError("unsupported evidence search role")
+    if search_role == "base" and (
+        split_source_evidence_id is not None or split_component_ordinal is not None
+    ):
+        raise ValueError("base evidence cannot reference a split source")
+    if search_role == "split_component" and (
+        split_source_evidence_id is None or split_component_ordinal not in {0, 1}
+    ):
+        raise ValueError("split component evidence requires source and ordinal")
+    normalized_passenger_mix = passenger_mix or evidence.passenger_mix
+    if normalized_passenger_mix is None:
+        raise ValueError("confirmed evidence passenger mix is missing")
     itinerary: dict[str, object] = {
+        "leg_ordinal": leg_ordinal,
+        "search_role": search_role,
         "origin": evidence.origin,
         "destination": evidence.destination,
+        "departure_date": evidence.departure_date.isoformat(),
+        "return_date": (
+            evidence.return_date.isoformat() if evidence.return_date is not None else None
+        ),
+        "passenger_mix": {
+            "adults": normalized_passenger_mix.adults,
+            "children": normalized_passenger_mix.children,
+            "infants": normalized_passenger_mix.infants,
+        },
+        "price_basis": evidence.price_basis.value,
         "segments": [
             {
+                "segment_ref": evidence.segment_ids[index],
                 "origin": segment.origin,
                 "destination": segment.destination,
                 "depart_at": segment.depart_at,
                 "arrive_at": segment.arrive_at,
+                "depart_at_utc": (
+                    segment.depart_at_utc.isoformat() if segment.depart_at_utc is not None else None
+                ),
+                "arrive_at_utc": (
+                    segment.arrive_at_utc.isoformat() if segment.arrive_at_utc is not None else None
+                ),
                 "carrier": segment.airline_code,
                 "flight_number": segment.flight_number,
             }
-            for segment in evidence.segments
+            for index, segment in enumerate(evidence.segments)
         ],
         "seller": evidence.seller_name,
         "ticket_structure": "provider_ticket",
     }
+    if split_source_evidence_id is not None:
+        itinerary["split_source_evidence_id"] = str(split_source_evidence_id)
+    if split_component_ordinal is not None:
+        itinerary["split_component_ordinal"] = split_component_ordinal
     stops = _confirmed_stop_count(evidence)
     if stops is not None:
         itinerary["stops"] = stops
@@ -3326,6 +4295,322 @@ def _finite_frozen_airport_codes(
     return codes
 
 
+def _finite_search_leg_from_snapshots(
+    *,
+    ordinal: int,
+    scope_leg: Mapping[str, object],
+    intent_leg: Mapping[str, object],
+) -> _SearchLeg:
+    if type(ordinal) is not int or ordinal < 0:
+        raise ValueError("search leg ordinal must be a non-negative integer")
+    if scope_leg.get("anywhere") is not None or scope_leg.get(
+        "reciprocal_anywhere_return",
+        False,
+    ):
+        raise AgentExecutionError("agent_multi_leg_anywhere_unsupported")
+    origin_codes = _finite_frozen_airport_codes(scope_leg, intent_leg, "origin")
+    destination_codes = _finite_frozen_airport_codes(scope_leg, intent_leg, "destination")
+    scope_constraint = _constraint_from_snapshot(
+        _mapping(scope_leg["date_constraint"], "date constraint")
+    )
+    intent_constraint = _constraint_from_snapshot(
+        _mapping(intent_leg["date_constraint"], "intent date constraint")
+    )
+    if scope_constraint != intent_constraint:
+        raise ValueError("intent and frozen date constraints differ")
+    departure_date, departure_end_date = _constraint_bounds(scope_constraint)
+    route_pairs = tuple(
+        _RoutePair(origin, destination)
+        for origin, destination in finite_route_pairs(origin_codes, destination_codes)
+    )
+    if not route_pairs:
+        raise ValueError("search leg must contain a valid route pair")
+    return _SearchLeg(
+        ordinal=ordinal,
+        route_pairs=route_pairs,
+        date_mode=scope_constraint.mode.value,
+        departure_date=departure_date,
+        departure_end_date=departure_end_date,
+    )
+
+
+def _composition_search_legs(workflow: _Workflow) -> tuple[_SearchLeg, ...]:
+    return _composition_search_legs_from_parts(
+        workflow.trip_shape,
+        workflow.search_legs,
+        workflow.return_date,
+    )
+
+
+def _composition_search_legs_from_parts(
+    trip_shape: TripShape,
+    search_legs: tuple[_SearchLeg, ...],
+    return_date: date | None,
+) -> tuple[_SearchLeg, ...]:
+    if trip_shape is not TripShape.ROUND_TRIP:
+        return search_legs
+    if len(search_legs) != 1 or return_date is None:
+        raise AgentExecutionError("agent_plan_snapshot_invalid")
+    native = search_legs[0]
+    outbound = _SearchLeg(
+        ordinal=0,
+        route_pairs=native.route_pairs,
+        date_mode=native.date_mode,
+        departure_date=native.departure_date,
+        departure_end_date=native.departure_end_date,
+        return_date=None,
+    )
+    inbound = _SearchLeg(
+        ordinal=1,
+        route_pairs=tuple(
+            dict.fromkeys(_RoutePair(pair.destination, pair.origin) for pair in native.route_pairs)
+        ),
+        date_mode=DateMode.EXACT.value,
+        departure_date=return_date,
+        departure_end_date=return_date,
+        return_date=None,
+    )
+    return outbound, inbound
+
+
+def _composition_group_is_approved(
+    group: tuple[int, str, str, date],
+    search_legs: Sequence[_SearchLeg],
+) -> bool:
+    leg_ordinal, origin, destination, departure_date = group
+    search_leg = next(
+        (leg for leg in search_legs if leg.ordinal == leg_ordinal),
+        None,
+    )
+    return (
+        search_leg is not None
+        and origin != destination
+        and _RoutePair(origin, destination) in search_leg.route_pairs
+        and search_leg.departure_date <= departure_date <= search_leg.departure_end_date
+    )
+
+
+def _split_bindings_from_confirmed_records(
+    records: Sequence[AgentConfirmedOfferEvidenceRecord],
+    *,
+    trip_shape: TripShape,
+    search_legs: tuple[_SearchLeg, ...],
+    max_hubs_per_leg: int,
+    adults: int,
+    children: int,
+    infants: int,
+    currency: str,
+) -> tuple[_SplitBinding, ...]:
+    if max_hubs_per_leg <= 0:
+        return ()
+    passengers = adults + children + infants
+    passenger_mix = PassengerMix(
+        adults=adults,
+        children=children,
+        infants=infants,
+    )
+    candidates: list[tuple[tuple[int, str, str, date], str, UUID, _ExactBinding, int]] = []
+    for record in records:
+        itinerary = record.itinerary_evidence
+        if itinerary.get("search_role", "base") != "base":
+            continue
+        try:
+            evidence = confirmed_record_to_evidence(
+                record,
+                fallback_passenger_mix=passenger_mix,
+            )
+            directions = _confirmed_directions(evidence)
+            if directions is None:
+                continue
+            if trip_shape is TripShape.ROUND_TRIP:
+                if len(directions) != 2:
+                    continue
+                directional = tuple(enumerate(directions))
+            else:
+                if len(directions) != 1:
+                    continue
+                directional = (
+                    (
+                        _non_negative_int(
+                            itinerary.get("leg_ordinal", 0),
+                            "leg_ordinal",
+                        ),
+                        directions[0],
+                    ),
+                )
+        except (StoredAgentEvidenceError, TypeError, ValueError):
+            continue
+        if (
+            record.passengers != passengers
+            or record.passenger_basis is not PriceBasis.TOTAL_FOR_PASSENGERS
+            or record.currency != currency
+        ):
+            continue
+        for leg_ordinal, direction in directional:
+            search_leg = next(
+                (leg for leg in search_legs if leg.ordinal == leg_ordinal),
+                None,
+            )
+            if search_leg is None or len(direction) < 2:
+                continue
+            origin = direction[0].origin
+            destination = direction[-1].destination
+            first_departure = _segment_local_date(direction[0])
+            if (
+                origin == destination
+                or _RoutePair(origin, destination) not in search_leg.route_pairs
+                or not (
+                    search_leg.departure_date <= first_departure <= search_leg.departure_end_date
+                )
+            ):
+                continue
+            for boundary in range(1, len(direction)):
+                inbound = direction[boundary - 1]
+                outbound = direction[boundary]
+                hub = inbound.destination
+                if hub != outbound.origin or hub in {origin, destination}:
+                    continue
+                second_departure = _segment_local_date(outbound)
+                first = _ExactBinding(
+                    leg_ordinal=leg_ordinal,
+                    origin=origin,
+                    destination=hub,
+                    departure_date=first_departure,
+                    return_date=None,
+                    adults=adults,
+                    children=children,
+                    infants=infants,
+                    passengers=passengers,
+                    currency=currency,
+                )
+                second = _ExactBinding(
+                    leg_ordinal=leg_ordinal,
+                    origin=hub,
+                    destination=destination,
+                    departure_date=second_departure,
+                    return_date=None,
+                    adults=adults,
+                    children=children,
+                    infants=infants,
+                    passengers=passengers,
+                    currency=currency,
+                )
+                group = (leg_ordinal, origin, destination, first_departure)
+                candidates.extend(
+                    (
+                        (group, hub, record.id, first, 0),
+                        (group, hub, record.id, second, 1),
+                    )
+                )
+
+    selected: list[_SplitBinding] = []
+    seen_hubs: dict[tuple[int, str, str, date], list[str]] = {}
+    selected_components: set[tuple[tuple[int, str, str, date], str, int]] = set()
+    seen_bindings: set[tuple[_ExactBinding, UUID, int]] = set()
+    for group, hub, source_id, binding, component_ordinal in sorted(
+        candidates,
+        key=lambda value: (
+            value[0][0],
+            value[0][1],
+            value[0][2],
+            value[0][3],
+            value[1],
+            str(value[2]),
+            value[4],
+            value[3].origin,
+            value[3].destination,
+            value[3].departure_date,
+        ),
+    ):
+        hubs = seen_hubs.setdefault(group, [])
+        if hub not in hubs:
+            if len(hubs) >= max_hubs_per_leg:
+                continue
+            hubs.append(hub)
+        component_key = (group, hub, component_ordinal)
+        if component_key in selected_components:
+            continue
+        selected_components.add(component_key)
+        identity = (binding, source_id, component_ordinal)
+        if identity in seen_bindings:
+            continue
+        seen_bindings.add(identity)
+        selected.append(
+            _SplitBinding(
+                binding=binding,
+                source_evidence_id=source_id,
+                component_ordinal=component_ordinal,
+            )
+        )
+    return tuple(selected)
+
+
+def _segment_local_date(segment: FlightSegmentSummary) -> date:
+    if not isinstance(segment, FlightSegmentSummary):
+        raise TypeError("segment must be FlightSegmentSummary")
+    raw = segment.depart_at
+    if len(raw) < 10:
+        raise ValueError("segment local departure is missing a date")
+    return date.fromisoformat(raw[:10])
+
+
+def _bounded_composition_pool_combinations(
+    pools_by_leg: tuple[tuple[LegEvidencePool, ...], ...],
+    *,
+    beam_width: int,
+) -> tuple[tuple[LegEvidencePool, ...], ...]:
+    if type(beam_width) is not int or beam_width < 1:
+        raise ValueError("composition beam width must be positive")
+    if not pools_by_leg or any(not pools for pools in pools_by_leg):
+        return ()
+    partials: list[tuple[LegEvidencePool, ...]] = []
+    for pool in sorted(pools_by_leg[0], key=_composition_pool_order)[:beam_width]:
+        partials.append((pool,))
+    for pools in pools_by_leg[1:]:
+        expanded = [
+            (*partial, pool)
+            for partial in partials
+            for pool in sorted(pools, key=_composition_pool_order)
+        ]
+        expanded.sort(key=_composition_pool_combination_order)
+        partials = expanded[:beam_width]
+    return tuple(partials)
+
+
+def _composition_pool_order(pool: LegEvidencePool) -> tuple[object, ...]:
+    cheapest = min(item.total_amount.minor_units for item in pool.evidence)
+    return (
+        cheapest,
+        pool.leg.ordinal,
+        pool.leg.origin,
+        pool.leg.destination,
+        pool.leg.departure_date,
+        tuple(sorted(str(item.id) for item in pool.evidence)),
+    )
+
+
+def _composition_pool_combination_order(
+    pools: tuple[LegEvidencePool, ...],
+) -> tuple[object, ...]:
+    return (
+        sum(min(item.total_amount.minor_units for item in pool.evidence) for pool in pools),
+        tuple(_composition_pool_order(pool) for pool in pools),
+    )
+
+
+def _composed_candidate_order(
+    candidate: ComposedRouteCandidate,
+) -> tuple[object, ...]:
+    amount = candidate.total_amount.minor_units if candidate.total_amount is not None else 2**63 - 1
+    return (
+        candidate.total_amount is None,
+        amount,
+        len(candidate.ticket_boundaries),
+        candidate.fingerprint,
+        str(candidate.id),
+    )
+
+
 def _start_params(
     immutable_input: Mapping[str, object],
     workflow: _Workflow,
@@ -3356,11 +4641,17 @@ def _calendar_params(
     )
     origin = _iata(immutable_input["origin"], "origin")
     destination = _iata(immutable_input["destination"], "destination")
+    leg_ordinal = _non_negative_int(immutable_input.get("leg_ordinal", 0), "leg_ordinal")
+    search_leg = next(
+        (leg for leg in workflow.search_legs if leg.ordinal == leg_ordinal),
+        None,
+    )
     if (
         immutable_input.get("phase") != "calendar"
-        or _RoutePair(origin, destination) not in workflow.route_pairs
-        or not workflow.departure_date <= departure_date <= workflow.departure_end_date
-        or return_date != workflow.return_date
+        or search_leg is None
+        or _RoutePair(origin, destination) not in search_leg.route_pairs
+        or not search_leg.departure_date <= departure_date <= search_leg.departure_end_date
+        or return_date != search_leg.return_date
         or _positive_int(immutable_input["passengers"], "passengers") != workflow.passengers
         or _currency(immutable_input["currency"]) != workflow.currency
     ):
@@ -3370,7 +4661,7 @@ def _calendar_params(
         destination=ProviderLocation(LocationScopeKind.AIRPORT, destination),
         depart_from=departure_date,
         depart_to=departure_date,
-        one_way=workflow.one_way,
+        one_way=return_date is None,
         currency=workflow.currency,
         adults=1,
         children=0,
@@ -3474,6 +4765,7 @@ def _exact_binding_from_immutable(
     try:
         return_raw = immutable_input.get("return_date")
         candidate = _ExactBinding(
+            leg_ordinal=_non_negative_int(immutable_input.get("leg_ordinal", 0), "leg_ordinal"),
             origin=_iata(immutable_input["origin"], "origin"),
             destination=_iata(immutable_input["destination"], "destination"),
             departure_date=date.fromisoformat(
@@ -3490,10 +4782,46 @@ def _exact_binding_from_immutable(
             passengers=_positive_int(immutable_input["passengers"], "passengers"),
             currency=_currency(immutable_input["currency"]),
         )
+        search_leg = next(
+            (leg for leg in workflow.search_legs if leg.ordinal == candidate.leg_ordinal),
+            None,
+        )
+        search_role = immutable_input.get("search_role", "base")
+        split_match = None
+        if search_role == "split_component":
+            source_evidence_id = UUID(
+                _text(
+                    immutable_input["split_source_evidence_id"],
+                    "split_source_evidence_id",
+                )
+            )
+            component_ordinal = _non_negative_int(
+                immutable_input["split_component_ordinal"],
+                "split_component_ordinal",
+            )
+            split_match = next(
+                (
+                    value
+                    for value in workflow.split_bindings
+                    if value.binding == candidate
+                    and value.source_evidence_id == source_evidence_id
+                    and value.component_ordinal == component_ordinal
+                ),
+                None,
+            )
+        base_binding = (
+            search_leg is not None
+            and _RoutePair(candidate.origin, candidate.destination) in search_leg.route_pairs
+            and search_leg.departure_date
+            <= candidate.departure_date
+            <= search_leg.departure_end_date
+            and candidate.return_date == search_leg.return_date
+            and search_role == "base"
+            and immutable_input.get("split_source_evidence_id") is None
+            and immutable_input.get("split_component_ordinal") is None
+        )
         valid = (
-            _RoutePair(candidate.origin, candidate.destination) in workflow.route_pairs
-            and workflow.departure_date <= candidate.departure_date <= workflow.departure_end_date
-            and candidate.return_date == workflow.return_date
+            (base_binding or split_match is not None)
             and candidate.adults == workflow.adults
             and candidate.children == workflow.children
             and candidate.infants == workflow.infants
@@ -3580,8 +4908,10 @@ def _exact_logical_input(
     destination: str,
     departure_date: date,
     return_date: date | None,
+    leg_ordinal: int = 0,
 ) -> dict[str, object]:
     return {
+        "leg_ordinal": leg_ordinal,
         "origin": origin,
         "destination": destination,
         "departure_date": departure_date.isoformat(),

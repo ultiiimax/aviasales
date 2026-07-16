@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 
 from flight_hunter.application.booking_actions import (
     BookingActionTokenError,
     decode_booking_ref,
+    sign_agent_booking_action_token,
     sign_booking_action_token,
+    verify_agent_booking_action_token,
     verify_booking_action_token,
 )
 
@@ -62,3 +65,24 @@ def test_booking_token_rejects_expired_token() -> None:
             secret_key="test-secret",
             now=NOW + timedelta(seconds=2),
         )
+
+
+def test_agent_booking_token_contains_only_an_opaque_descriptor_identity() -> None:
+    descriptor_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+
+    token = sign_agent_booking_action_token(
+        secret_key="test-secret",
+        descriptor_id=descriptor_id,
+        now=NOW,
+        ttl_seconds=60,
+    )
+    payload = verify_agent_booking_action_token(
+        token,
+        secret_key="test-secret",
+        now=NOW,
+    )
+
+    assert payload.descriptor_id == descriptor_id
+    assert "proposal_id" not in token
+    assert "results_url" not in token
+    assert "provider_ref" not in token

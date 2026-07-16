@@ -145,6 +145,48 @@ async def test_finite_scope_is_frozen_before_approval_and_estimate_uses_cartesia
 
 
 @pytest.mark.anyio
+async def test_split_strategy_reserves_versioned_per_leg_hub_search_budget_before_approval() -> (
+    None
+):
+    parsed = IntentParser().parse(
+        "LED → CDG",
+        preset=None,
+        selections={
+            "departure_date": "2026-09-10",
+            "requested_strategies": ["split_ticket"],
+        },
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.QUICK)
+
+    assert revision.status is PlanRevisionStatus.AWAITING_APPROVAL
+    assert revision.composition_rule is not None
+    assert revision.composition_rule.version == "confirmed-hubs-v1"
+    assert revision.composition_rule.max_hubs_per_leg == 2
+    assert revision.estimate is not None
+    assert revision.estimate.calendar_searches == 0
+    assert revision.estimate.exact_searches == 5
+
+
+@pytest.mark.anyio
+async def test_split_anywhere_stays_draft_instead_of_reserving_unbounded_hubs() -> None:
+    parsed = IntentParser().parse(
+        "LED → anywhere",
+        preset=None,
+        selections={
+            "departure_date": "2026-09-10",
+            "requested_strategies": ["self_transfer"],
+        },
+    )
+
+    revision = await _builder().build(parsed, CoverageMode.QUICK)
+
+    assert revision.status is PlanRevisionStatus.DRAFT
+    assert revision.estimate is None
+    assert tuple(item.code for item in revision.clarifications) == ("split_anywhere_unsupported",)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("date_mode", "expected_calendar", "expected_exact"),
     (

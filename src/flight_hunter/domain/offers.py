@@ -122,6 +122,8 @@ class FlightSegmentSummary:
     destination: str
     depart_at: str
     arrive_at: str
+    depart_at_utc: datetime | None = None
+    arrive_at_utc: datetime | None = None
 
     def __post_init__(self) -> None:
         origin = self.origin.upper()
@@ -133,6 +135,13 @@ class FlightSegmentSummary:
         object.__setattr__(self, "origin", origin)
         object.__setattr__(self, "destination", destination)
         object.__setattr__(self, "airline_code", self.airline_code.upper())
+        if (self.depart_at_utc is None) != (self.arrive_at_utc is None):
+            raise ValueError("segment UTC instants must be provided together")
+        if self.depart_at_utc is not None and self.arrive_at_utc is not None:
+            require_aware_datetime(self.depart_at_utc, "depart_at_utc")
+            require_aware_datetime(self.arrive_at_utc, "arrive_at_utc")
+            if self.arrive_at_utc <= self.depart_at_utc:
+                raise ValueError("segment arrival UTC instant must follow departure")
 
 
 @dataclass(frozen=True, slots=True)

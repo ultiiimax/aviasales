@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
@@ -11,13 +11,30 @@ from sqlalchemy import insert, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from flight_hunter.api.agent_routes import ERROR_STATUS, _status_for_error
-from flight_hunter.api.agent_schemas import AgentPlanSelections
+from flight_hunter.api.agent_schemas import (
+    AgentPlanSelections,
+    AgentRunResultsResponse,
+)
 from flight_hunter.application import agent_lifecycle as agent_lifecycle_module
-from flight_hunter.application.agent_lifecycle import _public_run_error
+from flight_hunter.application.agent_lifecycle import RunResultsView, _public_run_error
+from flight_hunter.application.agent_reporting import CandidateRanker, FactReportBuilder
+from flight_hunter.application.booking_actions import (
+    sign_agent_booking_action_token,
+)
+from flight_hunter.domain.agent_evidence import ConfirmedOfferEvidence, ProtectionStatus
+from flight_hunter.domain.money import Money
+from flight_hunter.domain.offers import FlightSegmentSummary, Freshness, PriceBasis
 from flight_hunter.persistence.agent_repositories import (
+    AgentEvidenceRepository,
+    AgentOperationRepository,
     AgentPlanRepository,
     AgentPlanRunRecord,
+    AgentPlanStageKind,
     AgentRunRepository,
+    AgentStageStatus,
+    NewAgentBookingActionDescriptor,
+    NewAgentConfirmedOfferEvidence,
+    NewAgentPlanStage,
 )
 from flight_hunter.persistence.models import (
     agent_plan_runs_table,
@@ -29,6 +46,7 @@ from flight_hunter.persistence.models import (
 
 class _ProviderCounter(Protocol):
     calls: int
+    booking_calls: int
 
 
 class _Harness(Protocol):
@@ -996,6 +1014,203 @@ def test_unknown_executor_error_collapses_without_exposing_internal_sentinel() -
     assert sentinel not in repr((public_code, public_message))
 
 
+def test_ready_results_schema_exposes_typed_facts_without_provider_reference() -> None:
+    observed_at = datetime(2026, 7, 16, 12, tzinfo=UTC)
+    evidence = ConfirmedOfferEvidence(
+        id=UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+        provider_id="aviasales_search",
+        provider_offer_id="PRIVATE-provider-reference",
+        origin="LED",
+        destination="CDG",
+        departure_date=date(2026, 9, 10),
+        return_date=None,
+        total_amount=Money(20_000, "RUB"),
+        passengers=1,
+        observed_at=observed_at,
+        segment_ids=("safe-segment-ref",),
+        segments=(
+            FlightSegmentSummary(
+                airline_code="FV",
+                airline_name="Fixture Air",
+                flight_number="FV100",
+                origin="LED",
+                destination="CDG",
+                depart_at="2026-09-10 10:00",
+                arrive_at="2026-09-10 12:00",
+                depart_at_utc=datetime(2026, 9, 10, 7, tzinfo=UTC),
+                arrive_at_utc=datetime(2026, 9, 10, 10, tzinfo=UTC),
+            ),
+        ),
+        protection_status=ProtectionStatus.UNKNOWN,
+    )
+    ranking = CandidateRanker().rank((evidence,), comparison_currency="RUB")
+    report = FactReportBuilder().build(ranking, (evidence,))
+
+    response = AgentRunResultsResponse.from_view(
+        RunResultsView(
+            run_id=UUID("55555555-5555-4555-8555-555555555555"),
+            state="ready",
+            evidence_available=True,
+            report=report,
+        )
+    )
+    payload = response.model_dump(mode="json", exclude_none=True)
+
+    assert payload["state"] == "ready"
+    assert payload["ranking"]["comparison_currency"] == "RUB"
+    assert payload["candidates"][0]["total_amount"] == {
+        "minor_units": 20_000,
+        "currency": "RUB",
+    }
+    assert payload["candidates"][0]["passenger_mix"] == {
+        "adults": 1,
+        "children": 0,
+        "infants": 0,
+        "total": 1,
+    }
+    assert payload["candidates"][0]["trip_shape"] == "one_way"
+    assert payload["candidates"][0]["price_basis"] == "total_for_passengers"
+    assert payload["candidates"][0]["price_comparison_status"] == "fully_priced"
+    assert payload["candidates"][0]["ordered_legs"] == [
+        {
+            "ordinal": 0,
+            "origin": "LED",
+            "destination": "CDG",
+            "departure_date": "2026-09-10",
+            "component_evidence_ids": [str(evidence.id)],
+        }
+    ]
+    assert payload["candidates"][0]["ticket_boundaries"] == [
+        {
+            "ticket_index": 0,
+            "leg_ordinals": [0],
+            "confirmed_evidence_id": str(evidence.id),
+            "segment_ids": ["safe-segment-ref"],
+            "protection_status": "unknown",
+        }
+    ]
+    assert payload["candidates"][0]["connection_assumptions"] == []
+    assert payload["candidates"][0]["unknown_costs"] == []
+    assert payload["candidates"][0]["booking_action"] == {"available": False}
+    rendered = json.dumps(payload)
+    assert "PRIVATE-provider-reference" not in rendered
+    assert "provider_offer_id" not in rendered
+
+
+@pytest.mark.anyio
+async def test_agent_booking_resolver_is_authenticated_and_household_scoped(
+    agent_api_harness: _Harness,
+) -> None:
+    plan = _create_plan(agent_api_harness).json()
+    run = _execute(agent_api_harness, plan, "booking-action-run").json()
+    now = datetime.now(UTC)
+    stage_id = UUID("66666666-6666-4666-8666-666666666660")
+    evidence_id = UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee0")
+    descriptor_id = UUID("dddddddd-dddd-4ddd-8ddd-ddddddddddd0")
+    household_id = UUID(agent_api_harness.household_id)
+    run_id = UUID(run["run_id"])
+
+    async with agent_api_harness.session_factory() as session:
+        await AgentOperationRepository(session).create_stage(
+            NewAgentPlanStage(
+                id=stage_id,
+                household_id=household_id,
+                run_id=run_id,
+                kind=AgentPlanStageKind.EXACT_SEARCH,
+                status=AgentStageStatus.COMPLETED,
+                created_at=now,
+            )
+        )
+        await AgentEvidenceRepository(session).append_confirmed_evidence(
+            NewAgentConfirmedOfferEvidence(
+                id=evidence_id,
+                household_id=household_id,
+                run_id=run_id,
+                stage_id=stage_id,
+                provider_id="aviasales_search",
+                source="exact_search",
+                observed_at=now,
+                freshness=Freshness.LIVE,
+                passengers=1,
+                passenger_basis=PriceBasis.TOTAL_FOR_PASSENGERS,
+                amount_minor=20_000,
+                currency="RUB",
+                itinerary_evidence={
+                    "origin": "LED",
+                    "destination": "CDG",
+                    "segments": [
+                        {
+                            "origin": "LED",
+                            "destination": "CDG",
+                            "depart_at": "2026-09-10 10:00",
+                            "arrive_at": "2026-09-10 12:00",
+                            "carrier": "FV",
+                            "flight_number": "FV100",
+                        }
+                    ],
+                    "ticket_structure": "provider_ticket",
+                },
+                protection_status=ProtectionStatus.UNKNOWN,
+                baggage_status=None,
+                transfer_status=None,
+                visa_status=None,
+                fingerprint="sha256:" + "e" * 64,
+                created_at=now,
+            )
+        )
+        await AgentEvidenceRepository(session).append_booking_action_descriptor(
+            NewAgentBookingActionDescriptor(
+                id=descriptor_id,
+                household_id=household_id,
+                run_id=run_id,
+                confirmed_evidence_id=evidence_id,
+                provider_id="aviasales_search",
+                private_descriptor={
+                    "provider_id": "aviasales_search",
+                    "search_id": "PRIVATE-search-id",
+                    "proposal_id": "PRIVATE-proposal-id",
+                    "results_url": "results.aviasales.ru",
+                },
+                fingerprint="sha256:" + "d" * 64,
+                created_at=now,
+                expires_at=now + timedelta(minutes=30),
+            )
+        )
+        await session.commit()
+
+    token = sign_agent_booking_action_token(
+        secret_key="agent-test-secret",
+        descriptor_id=descriptor_id,
+        now=now,
+        ttl_seconds=300,
+    )
+    path = (
+        f"/api/v1/agent/search-plans/{plan['plan_id']}/runs/{run['run_id']}/booking-actions/resolve"
+    )
+    resolved = agent_api_harness.client.post(
+        path,
+        headers=agent_api_harness.auth_headers,
+        json={"token": token},
+    )
+    other = agent_api_harness.create_second_session()
+    rejected = agent_api_harness.client.post(
+        path,
+        headers={"Authorization": f"Bearer {other['session_token']}"},
+        json={"token": token},
+    )
+
+    assert resolved.status_code == 200
+    assert resolved.json() == {
+        "status": "resolved",
+        "url": "https://tickets.example.test/opaque-purchase",
+    }
+    assert rejected.status_code == 400
+    assert rejected.json()["code"] == "agent_booking_token_invalid"
+    assert agent_api_harness.provider.booking_calls == 1
+    assert "PRIVATE-proposal-id" not in token
+    assert "results.aviasales.ru" not in token
+
+
 @pytest.mark.anyio
 async def test_openapi_exposes_the_complete_agent_plan_lifecycle_surface(
     agent_api_harness: _Harness,
@@ -1015,13 +1230,26 @@ async def test_openapi_exposes_the_complete_agent_plan_lifecycle_surface(
     }
     for path, methods in expected_methods.items():
         assert methods <= set(paths[path])
-    result_schema = agent_api_harness.client.get("/openapi.json").json()["components"]["schemas"][
-        "AgentRunResultsResponse"
-    ]
-    run_schema = agent_api_harness.client.get("/openapi.json").json()["components"]["schemas"][
-        "AgentRunResponse"
-    ]
-    assert result_schema["properties"]["state"]["const"] == "not_ready"
+    schemas = agent_api_harness.client.get("/openapi.json").json()["components"]["schemas"]
+    result_schema = schemas["AgentRunResultsResponse"]
+    run_schema = schemas["AgentRunResponse"]
+    candidate_schema = schemas["AgentCandidateFactResponse"]
+    assert set(result_schema["properties"]["state"]["enum"]) == {
+        "not_ready",
+        "ready",
+        "unavailable",
+    }
+    assert {"ranking", "candidates", "error_code"} <= set(result_schema["properties"])
+    assert {
+        "passenger_mix",
+        "trip_shape",
+        "price_basis",
+        "ordered_legs",
+        "ticket_boundaries",
+        "connection_assumptions",
+        "price_comparison_status",
+        "unknown_costs",
+    } <= set(candidate_schema["properties"])
     assert "items" not in result_schema["properties"]
     assert {
         "stage_counts",

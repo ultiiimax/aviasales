@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from uuid import UUID
@@ -31,6 +31,7 @@ from flight_hunter.providers.aviasales_search.mapper import (
     map_calendar_price_to_discovery,
     map_hot_offer_to_discovery,
     map_parsed_ticket_to_evidence,
+    private_booking_action_descriptor,
 )
 from flight_hunter.providers.aviasales_search.schemas import (
     AviasalesSearchParseError,
@@ -107,11 +108,52 @@ class ExactSearchContinuation:
         return "ExactSearchContinuation(<private>)"
 
 
+class PrivateBookingActionDescriptor:
+    __slots__ = ("_value", "evidence_id", "provider_id")
+
+    def __init__(
+        self,
+        *,
+        evidence_id: UUID,
+        provider_id: str,
+        value: Mapping[str, str],
+    ) -> None:
+        if not isinstance(evidence_id, UUID):
+            raise TypeError("evidence_id must be UUID")
+        if provider_id != "aviasales_search":
+            raise ValueError("unsupported booking descriptor provider")
+        normalized = dict(value)
+        if (
+            set(normalized)
+            != {
+                "provider_id",
+                "search_id",
+                "proposal_id",
+                "results_url",
+            }
+            or normalized.get("provider_id") != provider_id
+        ):
+            raise ValueError("booking descriptor fields are invalid")
+        if not all(isinstance(item, str) and item for item in normalized.values()):
+            raise ValueError("booking descriptor values must be non-empty strings")
+        self.evidence_id = evidence_id
+        self.provider_id = provider_id
+        self._value = normalized
+
+    @property
+    def value(self) -> Mapping[str, str]:
+        return dict(self._value)
+
+    def __repr__(self) -> str:
+        return "PrivateBookingActionDescriptor(<private>)"
+
+
 @dataclass(frozen=True, slots=True)
 class ExactPollOutcome:
     evidence: tuple[ConfirmedOfferEvidence, ...]
     next_cursor: int
     complete: bool
+    booking_descriptors: tuple[PrivateBookingActionDescriptor, ...] = ()
 
     def __post_init__(self) -> None:
         evidence = tuple(self.evidence)
@@ -121,7 +163,20 @@ class ExactPollOutcome:
             raise ValueError("next_cursor must be a non-negative integer")
         if type(self.complete) is not bool:
             raise TypeError("complete must be a boolean")
+        descriptors = tuple(self.booking_descriptors)
+        if not all(isinstance(item, PrivateBookingActionDescriptor) for item in descriptors):
+            raise TypeError(
+                "booking_descriptors must contain PrivateBookingActionDescriptor values"
+            )
+        evidence_ids = {item.id for item in evidence}
+        descriptor_ids = tuple(item.evidence_id for item in descriptors)
+        if (
+            len(set(descriptor_ids)) != len(descriptor_ids)
+            or not set(descriptor_ids) <= evidence_ids
+        ):
+            raise ValueError("booking descriptors must bind unique returned evidence")
         object.__setattr__(self, "evidence", evidence)
+        object.__setattr__(self, "booking_descriptors", descriptors)
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +365,9 @@ class AviasalesSearchGateway:
         try:
             parsed = parse_chunks([dict(chunk) for chunk in result.chunks])
             observed_at = self._clock()
+            matches = tuple(
+                ticket for ticket in parsed if _ticket_matches_continuation(ticket, continuation)
+            )
             evidence = tuple(
                 map_parsed_ticket_to_evidence(
                     ticket,
@@ -317,8 +375,19 @@ class AviasalesSearchGateway:
                     passengers=continuation.passengers,
                     evidence_namespace=continuation.evidence_namespace,
                 )
-                for ticket in parsed
-                if _ticket_matches_continuation(ticket, continuation)
+                for ticket in matches
+            )
+            booking_descriptors = tuple(
+                PrivateBookingActionDescriptor(
+                    evidence_id=item.id,
+                    provider_id="aviasales_search",
+                    value=private_booking_action_descriptor(
+                        ticket,
+                        search_id=continuation.search_id,
+                        results_url=continuation.results_url,
+                    ),
+                )
+                for ticket, item in zip(matches, evidence, strict=True)
             )
         except (AviasalesSearchParseError, TypeError, ValueError):
             raise AviasalesSearchSchemaError() from None
@@ -328,6 +397,7 @@ class AviasalesSearchGateway:
             # The verified fixture/API contract has no terminal-search field.
             # Ticket presence therefore cannot prove upstream completion.
             complete=False,
+            booking_descriptors=booking_descriptors,
         )
 
     async def calendar(
@@ -443,6 +513,42 @@ class AviasalesSearchGateway:
         except (TypeError, ValueError):
             raise AviasalesSearchSchemaError() from None
 
+    async def resolve_booking_action(
+        self,
+        descriptor: Mapping[str, object],
+        *,
+        request_fingerprint: str,
+        context: ExecutionContext = ExecutionContext.WEB_USER_ACTION,
+    ) -> str | None:
+        if not isinstance(descriptor, Mapping) or set(descriptor) != {
+            "provider_id",
+            "search_id",
+            "proposal_id",
+            "results_url",
+        }:
+            raise ValueError("booking descriptor fields are invalid")
+        if descriptor.get("provider_id") != "aviasales_search":
+            raise ValueError("booking descriptor provider is invalid")
+        search_id = _descriptor_text(descriptor.get("search_id"))
+        proposal_id = _descriptor_text(descriptor.get("proposal_id"))
+        results_url = _descriptor_text(descriptor.get("results_url"))
+        if not request_fingerprint:
+            raise ValueError("request_fingerprint is required")
+        decision = self._guard.authorize(
+            self._policy,
+            operation=ProviderOperation.BOOKING_ACTION,
+            context=context,
+            request_fingerprint=request_fingerprint,
+        )
+        if not decision.allowed:
+            raise AviasalesSearchPolicyDenied(decision.code.value)
+        return await asyncio.to_thread(
+            self._client.get_purchase_url,
+            search_id,
+            proposal_id,
+            results_url,
+        )
+
     def _require_location_capability(self, location: ProviderLocation) -> None:
         state = (
             self._capabilities.airport_location_semantics
@@ -470,6 +576,12 @@ class AviasalesSearchGateway:
         )
         if not decision.allowed:
             raise AviasalesSearchPolicyDenied(decision.code.value)
+
+
+def _descriptor_text(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError("booking descriptor value is invalid")
+    return value
 
 
 def _validated_continuation(

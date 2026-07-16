@@ -16,6 +16,7 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 
 from flight_hunter.ops.structured_logging import LOGGER_NAME
 from flight_hunter.persistence.models import (
+    agent_booking_action_descriptors_table,
     agent_composed_route_candidates_table,
     agent_confirmed_offer_evidence_table,
     agent_discovery_signals_table,
@@ -395,6 +396,7 @@ def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> N
                 "agent_confirmed_offer_evidence",
                 "agent_composed_route_candidates",
                 "agent_ranking_snapshots",
+                "agent_booking_action_descriptors",
             )
         }
         operation_indexes = {
@@ -470,6 +472,7 @@ def test_review_alembic_upgrade_head_creates_current_tables(tmp_path: Path) -> N
         "agent_confirmed_offer_evidence",
         "agent_composed_route_candidates",
         "agent_ranking_snapshots",
+        "agent_booking_action_descriptors",
     }.issubset(tables)
     assert {
         "attempts",
@@ -726,6 +729,7 @@ def test_review_fresh_core_metadata_matches_migration_head_for_agent_ledger(
         agent_confirmed_offer_evidence_table,
         agent_composed_route_candidates_table,
         agent_ranking_snapshots_table,
+        agent_booking_action_descriptors_table,
     )
 
     with sqlite3.connect(db_path) as connection:

@@ -1298,3 +1298,40 @@ agent_ranking_snapshots_table = Table(
         name="ck_agent_ranking_references",
     ),
 )
+
+
+agent_booking_action_descriptors_table = Table(
+    "agent_booking_action_descriptors",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("household_id", String(36), nullable=False, index=True),
+    Column(
+        "run_id",
+        String(36),
+        ForeignKey("agent_plan_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "confirmed_evidence_id",
+        String(36),
+        ForeignKey("agent_confirmed_offer_evidence.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    ),
+    Column("provider_id", String(80), nullable=False),
+    Column("private_descriptor_json", Text, nullable=False),
+    Column("fingerprint", String(71), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint(
+        "run_id",
+        "fingerprint",
+        name="uq_agent_booking_descriptor_fingerprint",
+    ),
+    CheckConstraint(
+        "expires_at > created_at",
+        name="ck_agent_booking_descriptor_chronology",
+    ),
+)

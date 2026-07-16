@@ -438,7 +438,12 @@ def test_poll_exact_once_returns_only_confirmed_sanitized_evidence() -> None:
     assert outcome.evidence
     assert outcome.next_cursor >= 0
     assert outcome.complete is False
-    assert set(outcome.__dataclass_fields__) == {"evidence", "next_cursor", "complete"}
+    assert set(outcome.__dataclass_fields__) == {
+        "evidence",
+        "next_cursor",
+        "complete",
+        "booking_descriptors",
+    }
     first = outcome.evidence[0]
     assert first.provider_id == "aviasales_search"
     assert first.provider_offer_id.startswith("aviasales_search:")
@@ -453,6 +458,9 @@ def test_poll_exact_once_returns_only_confirmed_sanitized_evidence() -> None:
     assert len(set(first.segment_ids)) == len(first.segment_ids)
     assert first.protection_status is ProtectionStatus.UNKNOWN
     assert first.confirmation_state is ConfirmationState.CONFIRMED
+    assert len(outcome.booking_descriptors) == 1
+    assert outcome.booking_descriptors[0].evidence_id == first.id
+    assert outcome.booking_descriptors[0].value["proposal_id"]
     public_text = repr(asdict(outcome))
     for private_value in (
         "opaque-search-state",
@@ -463,7 +471,23 @@ def test_poll_exact_once_returns_only_confirmed_sanitized_evidence() -> None:
         if private_value == first.provider_offer_id:
             continue
         assert private_value not in public_text
-    assert "booking" not in public_text.lower()
+    assert "proposal_id" not in public_text
+
+
+def test_poll_deduplicates_repeated_provider_ticket_and_private_descriptor() -> None:
+    chunk = _one_way_chunk()
+    transport = _FakeTransport(posts=[_FakeResponse(payload=[chunk, chunk])])
+
+    outcome = asyncio.run(
+        _gateway(transport).poll_exact_once(
+            _continuation(),
+            request_fingerprint="sha256:duplicate-poll",
+        )
+    )
+
+    assert len(outcome.evidence) == 1
+    assert len(outcome.booking_descriptors) == 1
+    assert outcome.booking_descriptors[0].evidence_id == outcome.evidence[0].id
 
 
 def test_ticket_bearing_poll_does_not_claim_unproven_search_completion() -> None:

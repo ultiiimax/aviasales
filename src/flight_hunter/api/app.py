@@ -1280,6 +1280,7 @@ def create_app(
             ),
             clock=lifecycle_clock,
             provider_gateway=agent_provider_gateway,
+            booking_action_secret=settings.app_secret_key,
         )
 
     app.add_exception_handler(AgentRouteError, agent_route_error_handler)
