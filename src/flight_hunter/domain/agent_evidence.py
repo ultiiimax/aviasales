@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
+from decimal import Decimal
 from enum import StrEnum
+from itertools import pairwise
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flight_hunter.domain.agent_search import TicketShape, TripShape
 from flight_hunter.domain.money import Money
@@ -51,6 +54,313 @@ class CheckedBaggageState(StrEnum):
     INCLUDED = "included"
     NOT_INCLUDED = "not_included"
     UNKNOWN = "unknown"
+
+
+class HistoryAggregationMode(StrEnum):
+    MARKET_MINIMUM = "market_minimum"
+    SAME_PRODUCT = "same_product"
+
+
+class TicketStructure(StrEnum):
+    SINGLE_TICKET = "single_ticket"
+    SPLIT_TICKET = "split_ticket"
+    SELF_TRANSFER = "self_transfer"
+    HIDDEN_CITY = "hidden_city"
+
+
+class RiskClass(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryLegKey:
+    origin: str
+    destination: str
+    date_start: date
+    date_end: date
+
+    def __post_init__(self) -> None:
+        origin, destination = _normalized_route(self.origin, self.destination)
+        if type(self.date_start) is not date or type(self.date_end) is not date:
+            raise TypeError("history leg dates must be dates")
+        if self.date_end < self.date_start:
+            raise ValueError("history leg date_end cannot precede date_start")
+        object.__setattr__(self, "origin", origin)
+        object.__setattr__(self, "destination", destination)
+
+
+@dataclass(frozen=True, slots=True)
+class StayWindow:
+    minimum_nights: int
+    maximum_nights: int
+
+    def __post_init__(self) -> None:
+        if type(self.minimum_nights) is not int or self.minimum_nights < 0:
+            raise ValueError("minimum_nights must be a non-negative integer")
+        if type(self.maximum_nights) is not int or self.maximum_nights < self.minimum_nights:
+            raise ValueError("maximum_nights must be at least minimum_nights")
+        if self.maximum_nights - self.minimum_nights > 2:
+            raise ValueError("stay window cannot exceed an approved +/-1 night band")
+
+
+@dataclass(frozen=True, slots=True)
+class BaggageKey:
+    state: CheckedBaggageState
+    pieces: int | None
+    weight_kg: Decimal | None
+
+    def __post_init__(self) -> None:
+        state = CheckedBaggageState(self.state)
+        if self.pieces is not None and (type(self.pieces) is not int or self.pieces < 0):
+            raise ValueError("baggage pieces must be a non-negative integer or None")
+        weight = self.weight_kg
+        if weight is not None:
+            if not isinstance(weight, Decimal):
+                raise TypeError("baggage weight_kg must be Decimal or None")
+            if not weight.is_finite() or weight < 0:
+                raise ValueError("baggage weight_kg must be finite and non-negative")
+        if state is CheckedBaggageState.UNKNOWN and (self.pieces is not None or weight is not None):
+            raise ValueError("unknown baggage cannot contain count or weight facts")
+        object.__setattr__(self, "state", state)
+
+
+@dataclass(frozen=True, slots=True)
+class CurrencyBasis:
+    provider_currency: str
+    comparison_currency: str
+    fx_source: str | None
+
+    def __post_init__(self) -> None:
+        provider = _normalized_currency(self.provider_currency, "provider_currency")
+        comparison = _normalized_currency(self.comparison_currency, "comparison_currency")
+        source = self.fx_source.strip() if isinstance(self.fx_source, str) else self.fx_source
+        if provider == comparison:
+            if source is not None:
+                raise ValueError("same-currency basis cannot contain fx_source")
+        elif not source:
+            raise ValueError("cross-currency basis requires fx_source")
+        object.__setattr__(self, "provider_currency", provider)
+        object.__setattr__(self, "comparison_currency", comparison)
+        object.__setattr__(self, "fx_source", source)
+
+
+@dataclass(frozen=True, slots=True)
+class ProductKey:
+    provider_id: str
+    seller_or_gate: str
+    fare_code: str
+    fare_family: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("provider_id", "seller_or_gate", "fare_code", "fare_family"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} is required")
+            object.__setattr__(self, field_name, value.strip())
+
+
+@dataclass(frozen=True, slots=True)
+class HistorySeriesKey:
+    ordered_leg_keys: tuple[HistoryLegKey, ...]
+    trip_shape: TripShape
+    stay: StayWindow | None
+    cabin: str
+    passenger_mix: PassengerMix
+    ticket_structure: TicketStructure
+    risk_class: RiskClass
+    baggage_key: BaggageKey
+    currency_basis: CurrencyBasis
+    aggregation_mode: HistoryAggregationMode
+    product_key: ProductKey | None
+
+    def __post_init__(self) -> None:
+        legs = tuple(self.ordered_leg_keys)
+        if not legs or not all(isinstance(leg, HistoryLegKey) for leg in legs):
+            raise ValueError("ordered_leg_keys must contain HistoryLegKey values")
+        trip_shape = TripShape(self.trip_shape)
+        if trip_shape is TripShape.ONE_WAY and self.stay is not None:
+            raise ValueError("one-way history cannot contain a stay window")
+        if trip_shape is not TripShape.ONE_WAY and not isinstance(self.stay, StayWindow):
+            raise ValueError("non-one-way history requires a stay window")
+        if not isinstance(self.cabin, str) or not self.cabin.strip():
+            raise ValueError("cabin is required")
+        if not isinstance(self.passenger_mix, PassengerMix):
+            raise TypeError("passenger_mix must be PassengerMix")
+        if not isinstance(self.baggage_key, BaggageKey):
+            raise TypeError("baggage_key must be BaggageKey")
+        if not isinstance(self.currency_basis, CurrencyBasis):
+            raise TypeError("currency_basis must be CurrencyBasis")
+        mode = HistoryAggregationMode(self.aggregation_mode)
+        if mode is HistoryAggregationMode.MARKET_MINIMUM and self.product_key is not None:
+            raise ValueError("market_minimum cannot contain product_key")
+        if mode is HistoryAggregationMode.SAME_PRODUCT and not isinstance(
+            self.product_key,
+            ProductKey,
+        ):
+            raise ValueError("same_product requires product_key")
+        object.__setattr__(self, "ordered_leg_keys", legs)
+        object.__setattr__(self, "trip_shape", trip_shape)
+        object.__setattr__(self, "cabin", self.cabin.strip().lower())
+        object.__setattr__(self, "ticket_structure", TicketStructure(self.ticket_structure))
+        object.__setattr__(self, "risk_class", RiskClass(self.risk_class))
+        object.__setattr__(self, "aggregation_mode", mode)
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryObservation:
+    series_hash: str
+    amount: Money
+    observed_at: datetime
+    departure_date: date
+    timezone: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.series_hash, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            self.series_hash,
+        ):
+            raise ValueError("series_hash must use the sha256: project convention")
+        _require_money(self.amount, "amount")
+        _require_aware_datetime(self.observed_at)
+        if type(self.departure_date) is not date:
+            raise TypeError("departure_date must be a date")
+        if not isinstance(self.timezone, str) or not self.timezone.strip():
+            raise ValueError("timezone is required")
+        timezone = self.timezone.strip()
+        try:
+            local_date = self.observed_at.astimezone(_timezone(timezone)).date()
+        except ZoneInfoNotFoundError:
+            raise ValueError("timezone must be a valid IANA timezone") from None
+        if self.departure_date < local_date:
+            raise ValueError("history observation cannot occur after departure")
+        object.__setattr__(self, "timezone", timezone)
+
+    @property
+    def local_observed_at(self) -> datetime:
+        return self.observed_at.astimezone(_timezone(self.timezone))
+
+    @property
+    def days_to_departure(self) -> int:
+        return (self.departure_date - self.local_observed_at.date()).days
+
+
+@dataclass(frozen=True, slots=True)
+class FlightFingerprintSegment:
+    origin: str
+    destination: str
+    carrier_code: str
+    flight_number: str
+    local_departure: datetime
+
+    def __post_init__(self) -> None:
+        origin, destination = _normalized_route(self.origin, self.destination)
+        if not isinstance(self.carrier_code, str) or not self.carrier_code.strip():
+            raise ValueError("carrier_code is required")
+        if not isinstance(self.flight_number, str) or not self.flight_number.strip():
+            raise ValueError("flight_number is required")
+        _require_aware_datetime(self.local_departure)
+        object.__setattr__(self, "origin", origin)
+        object.__setattr__(self, "destination", destination)
+        object.__setattr__(self, "carrier_code", self.carrier_code.strip().upper())
+        object.__setattr__(self, "flight_number", self.flight_number.strip().upper())
+
+
+@dataclass(frozen=True, slots=True)
+class CurrencyOfferFacts:
+    market: str
+    amount: Money
+    segments: tuple[FlightFingerprintSegment, ...]
+    cabin: str
+    seller_or_gate: str | None
+    fare_code: str | None
+    fare_family: str | None
+    baggage_key: BaggageKey | None
+    ticket_structure: TicketStructure | None
+    refund_rule: str | None
+    change_rule: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.market, str) or not self.market.strip():
+            raise ValueError("market is required")
+        _require_money(self.amount, "amount")
+        segments = tuple(self.segments)
+        if not segments or not all(
+            isinstance(segment, FlightFingerprintSegment) for segment in segments
+        ):
+            raise ValueError("segments must contain FlightFingerprintSegment values")
+        if any(previous.destination != current.origin for previous, current in pairwise(segments)):
+            raise ValueError("currency offer segments must be continuous and ordered")
+        if not isinstance(self.cabin, str) or not self.cabin.strip():
+            raise ValueError("cabin is required")
+        for field_name in (
+            "seller_or_gate",
+            "fare_code",
+            "fare_family",
+            "refund_rule",
+            "change_rule",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"{field_name} must be non-empty or None")
+                object.__setattr__(self, field_name, value.strip())
+        if self.baggage_key is not None and not isinstance(self.baggage_key, BaggageKey):
+            raise TypeError("baggage_key must be BaggageKey or None")
+        ticket_structure = (
+            None if self.ticket_structure is None else TicketStructure(self.ticket_structure)
+        )
+        object.__setattr__(self, "market", self.market.strip().upper())
+        object.__setattr__(self, "segments", segments)
+        object.__setattr__(self, "cabin", self.cabin.strip().lower())
+        object.__setattr__(self, "ticket_structure", ticket_structure)
+
+
+@dataclass(frozen=True, slots=True)
+class FxRateObservation:
+    source: str
+    base_currency: str
+    quote_currency: str
+    rate: Decimal
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ValueError("FX source is required")
+        base = _normalized_currency(self.base_currency, "base_currency")
+        quote = _normalized_currency(self.quote_currency, "quote_currency")
+        if base == quote:
+            raise ValueError("FX base and quote currencies must differ")
+        if not isinstance(self.rate, Decimal):
+            raise TypeError("FX rate must be Decimal")
+        if not self.rate.is_finite() or self.rate <= 0:
+            raise ValueError("FX rate must be finite and positive")
+        _require_aware_datetime(self.observed_at)
+        object.__setattr__(self, "source", self.source.strip())
+        object.__setattr__(self, "base_currency", base)
+        object.__setattr__(self, "quote_currency", quote)
+
+
+@dataclass(frozen=True, slots=True)
+class CardFeeAssumption:
+    percent: Decimal
+    provenance: str | None
+    effective_at: datetime | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.percent, Decimal):
+            raise TypeError("card fee percent must be Decimal")
+        if not self.percent.is_finite() or not Decimal(0) <= self.percent <= Decimal(100):
+            raise ValueError("card fee percent must be between 0 and 100")
+        provenance = self.provenance
+        if provenance is not None:
+            if not isinstance(provenance, str) or not provenance.strip():
+                raise ValueError("card fee provenance must be non-empty or None")
+            provenance = provenance.strip()
+        if self.effective_at is not None:
+            _require_aware_datetime(self.effective_at)
+        object.__setattr__(self, "provenance", provenance)
 
 
 @dataclass(frozen=True, slots=True)
@@ -490,6 +800,19 @@ def _normalized_route(origin: str, destination: str) -> tuple[str, str]:
     if not _IATA_RE.fullmatch(normalized_destination):
         raise ValueError("destination must be an IATA code")
     return normalized_origin, normalized_destination
+
+
+def _normalized_currency(value: str, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    normalized = value.upper()
+    if not _ISO_CURRENCY_RE.fullmatch(normalized):
+        raise ValueError(f"{field_name} must be an ISO 4217 alpha-3 code")
+    return normalized
+
+
+def _timezone(value: str) -> tzinfo:
+    return UTC if value == "UTC" else ZoneInfo(value)
 
 
 def _require_dates(departure_date: date, return_date: date | None) -> None:
