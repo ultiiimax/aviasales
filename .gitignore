@@ -16,6 +16,8 @@ __pycache__/
 .env.*
 !.env.example
 flight_hunter_dev.db
+flight_hunter_dev.db-shm
+flight_hunter_dev.db-wal
 backups/
 dist/
 build/
