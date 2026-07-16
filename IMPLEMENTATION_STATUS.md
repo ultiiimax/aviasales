@@ -16,7 +16,23 @@ This file is maintained by coding agents. Mark a slice done only after implement
 | Skyscanner Live | contract only | none | no | no | no | 2026-06-23 |
 | Duffel | contract only | none | no | no | no | 2026-06-23 |
 
-## Current Slice: Search-first UI redesign
+## Current Slice: Human-readable places and airlines
+
+- Goal: remove mandatory IATA knowledge from the UI, preserve city-versus-airport
+  semantics, and show factual flags, place names and airline identity.
+- Selected approach: local place directory now, provider suggest enrichment
+  through the same contract after credentials arrive.
+- Design:
+  `docs/superpowers/specs/2026-07-17-human-readable-places-and-airlines-design.md`.
+- Progress:
+  - [x] Audit the existing airport, provider and result presentation paths.
+  - [x] Confirm universal city-group versus specific-airport behavior.
+  - [x] Select the hybrid local/provider directory architecture.
+  - [ ] Review and accept the written design.
+  - [ ] Write and execute the implementation plan through TDD.
+  - [ ] Verify desktop/mobile, commit to `main` and restart locally.
+
+## Previous Slice: Search-first UI redesign
 
 - Goal: replace the all-at-once technical dashboard with one obvious flow:
   describe a trip, review the plan, run the search, compare results.
