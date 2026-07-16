@@ -1472,19 +1472,27 @@ git commit -m "feat: compose and rank confirmed routes"
 - Modify: `src/flight_hunter/application/agent_planning.py`
 - Modify: `src/flight_hunter/application/agent_lifecycle.py`
 - Modify: `src/flight_hunter/application/agent_execution.py`
+- Modify: `src/flight_hunter/application/agent_result_records.py`
+- Modify: `src/flight_hunter/providers/aviasales_search/mapper.py`
 - Modify: `src/flight_hunter/api/agent_schemas.py`
 - Modify: `src/flight_hunter/api/web.py`
+- Modify: `src/flight_hunter/persistence/agent_repositories.py`
+- Modify: `src/flight_hunter/persistence/models.py`
+- Create: `migrations/versions/0027_agent_hidden_city_research.py`
 - Create: `tests/unit/application/test_agent_hidden_city.py`
+- Modify: `tests/unit/application/test_agent_execution.py`
+- Create: `tests/unit/application/test_agent_result_records.py`
 - Modify: `tests/unit/application/test_agent_lifecycle.py`
 - Modify: `tests/unit/api/test_agent_plan_api.py`
 - Modify: `tests/unit/api/test_web_ui.py`
+- Modify: `tests/unit/providers/aviasales_search/test_mapper.py`
 
 **Interfaces:**
 - Produces hidden-city research candidates in a separate result section.
 - Requires exact `HIDDEN_CITY_WARNING_VERSION` acknowledgement bound to revision.
 - Disables booking action and watch creation.
 
-- [ ] **Step 1: Write failing eligibility and approval tests**
+- [x] **Step 1: Write failing eligibility and approval tests**
 
 Prove:
 
@@ -1500,7 +1508,7 @@ Prove:
 - hidden-city candidates never enter normal ranking or watches;
 - cancellation/contract/baggage warnings render before approval.
 
-- [ ] **Step 2: Run focused tests and confirm missing isolation**
+- [x] **Step 2: Run focused tests and confirm missing isolation**
 
 ```powershell
 uv run pytest tests/unit/application/test_agent_hidden_city.py tests/unit/application/test_agent_lifecycle.py tests/unit/api/test_agent_plan_api.py tests/unit/api/test_web_ui.py -q
@@ -1508,7 +1516,7 @@ uv run pytest tests/unit/application/test_agent_hidden_city.py tests/unit/applic
 
 Expected: failures for missing warning gate and hidden-city service.
 
-- [ ] **Step 3: Implement strict eligibility**
+- [x] **Step 3: Implement strict eligibility**
 
 ```python
 def classify_hidden_city(
@@ -1529,11 +1537,11 @@ def classify_hidden_city(
     return HiddenCityDecision.eligible()
 ```
 
-- [ ] **Step 4: Bind the second approval and isolate output**
+- [x] **Step 4: Bind the second approval and isolate output**
 
 Store warning version in `PlanExecutionApproval`. Changing hidden-city strategy creates a successor revision and invalidates old approval. The executor uses a distinct operation kind and candidate risk class. API serializers force booking/watch actions off.
 
-- [ ] **Step 5: Verify hidden-city flow**
+- [x] **Step 5: Verify hidden-city flow**
 
 ```powershell
 uv run pytest tests/unit/application/test_agent_hidden_city.py tests/unit/application/test_agent_lifecycle.py tests/unit/api/test_agent_plan_api.py tests/unit/api/test_web_ui.py -q
@@ -1542,12 +1550,18 @@ uv run mypy src/flight_hunter/application/agent_hidden_city.py
 
 Expected: all hidden-city safety and isolation tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add src/flight_hunter/application/agent_hidden_city.py src/flight_hunter/domain/agent_search.py src/flight_hunter/domain/agent_evidence.py src/flight_hunter/application/agent_planning.py src/flight_hunter/application/agent_lifecycle.py src/flight_hunter/application/agent_execution.py src/flight_hunter/api/agent_schemas.py src/flight_hunter/api/web.py tests/unit/application/test_agent_hidden_city.py tests/unit/application/test_agent_lifecycle.py tests/unit/api/test_agent_plan_api.py tests/unit/api/test_web_ui.py
 git commit -m "feat: gate hidden city research"
 ```
+
+Accepted on 2026-07-16 at `cabeeeb`. Independent review returned `ACCEPT`
+with zero Critical, Important or Minor findings. The fresh full release check
+passes 1,445 tests, Ruff format/lint, mypy over 122 source files, migrations,
+pre-v1 upgrade, security with zero findings, Compose validation and health.
+No live provider call or user database access was performed.
 
 ---
 

@@ -45,7 +45,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
     (Task 10 accepted at `39fcf60`; status acceptance at `db7798a`).
   - [x] Compose and rank split, self-transfer, open-jaw and multi-city routes
     (Task 11 accepted at `ce4231a`).
-  - [ ] Isolate hidden-city research behind a second acknowledgement.
+  - [x] Isolate hidden-city research behind a second acknowledgement.
   - [ ] Add evidence-gated buy timing, anomaly and currency analysis.
   - [ ] Pass browser, recovery, migration, security and release gates.
 
@@ -117,8 +117,8 @@ cancellation/deadline zero-I/O, retry/circuit behavior and household/private
 continuation isolation fixture-only before marking the slice complete. The
 existing forward migration `0024_agent_execution_ledger` is sufficient. The
 slice was accepted on 2026-07-15; Task 10 coverage breadth and Task 11
-composition are now accepted. Task 12 hidden-city isolation is the active
-release slice.
+composition and Task 12 hidden-city isolation are now accepted. Task 13
+evidence-gated analysis is the next release slice.
 
 Task 9 implementation on 2026-07-15 is accepted by independent review. The
 dedicated agent worker now
@@ -228,7 +228,45 @@ private descriptor table present. Independent read-only review returned
 optional future recomputation of the composed fingerprint/UUID. The exact
 post-review regression set passes 24 tests and `git diff --check` is clean.
 Implementation is committed at `ce4231a`. No live provider call or user database
-access was performed; Task 12 hidden-city isolation is now active.
+access was performed; Task 12 hidden-city isolation is now accepted.
+
+Task 12 accepted slice plan/result: add a pure typed hidden-city eligibility boundary,
+then bind the current warning acknowledgement to the exact revision, execute
+bounded onward-destination research only for the final eligible one-way plan
+leg, and keep qualifying candidates outside normal rankings. Hidden-city output
+will be research-only when checked baggage is unknown, rejected when checked
+baggage is known included, and will expose neither booking nor watch actions.
+The existing generic approval snapshot can store the warning version; execution
+requires a distinct durable operation kind and therefore extends the Task 12
+file map to the operation repository and its contract tests. All provider work
+remains fixture-only during implementation.
+
+Task 12 accepted result on 2026-07-16: hidden-city now freezes a bounded
+onward-destination rule only for the final finite one-way leg, requires the
+exact `hidden-city-v1` acknowledgement bound to the immutable revision, and
+runs provider discovery through the distinct durable
+`hidden_city_discovery` operation introduced by migration
+`0027_agent_hidden_city_research`. Exact ticket evidence is classified from
+typed ticket shape, segment continuity and checked-baggage state. Known
+checked baggage is rejected; unknown baggage remains
+`research_only_not_actionable`. Accepted candidates are stored with
+`search_role=hidden_city`, excluded from normal composition/ranking, never
+receive booking descriptors, expose no watch action, and render in a separate
+reload-safe web/API section with source, `LIVE` freshness and `observed_at`.
+Legacy pre-Task-12 evidence with `baggage_status=NULL` remains readable as
+`UNKNOWN`, while new hidden evidence fails closed unless live baggage facts
+are explicit and consistent. Aviasales `baggage_count` now maps conservatively:
+positive is included, zero is not included, missing or negative is unknown.
+The post-review Task 12 regression set passes 321 tests; the full executor
+passes 155, persistence/migration passes 250, and integration passes 4.
+Independent read-only review returned `ACCEPT` with zero Critical, Important
+or Minor findings. The fresh full release check passes 1,445 tests with 7
+deselected and 11 warnings, Ruff format/lint over 298 files, mypy over 122
+source files, 12 migration tests, the pre-v1 upgrade test, security with zero
+findings, Compose validation and health tests. The browser stage was
+intentionally skipped because no browser runtime was requested. Implementation
+is committed at `cabeeeb`. No live provider call or user database access was
+performed.
 
 Task 2 slice plan/result: add a forward-only airport provenance migration,
 package checksummed ISO/CLDR country and region taxonomies, freeze deterministic
