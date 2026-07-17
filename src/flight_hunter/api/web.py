@@ -567,6 +567,76 @@ def render_index_html() -> str:
       margin-bottom: 8px;
     }
 
+    .carrier-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .result-row > .carrier-strip {
+      grid-column: 1 / -1;
+    }
+
+    .carrier-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .carrier-mark {
+      position: relative;
+      display: grid;
+      flex: 0 0 30px;
+      width: 30px;
+      height: 30px;
+      place-items: center;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      background: var(--surface-soft);
+    }
+
+    .carrier-monogram {
+      color: var(--ink);
+      font-size: 10px;
+      line-height: 1;
+    }
+
+    .carrier-logo {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: var(--surface);
+      opacity: 0;
+    }
+
+    .carrier-logo.carrier-logo-loaded {
+      opacity: 1;
+    }
+
+    .carrier-logo-failed .carrier-monogram {
+      color: var(--danger);
+    }
+
+    .carrier-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .carrier-overflow {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 760;
+    }
+
     .result-actions,
     .confirmation-actions {
       display: flex;
@@ -2065,6 +2135,8 @@ def render_index_html() -> str:
   </main>
 
   <script>
+    const carrierCodePattern = /^[A-Z0-9]{2}$/;
+    const carrierLogoOrigin = "https://pics.avs.io/80/80/";
     const providersList = document.querySelector("#providers-list");
     const resultsList = document.querySelector("#results-list");
     const confirmationList = document.querySelector("#confirmation-list");
@@ -3816,6 +3888,77 @@ def render_index_html() -> str:
       });
     }
 
+    function appendCarrierStrip(container, segments) {
+      const segmentFacts = Array.isArray(segments) ? segments : [];
+      if (segmentFacts.length === 0) return;
+
+      const seen = new Set();
+      const carriers = [];
+      segmentFacts.forEach((segment) => {
+        const code = text(segment?.airline_code).toUpperCase();
+        const safeCode = carrierCodePattern.test(code) ? code : "";
+        const name = text(segment?.airline_name);
+        const identityKeys = [];
+        if (safeCode) identityKeys.push(`code:${safeCode}`);
+        if (name) identityKeys.push(`name:${name.toLocaleLowerCase("ru-RU")}`);
+        if (identityKeys.length === 0) identityKeys.push("unknown");
+        if (identityKeys.some((identity) => seen.has(identity))) return;
+        identityKeys.forEach((identity) => seen.add(identity));
+        carriers.push({code: safeCode, name});
+      });
+
+      const strip = document.createElement("div");
+      strip.className = "carrier-strip";
+      carriers.slice(0, 3).forEach((carrier) => {
+        const chip = document.createElement("span");
+        chip.className = "carrier-chip";
+        const mark = document.createElement("span");
+        mark.className = "carrier-mark";
+        const monogram = document.createElement("span");
+        monogram.className = "carrier-monogram";
+        monogram.textContent = carrier.code || carrier.name
+          .split(/\\s+/)
+          .filter(Boolean)
+          .slice(0, 2)
+          .map((part) => part[0])
+          .join("")
+          .toUpperCase() || "?";
+        mark.append(monogram);
+
+        if (carrier.code) {
+          const image = document.createElement("img");
+          image.className = "carrier-logo";
+          image.alt = "";
+          image.loading = "lazy";
+          image.decoding = "async";
+          image.addEventListener("load", () => {
+            image.classList.add("carrier-logo-loaded");
+          }, {once: true});
+          image.addEventListener("error", () => {
+            chip.classList.add("carrier-logo-failed");
+            image.removeAttribute("src");
+            image.hidden = true;
+          }, {once: true});
+          image.src = `${carrierLogoOrigin}${encodeURIComponent(carrier.code)}.png`;
+          mark.append(image);
+        }
+
+        const label = document.createElement("span");
+        label.className = "carrier-label";
+        label.textContent = carrier.name || carrier.code || "Авиакомпания не указана";
+        chip.append(mark, label);
+        strip.append(chip);
+      });
+
+      if (carriers.length > 3) {
+        const overflow = document.createElement("span");
+        overflow.className = "carrier-overflow";
+        overflow.textContent = `+${carriers.length - 3}`;
+        strip.append(overflow);
+      }
+      container.append(strip);
+    }
+
     function renderResults(body) {
       const offers = body.priced_offers || body.offers || [];
       const externalLinks = body.external_links || [];
@@ -3887,6 +4030,9 @@ def render_index_html() -> str:
         row.querySelector(".risk-detail").textContent = riskExplanationText(offer);
         row.querySelector(".live-check-button").addEventListener("click", () => runLiveCheck());
         appendManualConfirmationActions(row.querySelector(".result-actions"), pricedOfferTarget(offer));
+        if ((offer.segments || []).length > 0) {
+          appendCarrierStrip(row, offer.segments);
+        }
         resultsList.append(row);
       });
 
@@ -4677,7 +4823,11 @@ def render_index_html() -> str:
           .flatMap((ranking) => ranking.reasons || []);
         reasons.textContent = rankingReasons.join(" · ")
           || "Ранжирование выполнено по подтверждённым фактам.";
-        card.append(title, facts, route, boundaries, reasons);
+        card.append(title);
+        if ((candidate.segments || []).length > 0) {
+          appendCarrierStrip(card, candidate.segments);
+        }
+        card.append(facts, route, boundaries, reasons);
         list.append(card);
       });
     }
@@ -4706,6 +4856,10 @@ def render_index_html() -> str:
       candidates.forEach((candidate) => {
         const card = document.createElement("article");
         card.className = "agent-hidden-city-result";
+        const hiddenCitySegments = [
+          ...(candidate.flown_segments || []),
+          ...(candidate.skipped_segments || [])
+        ];
         const title = document.createElement("strong");
         const desiredPlace = cachedPlaceOption({kind: "airport", code: candidate.desired_airport})
           || {kind: "airport", code: candidate.desired_airport};
@@ -4756,7 +4910,11 @@ def render_index_html() -> str:
         actions.textContent = actionsDisabled
           ? "Покупка и отслеживание отключены для hidden-city результата."
           : "Действия заблокированы: некорректный контракт результата.";
-        card.append(title, facts, route, warnings, actions);
+        card.append(title);
+        if (hiddenCitySegments.length > 0) {
+          appendCarrierStrip(card, hiddenCitySegments);
+        }
+        card.append(facts, route, warnings, actions);
         list.append(card);
       });
     }

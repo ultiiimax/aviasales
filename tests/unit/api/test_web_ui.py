@@ -120,6 +120,36 @@ def test_routes_use_shared_typed_place_lookup_and_honest_human_labels() -> None:
         assert "textContent" in renderer
 
 
+def test_carrier_logo_uses_fixed_origin_and_one_shot_fallback() -> None:
+    html = TestClient(create_app()).get("/").text
+
+    carrier_strip = _javascript_sync_function(html, "appendCarrierStrip")
+    priced_offers = _javascript_sync_function(html, "renderResults")
+    confirmed = _javascript_sync_function(html, "renderAgentConfirmedResults")
+    agent_results = _javascript_sync_function(html, "renderAgentRunResults")
+
+    assert "const carrierCodePattern = /^[A-Z0-9]{2}$/;" in html
+    assert 'const carrierLogoOrigin = "https://pics.avs.io/80/80/";' in html
+    assert "carrierCodePattern.test(code)" in carrier_strip
+    assert "`${carrierLogoOrigin}${encodeURIComponent(carrier.code)}.png`" in carrier_strip
+    assert "slice(0, 3)" in carrier_strip
+    assert "carrier-logo-failed" in carrier_strip
+    assert 'image.removeAttribute("src")' in carrier_strip
+    assert "image.hidden = true" in carrier_strip
+    assert "{once: true}" in carrier_strip
+    assert 'image.loading = "lazy"' in carrier_strip
+    assert "monogram" in carrier_strip
+    assert "Авиакомпания не указана" in carrier_strip
+    assert "airline_name" in carrier_strip
+    assert "label.textContent" in carrier_strip
+    assert "innerHTML" not in carrier_strip
+    assert "appendCarrierStrip(row, offer.segments)" in priced_offers
+    assert "appendCarrierStrip(card, candidate.segments)" in confirmed
+    assert "candidate.flown_segments" in agent_results
+    assert "candidate.skipped_segments" in agent_results
+    assert "appendCarrierStrip(card, hiddenCitySegments)" in agent_results
+
+
 def test_web_ui_contains_readable_russian_without_mojibake() -> None:
     response = TestClient(create_app()).get("/")
 
