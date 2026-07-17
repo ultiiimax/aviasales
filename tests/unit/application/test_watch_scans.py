@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import fields
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import cast
 from uuid import UUID
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from flight_hunter.application.watch_scans import WatchScanService
+from flight_hunter.application.watch_scans import (
+    WatchScanService,
+    _intent_from_watch,
+    _scan_idempotency_key,
+)
 from flight_hunter.domain.money import Money
 from flight_hunter.domain.offers import FlightOffer, Freshness, SearchIntent
+from flight_hunter.domain.places import PlaceKind
 from flight_hunter.domain.policy import DataKind, ExecutionContext, ProviderPolicy
 from flight_hunter.notifications.alerts import AlertEvaluator
 from flight_hunter.persistence.models import mapper_registry
@@ -19,6 +27,7 @@ from flight_hunter.persistence.repositories import (
     NewWatch,
     PriceSnapshotRepository,
     SourceHealthEventRepository,
+    WatchRecord,
     WatchScanJobRepository,
 )
 from flight_hunter.providers.fake import FakeFlightProvider
@@ -27,6 +36,82 @@ HOUSEHOLD_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 USER_ID = UUID("11111111-1111-1111-1111-111111111111")
 WATCH_ID = UUID("22222222-2222-2222-2222-222222222222")
 NOW = datetime(2026, 6, 29, 12, 0, tzinfo=UTC)
+
+
+def test_watch_record_carries_frozen_route_snapshot_fields() -> None:
+    field_names = {field.name for field in fields(WatchRecord)}
+
+    assert {
+        "origin_kind",
+        "destination_kind",
+        "origin_airport_codes",
+        "destination_airport_codes",
+        "directory_version",
+        "origin_membership_version",
+        "destination_membership_version",
+    } <= field_names
+
+
+def test_watch_scan_intent_restores_airport_kind_and_frozen_snapshot() -> None:
+    watch = cast(
+        WatchRecord,
+        SimpleNamespace(
+            origin="DME",
+            destination="PAR",
+            departure_date="2026-10-12",
+            return_date=None,
+            passengers=1,
+            currency="RUB",
+            origin_kind=PlaceKind.AIRPORT,
+            destination_kind=PlaceKind.CITY,
+            origin_airport_codes=("DME",),
+            destination_airport_codes=("BVA", "CDG", "ORY"),
+            directory_version="directory-v1",
+            origin_membership_version="airport-dme-v1",
+            destination_membership_version="par-2026-07-17",
+        ),
+    )
+
+    intent = _intent_from_watch(watch)
+
+    assert intent.origin_kind is PlaceKind.AIRPORT
+    assert intent.destination_kind is PlaceKind.CITY
+    assert intent.origin_airport_codes == ("DME",)
+    assert intent.destination_airport_codes == ("BVA", "CDG", "ORY")
+    assert intent.directory_version == "directory-v1"
+    assert intent.origin_membership_version == "airport-dme-v1"
+    assert intent.destination_membership_version == "par-2026-07-17"
+
+
+def test_watch_scan_idempotency_key_includes_frozen_route_snapshot() -> None:
+    baseline = cast(
+        WatchRecord,
+        SimpleNamespace(
+            id=WATCH_ID,
+            next_eligible_at=NOW,
+            origin="MOW",
+            destination="PAR",
+            origin_kind=PlaceKind.CITY,
+            destination_kind=PlaceKind.CITY,
+            origin_airport_codes=("DME", "SVO", "VKO", "ZIA"),
+            destination_airport_codes=("BVA", "CDG", "ORY"),
+            directory_version="directory-v1",
+            origin_membership_version="mow-v1",
+            destination_membership_version="par-v1",
+        ),
+    )
+    changed_membership = cast(
+        WatchRecord,
+        SimpleNamespace(
+            **{
+                **vars(baseline),
+                "origin_airport_codes": ("DME", "SVO", "VKO"),
+                "origin_membership_version": "mow-v2",
+            }
+        ),
+    )
+
+    assert _scan_idempotency_key(baseline) != _scan_idempotency_key(changed_membership)
 
 
 @pytest.mark.anyio

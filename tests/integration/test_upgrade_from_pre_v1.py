@@ -146,6 +146,31 @@ def test_review_upgrade_from_immediate_pre_v1_preserves_local_data(tmp_path: Pat
             "a" * 64
         )
         assert connection.execute(text("SELECT destination FROM watches")).scalar_one() == "LED"
+        watch_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(watches)"))}
+        assert {
+            "origin_kind",
+            "destination_kind",
+            "origin_airport_codes_json",
+            "destination_airport_codes_json",
+            "directory_version",
+            "origin_membership_version",
+            "destination_membership_version",
+        }.issubset(watch_columns)
+        assert connection.execute(
+            text(
+                "SELECT origin_kind, destination_kind, origin_airport_codes_json, "
+                "destination_airport_codes_json, directory_version, "
+                "origin_membership_version, destination_membership_version FROM watches"
+            )
+        ).one() == (
+            "city",
+            "city",
+            "[]",
+            "[]",
+            "legacy-provider-city-v1",
+            None,
+            None,
+        )
         assert (
             connection.execute(text("SELECT status FROM browser_observation_jobs")).scalar_one()
             == "queued"

@@ -13,6 +13,7 @@ from flight_hunter.domain.offers import Freshness
 from flight_hunter.persistence.models import mapper_registry
 from flight_hunter.persistence.repositories import (
     AuditEventRepository,
+    HouseholdWatchRepository,
     NewPriceSnapshot,
     PriceSnapshotRepository,
 )
@@ -51,7 +52,7 @@ async def test_create_watch_and_list_only_same_household() -> None:
     created_b = client.post(
         "/api/v1/watches",
         headers=_headers(HOUSEHOLD_B, USER_B),
-        json=_watch_payload(origin="WAW", destination="NRT"),
+        json=_watch_payload(origin="WAW", destination="CDG"),
     )
     list_a = client.get("/api/v1/watches", headers=_headers(HOUSEHOLD_A, USER_A))
 
@@ -66,6 +67,45 @@ async def test_create_watch_and_list_only_same_household() -> None:
     assert created_a.json()["version"] == 1
     assert created_a.json()["updated_at"] == created_a.json()["created_at"]
     assert [item["destination"] for item in list_a.json()["watches"]] == ["BCN"]
+
+
+@pytest.mark.anyio
+async def test_create_watch_resolves_and_restores_frozen_route_snapshots() -> None:
+    session_factory = await _session_factory()
+    client = TestClient(create_app(watch_session_factory=session_factory))
+
+    response = client.post(
+        "/api/v1/watches",
+        headers=_headers(HOUSEHOLD_A, USER_A),
+        json={
+            **_watch_payload(origin="MOW", destination="DME"),
+            "origin_kind": "city",
+            "destination_kind": "airport",
+        },
+    )
+
+    assert response.status_code == 201
+    async with session_factory() as session:
+        restored = await HouseholdWatchRepository(session).get_watch(
+            UUID(HOUSEHOLD_A),
+            UUID(response.json()["id"]),
+        )
+
+    assert restored is not None
+    assert restored.origin_kind.value == "city"
+    assert restored.destination_kind.value == "airport"
+    assert restored.origin_airport_codes == ("DME", "SVO", "VKO", "ZIA")
+    assert restored.destination_airport_codes == ("DME",)
+    assert restored.directory_version != "legacy-provider-city-v1"
+    assert restored.origin_membership_version == "mow-2026-07-17"
+    assert restored.destination_membership_version == "airport-self-v1"
+    assert response.json()["origin_kind"] == "city"
+    assert response.json()["destination_kind"] == "airport"
+    assert response.json()["origin_airport_codes"] == ["DME", "SVO", "VKO", "ZIA"]
+    assert response.json()["destination_airport_codes"] == ["DME"]
+    assert response.json()["directory_version"] == restored.directory_version
+    assert response.json()["origin_membership_version"] == "mow-2026-07-17"
+    assert response.json()["destination_membership_version"] == "airport-self-v1"
 
 
 @pytest.mark.anyio
@@ -120,7 +160,7 @@ async def test_patch_watch_uses_version_and_preserves_household_isolation() -> N
         headers=_headers(HOUSEHOLD_A, USER_A),
         json={
             "expected_version": 1,
-            "destination": "nrt",
+            "destination": "cdg",
             "return_date": None,
             "enabled": False,
             "allowed_provider_ids": ["fake", "aviasales_search"],
@@ -138,7 +178,7 @@ async def test_patch_watch_uses_version_and_preserves_household_isolation() -> N
     )
 
     assert updated.status_code == 200
-    assert updated.json()["destination"] == "NRT"
+    assert updated.json()["destination"] == "CDG"
     assert updated.json()["return_date"] is None
     assert updated.json()["enabled"] is False
     assert updated.json()["allowed_provider_ids"] == ["fake", "aviasales_search"]
@@ -151,6 +191,70 @@ async def test_patch_watch_uses_version_and_preserves_household_isolation() -> N
     }
     assert hidden.status_code == 404
     assert hidden.json()["code"] == "watch_not_found"
+
+
+@pytest.mark.anyio
+async def test_patch_watch_re_resolves_changed_end_and_retains_unchanged_snapshot() -> None:
+    session_factory = await _session_factory()
+    client = TestClient(create_app(watch_session_factory=session_factory))
+    created = client.post(
+        "/api/v1/watches",
+        headers=_headers(HOUSEHOLD_A, USER_A),
+        json={
+            **_watch_payload(origin="MOW", destination="DME"),
+            "origin_kind": "city",
+            "destination_kind": "airport",
+        },
+    )
+    original = created.json()
+
+    updated = client.patch(
+        f"/api/v1/watches/{original['id']}",
+        headers=_headers(HOUSEHOLD_A, USER_A),
+        json={
+            "expected_version": 1,
+            "destination": "PAR",
+            "destination_kind": "city",
+        },
+    )
+
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["origin"] == "MOW"
+    assert body["origin_kind"] == original["origin_kind"] == "city"
+    assert body["origin_airport_codes"] == original["origin_airport_codes"]
+    assert body["origin_membership_version"] == original["origin_membership_version"]
+    assert body["destination"] == "PAR"
+    assert body["destination_kind"] == "city"
+    assert body["destination_airport_codes"] == ["BVA", "CDG", "ORY"]
+    assert body["destination_membership_version"] == "par-2026-07-17"
+    assert body["directory_version"] == original["directory_version"]
+
+
+@pytest.mark.anyio
+async def test_patch_watch_resolves_legacy_kind_for_changed_code() -> None:
+    client = TestClient(create_app(watch_session_factory=await _session_factory()))
+    created = client.post(
+        "/api/v1/watches",
+        headers=_headers(HOUSEHOLD_A, USER_A),
+        json={
+            **_watch_payload(origin="MOW", destination="DME"),
+            "origin_kind": "city",
+            "destination_kind": "airport",
+        },
+    )
+
+    updated = client.patch(
+        f"/api/v1/watches/{created.json()['id']}",
+        headers=_headers(HOUSEHOLD_A, USER_A),
+        json={"expected_version": 1, "origin": "WAW"},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["origin"] == "WAW"
+    assert updated.json()["origin_kind"] == "airport"
+    assert updated.json()["origin_airport_codes"] == ["WAW"]
+    assert updated.json()["origin_membership_version"] == "airport-self-v1"
 
 
 @pytest.mark.anyio
@@ -230,7 +334,7 @@ async def test_watch_history_returns_only_household_scoped_snapshots() -> None:
     created_b = client.post(
         "/api/v1/watches",
         headers=_headers(HOUSEHOLD_B, USER_B),
-        json=_watch_payload(destination="NRT"),
+        json=_watch_payload(destination="CDG"),
     )
     watch_a = UUID(created_a.json()["id"])
     watch_b = UUID(created_b.json()["id"])

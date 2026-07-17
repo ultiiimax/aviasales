@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -594,11 +596,32 @@ def _intent_from_watch(watch: WatchRecord) -> SearchIntent:
         return_date=watch.return_date,
         passengers=watch.passengers,
         currency=watch.currency,
+        origin_kind=watch.origin_kind,
+        destination_kind=watch.destination_kind,
+        origin_airport_codes=watch.origin_airport_codes,
+        destination_airport_codes=watch.destination_airport_codes,
+        directory_version=watch.directory_version,
+        origin_membership_version=watch.origin_membership_version,
+        destination_membership_version=watch.destination_membership_version,
     )
 
 
 def _scan_idempotency_key(watch: WatchRecord) -> str:
-    return f"watch_scan:{watch.id}:{watch.next_eligible_at.isoformat()}"
+    route_facts = {
+        "origin": watch.origin,
+        "destination": watch.destination,
+        "origin_kind": watch.origin_kind.value,
+        "destination_kind": watch.destination_kind.value,
+        "origin_airport_codes": list(watch.origin_airport_codes),
+        "destination_airport_codes": list(watch.destination_airport_codes),
+        "directory_version": watch.directory_version,
+        "origin_membership_version": watch.origin_membership_version,
+        "destination_membership_version": watch.destination_membership_version,
+    }
+    route_digest = hashlib.sha256(
+        json.dumps(route_facts, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"watch_scan:{watch.id}:{watch.next_eligible_at.isoformat()}:{route_digest}"
 
 
 def _snapshot_id(job: WatchScanJobRecord, offer: FlightOffer) -> UUID:

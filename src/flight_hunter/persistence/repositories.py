@@ -24,6 +24,7 @@ from flight_hunter.domain.observation import (
     ObservationStatus,
 )
 from flight_hunter.domain.offers import FlightOffer, Freshness, SearchIntent
+from flight_hunter.domain.places import PlaceKind
 from flight_hunter.domain.policy import UserActionGrant, require_aware_datetime
 from flight_hunter.domain.search_results import (
     BrowserObservedOffer,
@@ -159,6 +160,13 @@ class NewWatch:
     scan_interval_seconds: int = 21_600
     allowed_provider_ids: tuple[str, ...] = ()
     updated_at: datetime | None = None
+    origin_kind: PlaceKind = PlaceKind.CITY
+    destination_kind: PlaceKind = PlaceKind.CITY
+    origin_airport_codes: tuple[str, ...] = ()
+    destination_airport_codes: tuple[str, ...] = ()
+    directory_version: str = "legacy-provider-city-v1"
+    origin_membership_version: str | None = None
+    destination_membership_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +195,13 @@ class WatchRecord:
     archived_by_user_id: UUID | None
     deleted_at: datetime | None
     deleted_by_user_id: UUID | None
+    origin_kind: PlaceKind = PlaceKind.CITY
+    destination_kind: PlaceKind = PlaceKind.CITY
+    origin_airport_codes: tuple[str, ...] = ()
+    destination_airport_codes: tuple[str, ...] = ()
+    directory_version: str = "legacy-provider-city-v1"
+    origin_membership_version: str | None = None
+    destination_membership_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2402,6 +2417,13 @@ class HouseholdWatchRepository:
                 owner_user_id=str(watch.owner_user_id),
                 origin=watch.origin.upper(),
                 destination=watch.destination.upper(),
+                origin_kind=watch.origin_kind.value,
+                destination_kind=watch.destination_kind.value,
+                origin_airport_codes_json=_dump_airport_codes(watch.origin_airport_codes),
+                destination_airport_codes_json=_dump_airport_codes(watch.destination_airport_codes),
+                directory_version=watch.directory_version,
+                origin_membership_version=watch.origin_membership_version,
+                destination_membership_version=watch.destination_membership_version,
                 departure_date=watch.departure_date,
                 return_date=watch.return_date,
                 passengers=watch.passengers,
@@ -2724,6 +2746,10 @@ class HouseholdWatchRepository:
         for field, value in updates.items():
             if field in {"origin", "destination", "currency"} and isinstance(value, str):
                 values[field] = value.upper()
+            elif field in {"origin_kind", "destination_kind"}:
+                values[field] = PlaceKind(cast(PlaceKind | str, value)).value
+            elif field in {"origin_airport_codes", "destination_airport_codes"}:
+                values[f"{field}_json"] = _dump_airport_codes(cast(tuple[str, ...], value))
             elif field == "allowed_provider_ids":
                 values[field] = _join_csv(cast(tuple[str, ...], value))
             elif field in {
@@ -2734,6 +2760,9 @@ class HouseholdWatchRepository:
                 "paused_until",
                 "next_eligible_at",
                 "scan_interval_seconds",
+                "directory_version",
+                "origin_membership_version",
+                "destination_membership_version",
             }:
                 values[field] = value
         return values
@@ -3779,6 +3808,13 @@ def _watch_record(row: RowMapping) -> WatchRecord:
         deleted_by_user_id=(
             UUID(row["deleted_by_user_id"]) if row["deleted_by_user_id"] is not None else None
         ),
+        origin_kind=PlaceKind(row["origin_kind"]),
+        destination_kind=PlaceKind(row["destination_kind"]),
+        origin_airport_codes=_loads_airport_codes(row["origin_airport_codes_json"]),
+        destination_airport_codes=_loads_airport_codes(row["destination_airport_codes_json"]),
+        directory_version=row["directory_version"],
+        origin_membership_version=row["origin_membership_version"],
+        destination_membership_version=row["destination_membership_version"],
     )
 
 
@@ -4272,6 +4308,17 @@ def _split_csv(value: str | None) -> tuple[str, ...]:
     if value is None or not value.strip():
         return ()
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _dump_airport_codes(values: tuple[str, ...]) -> str:
+    return json.dumps(list(values), ensure_ascii=True, separators=(",", ":"))
+
+
+def _loads_airport_codes(value: str) -> tuple[str, ...]:
+    payload = json.loads(value)
+    if not isinstance(payload, list) or any(not isinstance(item, str) for item in payload):
+        raise ValueError("watch airport-code snapshot must be a JSON string array")
+    return tuple(payload)
 
 
 def _loads_string_dict(value: str | None) -> dict[str, str]:

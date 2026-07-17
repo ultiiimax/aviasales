@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from flight_hunter.domain.places import PlaceKind
 from flight_hunter.persistence.repositories import (
     AuditEventRepository,
     HouseholdWatchRepository,
@@ -23,6 +24,13 @@ class CreateWatchCommand:
     destination: str
     departure_date: str
     return_date: str | None
+    origin_kind: PlaceKind = PlaceKind.CITY
+    destination_kind: PlaceKind = PlaceKind.CITY
+    origin_airport_codes: tuple[str, ...] = ()
+    destination_airport_codes: tuple[str, ...] = ()
+    directory_version: str = "legacy-provider-city-v1"
+    origin_membership_version: str | None = None
+    destination_membership_version: str | None = None
     passengers: int = 1
     currency: str = "RUB"
     scan_interval_seconds: int = 21_600
@@ -68,6 +76,13 @@ class WatchService:
             owner_user_id=command.owner_user_id,
             origin=command.origin,
             destination=command.destination,
+            origin_kind=command.origin_kind,
+            destination_kind=command.destination_kind,
+            origin_airport_codes=command.origin_airport_codes,
+            destination_airport_codes=command.destination_airport_codes,
+            directory_version=command.directory_version,
+            origin_membership_version=command.origin_membership_version,
+            destination_membership_version=command.destination_membership_version,
             departure_date=command.departure_date,
             return_date=command.return_date,
             passengers=command.passengers,

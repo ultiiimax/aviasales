@@ -946,6 +946,13 @@ class PrivacyWatchResponse(BaseModel):
     owner_user_id: str
     origin: str
     destination: str
+    origin_kind: PlaceKind
+    destination_kind: PlaceKind
+    origin_airport_codes: list[str]
+    destination_airport_codes: list[str]
+    directory_version: str
+    origin_membership_version: str | None
+    destination_membership_version: str | None
     departure_date: str
     return_date: str | None
     passengers: int
@@ -1252,6 +1259,8 @@ class TelegramLinkCodeResponse(BaseModel):
 class WatchCreateRequestBody(BaseModel):
     origin: str = Field(min_length=3, max_length=3)
     destination: str = Field(min_length=3, max_length=3)
+    origin_kind: PlaceKind | None = None
+    destination_kind: PlaceKind | None = None
     departure_date: str
     return_date: str | None = None
     passengers: int = Field(default=1, ge=1)
@@ -1263,6 +1272,8 @@ class WatchUpdateRequestBody(BaseModel):
     expected_version: int = Field(ge=1)
     origin: str | None = Field(default=None, min_length=3, max_length=3)
     destination: str | None = Field(default=None, min_length=3, max_length=3)
+    origin_kind: PlaceKind | None = None
+    destination_kind: PlaceKind | None = None
     departure_date: str | None = None
     return_date: str | None = None
     passengers: int | None = Field(default=None, ge=1)
@@ -1287,6 +1298,13 @@ class WatchResponse(BaseModel):
     owner_user_id: str
     origin: str
     destination: str
+    origin_kind: PlaceKind
+    destination_kind: PlaceKind
+    origin_airport_codes: list[str]
+    destination_airport_codes: list[str]
+    directory_version: str
+    origin_membership_version: str | None
+    destination_membership_version: str | None
     departure_date: str
     return_date: str | None
     passengers: int
@@ -3477,6 +3495,19 @@ def create_app(
             if auth_context is None:
                 return _auth_context_missing_response()
             household_id, user_id = auth_context
+            directory = await request_place_directory()
+            requested_origin = _resolve_request_place(
+                directory,
+                code=body.origin,
+                kind=body.origin_kind,
+                locale="ru",
+            )
+            requested_destination = _resolve_request_place(
+                directory,
+                code=body.destination,
+                kind=body.destination_kind,
+                locale="ru",
+            )
             service = WatchService(
                 HouseholdWatchRepository(session),
                 audit_repository=AuditEventRepository(session),
@@ -3487,6 +3518,13 @@ def create_app(
                     owner_user_id=user_id,
                     origin=body.origin,
                     destination=body.destination,
+                    origin_kind=requested_origin.ref.kind,
+                    destination_kind=requested_destination.ref.kind,
+                    origin_airport_codes=requested_origin.airport_codes,
+                    destination_airport_codes=requested_destination.airport_codes,
+                    directory_version=directory.directory_version,
+                    origin_membership_version=requested_origin.membership_version,
+                    destination_membership_version=requested_destination.membership_version,
                     departure_date=body.departure_date,
                     return_date=body.return_date,
                     passengers=body.passengers,
@@ -3586,13 +3624,66 @@ def create_app(
                 HouseholdWatchRepository(session),
                 audit_repository=AuditEventRepository(session),
             )
+            current = await service.get_watch(household_id, watch_id)
+            if current is None:
+                return _watch_not_found_response()
+            updates = _watch_update_request_fields(body)
+            origin_changed = bool({"origin", "origin_kind"} & body.model_fields_set)
+            destination_changed = bool({"destination", "destination_kind"} & body.model_fields_set)
+            if origin_changed or destination_changed:
+                directory = await request_place_directory()
+                if origin_changed:
+                    requested_origin = _resolve_request_place(
+                        directory,
+                        code=body.origin if body.origin is not None else current.origin,
+                        kind=(
+                            body.origin_kind
+                            if "origin_kind" in body.model_fields_set
+                            else (
+                                None if "origin" in body.model_fields_set else current.origin_kind
+                            )
+                        ),
+                        locale="ru",
+                    )
+                    updates.update(
+                        origin=requested_origin.ref.code,
+                        origin_kind=requested_origin.ref.kind,
+                        origin_airport_codes=requested_origin.airport_codes,
+                        origin_membership_version=requested_origin.membership_version,
+                    )
+                if destination_changed:
+                    requested_destination = _resolve_request_place(
+                        directory,
+                        code=(
+                            body.destination
+                            if body.destination is not None
+                            else current.destination
+                        ),
+                        kind=(
+                            body.destination_kind
+                            if "destination_kind" in body.model_fields_set
+                            else (
+                                None
+                                if "destination" in body.model_fields_set
+                                else current.destination_kind
+                            )
+                        ),
+                        locale="ru",
+                    )
+                    updates.update(
+                        destination=requested_destination.ref.code,
+                        destination_kind=requested_destination.ref.kind,
+                        destination_airport_codes=requested_destination.airport_codes,
+                        destination_membership_version=requested_destination.membership_version,
+                    )
+                updates["directory_version"] = directory.directory_version
             result = await service.update_watch(
                 UpdateWatchCommand(
                     household_id=household_id,
                     watch_id=watch_id,
                     actor_user_id=user_id,
                     expected_version=body.expected_version,
-                    updates=_watch_update_request_fields(body),
+                    updates=updates,
                 )
             )
             await session.commit()
@@ -4397,6 +4488,13 @@ def _privacy_watch_response(watch: WatchRecord) -> PrivacyWatchResponse:
         owner_user_id=str(watch.owner_user_id),
         origin=watch.origin,
         destination=watch.destination,
+        origin_kind=watch.origin_kind,
+        destination_kind=watch.destination_kind,
+        origin_airport_codes=list(watch.origin_airport_codes),
+        destination_airport_codes=list(watch.destination_airport_codes),
+        directory_version=watch.directory_version,
+        origin_membership_version=watch.origin_membership_version,
+        destination_membership_version=watch.destination_membership_version,
         departure_date=watch.departure_date,
         return_date=watch.return_date,
         passengers=watch.passengers,
@@ -5332,6 +5430,13 @@ def _watch_response(watch: WatchRecord) -> WatchResponse:
         owner_user_id=str(watch.owner_user_id),
         origin=watch.origin,
         destination=watch.destination,
+        origin_kind=watch.origin_kind,
+        destination_kind=watch.destination_kind,
+        origin_airport_codes=list(watch.origin_airport_codes),
+        destination_airport_codes=list(watch.destination_airport_codes),
+        directory_version=watch.directory_version,
+        origin_membership_version=watch.origin_membership_version,
+        destination_membership_version=watch.destination_membership_version,
         departure_date=watch.departure_date,
         return_date=watch.return_date,
         passengers=watch.passengers,
