@@ -153,6 +153,7 @@ class ExactPollOutcome:
     evidence: tuple[ConfirmedOfferEvidence, ...]
     next_cursor: int
     complete: bool
+    not_modified: bool = False
     booking_descriptors: tuple[PrivateBookingActionDescriptor, ...] = ()
 
     def __post_init__(self) -> None:
@@ -163,6 +164,8 @@ class ExactPollOutcome:
             raise ValueError("next_cursor must be a non-negative integer")
         if type(self.complete) is not bool:
             raise TypeError("complete must be a boolean")
+        if type(self.not_modified) is not bool:
+            raise TypeError("not_modified must be a boolean")
         descriptors = tuple(self.booking_descriptors)
         if not all(isinstance(item, PrivateBookingActionDescriptor) for item in descriptors):
             raise TypeError(
@@ -175,6 +178,8 @@ class ExactPollOutcome:
             or not set(descriptor_ids) <= evidence_ids
         ):
             raise ValueError("booking descriptors must bind unique returned evidence")
+        if self.not_modified and (evidence or self.complete or descriptors):
+            raise ValueError("not-modified outcome cannot contain results or be complete")
         object.__setattr__(self, "evidence", evidence)
         object.__setattr__(self, "booking_descriptors", descriptors)
 
@@ -397,6 +402,7 @@ class AviasalesSearchGateway:
             # The verified fixture/API contract has no terminal-search field.
             # Ticket presence therefore cannot prove upstream completion.
             complete=False,
+            not_modified=result.not_modified,
             booking_descriptors=booking_descriptors,
         )
 
@@ -606,7 +612,7 @@ def _ticket_matches_continuation(
     ticket: ParsedTicket,
     continuation: ExactSearchContinuation,
 ) -> bool:
-    if (
+    return not (
         ticket.origin != continuation.expected_origin
         or ticket.destination != continuation.expected_destination
         or ticket.departure_date != continuation.expected_departure_date.isoformat()
@@ -619,9 +625,7 @@ def _ticket_matches_continuation(
         or ticket.best_proposal.currency != continuation.expected_currency
         or type(ticket.best_proposal.price_minor_units) is not int
         or ticket.best_proposal.price_minor_units < 0
-    ):
-        raise AviasalesSearchParseError("aviasales_search_ticket_mismatch")
-    return True
+    )
 
 
 def _normalized_iata(value: str, field_name: str) -> str:

@@ -13,6 +13,7 @@ def test_readme_is_the_local_v1_operator_entrypoint() -> None:
     assert "# Flight Hunter 1.0.0" in readme
     assert "http://127.0.0.1:8000" in readme
     assert "AUTH_ALLOW_LEGACY_HEADERS=false" in readme
+    assert "AUTH_LOCAL_AUTO_LOGIN=true" in readme
     assert "локаль" in readme.lower()
     assert "Docker Desktop" in readme
     for command in (

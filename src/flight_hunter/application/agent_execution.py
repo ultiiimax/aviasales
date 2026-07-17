@@ -4431,10 +4431,10 @@ def _validated_provider_outcome(
             if not isinstance(outcome, ExactPollOutcome):
                 raise TypeError("exact poll returned an invalid outcome")
             continuation = _continuation_from_private(private_continuation)
-            if outcome.next_cursor < continuation.last_update_timestamp or (
-                not outcome.complete and outcome.next_cursor <= continuation.last_update_timestamp
-            ):
+            if outcome.next_cursor < continuation.last_update_timestamp:
                 raise ValueError("exact poll cursor did not advance")
+            if outcome.not_modified and outcome.next_cursor != continuation.last_update_timestamp:
+                raise ValueError("not-modified exact poll changed cursor")
             if len(outcome.evidence) > _EXACT_POLL_EVIDENCE_LIMIT:
                 raise ValueError("exact poll exceeded its provider result limit")
             validated_evidence = _validated_exact_evidence(
@@ -4448,6 +4448,7 @@ def _validated_provider_outcome(
                 evidence=validated_evidence,
                 next_cursor=outcome.next_cursor,
                 complete=outcome.complete,
+                not_modified=outcome.not_modified,
                 booking_descriptors=tuple(
                     descriptor
                     for descriptor in outcome.booking_descriptors
@@ -4962,6 +4963,11 @@ def _confirmed_itinerary_evidence(
         "seller": evidence.seller_name,
         "ticket_structure": "provider_ticket",
     }
+    if evidence.provider_airport_changes:
+        itinerary["provider_airport_changes"] = [
+            [from_airport, to_airport]
+            for from_airport, to_airport in evidence.provider_airport_changes
+        ]
     if hidden_city_candidate is not None:
         itinerary.update(
             {
@@ -5434,10 +5440,14 @@ def _confirmed_directions(
     evidence: ConfirmedOfferEvidence,
 ) -> tuple[tuple[FlightSegmentSummary, ...], ...] | None:
     segments = evidence.segments
-    if not segments or segments[0].origin != evidence.origin:
+    if (
+        not segments
+        or segments[0].origin != evidence.origin
+        or not _provider_airport_changes_are_bound(evidence)
+    ):
         return None
     if evidence.return_date is None:
-        if segments[-1].destination != evidence.destination or not _continuous_segments(segments):
+        if segments[-1].destination != evidence.destination:
             return None
         return (segments,)
 
@@ -5448,15 +5458,18 @@ def _confirmed_directions(
             outbound[-1].destination == evidence.destination
             and inbound[0].origin == evidence.destination
             and inbound[-1].destination == evidence.origin
-            and _continuous_segments(outbound)
-            and _continuous_segments(inbound)
         ):
             return (outbound, inbound)
     return None
 
 
-def _continuous_segments(segments: Sequence[FlightSegmentSummary]) -> bool:
-    return all(previous.destination == current.origin for previous, current in pairwise(segments))
+def _provider_airport_changes_are_bound(evidence: ConfirmedOfferEvidence) -> bool:
+    actual = tuple(
+        (previous.destination, current.origin)
+        for previous, current in pairwise(evidence.segments)
+        if previous.destination != current.origin
+    )
+    return actual == evidence.provider_airport_changes
 
 
 def _intent_scope_identity(leg: Mapping[str, object], key: str) -> tuple[str, str | None]:

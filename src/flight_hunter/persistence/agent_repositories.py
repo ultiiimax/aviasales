@@ -5733,6 +5733,7 @@ _CONFIRMED_ITINERARY_KEYS = frozenset(
         "ticket_shape",
         "checked_baggage",
         "baggage_summary",
+        "provider_airport_changes",
         "hidden_city_desired_airport",
         "hidden_city_ticketed_destination",
         "hidden_city_actionability",
@@ -6894,8 +6895,20 @@ def _stored_composition_component(
         raise ValueError("composition component segments are invalid")
     if segments[0].origin != origin or segments[-1].destination != destination:
         raise ValueError("composition component route mismatch")
-    if any(previous.destination != current.origin for previous, current in pairwise(segments)):
-        raise ValueError("composition component segments are discontinuous")
+    provider_airport_changes = tuple(
+        _stored_provider_airport_change(value)
+        for value in _composition_sequence(
+            itinerary.get("provider_airport_changes", ()),
+            "provider airport changes",
+        )
+    )
+    actual_airport_changes = tuple(
+        (previous.destination, current.origin)
+        for previous, current in pairwise(segments)
+        if previous.destination != current.origin
+    )
+    if provider_airport_changes != actual_airport_changes:
+        raise ValueError("composition component airport changes are not provider-bound")
     return _StoredCompositionComponent(
         id=record.id,
         origin=origin,
@@ -6930,6 +6943,19 @@ def _stored_composition_segment(value: object) -> _StoredCompositionSegment:
         depart_at_utc=depart_at_utc,
         arrive_at_utc=arrive_at_utc,
     )
+
+
+def _stored_provider_airport_change(value: object) -> tuple[str, str]:
+    pair = _composition_sequence(value, "provider airport change")
+    if len(pair) != 2:
+        raise ValueError("provider airport change must contain two airports")
+    normalized = (
+        _composition_iata(pair[0], "provider airport change origin"),
+        _composition_iata(pair[1], "provider airport change destination"),
+    )
+    if normalized[0] == normalized[1]:
+        raise ValueError("provider airport change airports must differ")
+    return normalized
 
 
 def _stored_composition_leg(value: object) -> _StoredCompositionLeg:

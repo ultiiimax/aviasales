@@ -7,7 +7,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
 | Provider | Adapter | Credentials | Enabled | Background allowed | Merge allowed | Last verification |
 |---|---|---:|---:|---:|---:|---|
 | Fake | implemented offline demo | none | yes | yes | yes | n/a |
-| Aviasales Search | implemented mobile API, live | `AVIASALES_SEARCH_SIGNATURE`, `AVIASALES_SEARCH_MARKER` | env flag | yes | yes | 2026-07-17 local kit imported safely; one exact live smoke returned 50 schema-valid live items |
+| Aviasales Search | implemented mobile API, live | `AVIASALES_SEARCH_SIGNATURE`, `AVIASALES_SEARCH_MARKER` | env flag | yes | yes | 2026-07-17: 672 confirmed facts in live LED→France run; HTTP 304 poll and tagged airport change verified |
 | SearXNG | implemented URL discovery | self-hosted optional | env flag | no, user action | candidate only | 2026-06-29 |
 | Crawl4AI | implemented markdown extraction | self-hosted optional | env flag | no, user action | candidate only | 2026-06-29 |
 | Deal discovery | implemented orchestrator | local components | component flags | no, user action | candidate only | 2026-06-29 |
@@ -23,10 +23,31 @@ This file is maintained by coding agents. Mark a slice done only after implement
 - Design:
   `docs/superpowers/specs/2026-07-17-local-auto-login-design.md`.
 - Plan:
-  - [ ] Add the config-gated loopback local-session endpoint and owner reuse.
-  - [ ] Replace invitation controls with automatic profile status/reconnect UI.
-  - [ ] Enable local auto-login in the ignored machine `.env` and update docs.
-  - [ ] Run focused API/UI/browser verification and restart the local release.
+  - [x] Add the config-gated loopback local-session endpoint and owner reuse.
+  - [x] Replace invitation controls with automatic profile status/reconnect UI.
+  - [x] Enable local auto-login in the ignored machine `.env` and update docs.
+  - [x] Run focused API/UI/browser verification and restart the local release.
+- Additional release fixes found by real browser QA: the deterministic intent
+  parser now handles Russian date ranges/passenger suffixes; the local
+  OurAirports catalog is imported; exact polling accepts an empty HTTP 304
+  incremental response plus valid empty/ticket-bearing provider snapshots whose
+  cursor stays at zero; explicitly tagged cross-airport itineraries preserve
+  their provenance through durable storage, are risk-ranked and visibly warned
+  instead of failing the whole provider result. Tagged different-airport return
+  shapes and other non-bound alternatives are skipped per ticket. Confirmed
+  result rendering is bounded to 20 cards per user-controlled page. Round-trip
+  headings split at the confirmed destination even when the provider explicitly
+  marks an airport change, so a valid trip is never presented as `origin → origin`.
+- Final release verification on 2026-07-17: a real durable
+  Санкт-Петербург → Франция search for 10–17 September completed `partial` with
+  672 confirmed facts, 20 logical operations and 53 HTTP attempts. The partial
+  outcome is limited to one provider-rejected airport and two exact searches
+  without confirmed offers; no provider-schema operation failed. The final
+  focused regression gate passes 30 tests, the route-heading RED/GREEN follow-up
+  passes 2 tests, targeted Ruff/mypy are clean, and live browser QA shows 20 then
+  40 of 672 factual cards, correct outbound/return endpoints, visible airport
+  transfer warnings and no console warnings/errors. `/healthz` and `/readyz`
+  are green and both worker roles are healthy after the final restart.
 
 ## Previous Slice: API-kit agent integration and UI polish
 

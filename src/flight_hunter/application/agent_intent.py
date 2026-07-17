@@ -39,6 +39,11 @@ _NATURAL_ROUTE_RE = re.compile(
 _EXACT_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 _RANGE_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*(?:\.\.|—|–)\s*(\d{4}-\d{2}-\d{2})")
 _FLEX_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*(?:±|\+/-)\s*(\d+)")
+_RU_ROUND_TRIP_DATE_RE = re.compile(
+    r"\bс\s+(?P<departure_day>\d{1,2})\s+по\s+(?P<return_day>\d{1,2})\s+"
+    r"(?P<month>[а-яё]+)\s+(?P<year>\d{4})(?:\s+года?)?\b",
+    re.IGNORECASE,
+)
 _ROLLING_DATE_RE = re.compile(
     r"\s*,?\s*(?:rolling\s+90\s+days|(?:ближайшие\s+)?90\s+дней)\b",
     re.IGNORECASE,
@@ -49,6 +54,25 @@ _TRAILING_CONSTRAINT_RE = re.compile(
     r"можно\s+отдельными\s+билетами|разбей\s+билет|самопересадк\w*))+$",
     re.IGNORECASE,
 )
+_TRAILING_TRAVEL_DETAILS_RE = re.compile(
+    r"(?:\s*,?\s*(?:\d+\s+(?:взросл\w*|пассажир\w*|дет\w*|реб[её]н\w*|младен\w*)|"
+    r"эконом(?:\s*класс)?|бизнес(?:\s*класс)?|первый\s+класс))+\s*$",
+    re.IGNORECASE,
+)
+_PASSENGER_COUNT_PATTERNS = {
+    "adults": re.compile(
+        r"\b(?P<count>\d{1,2})\s*(?:взросл\w*|пассажир\w*|adults?|passengers?)\b",
+        re.IGNORECASE,
+    ),
+    "children": re.compile(
+        r"\b(?P<count>\d{1,2})\s*(?:дет\w*|реб[её]н\w*|children?|kids?)\b",
+        re.IGNORECASE,
+    ),
+    "infants": re.compile(
+        r"\b(?P<count>\d{1,2})\s*(?:младен\w*|infants?|bab(?:y|ies))\b",
+        re.IGNORECASE,
+    ),
+}
 _IATA_RE = re.compile(r"^[A-Z]{3}$")
 _COUNTRY_CODE_RE = re.compile(r"^[A-Z]{2}$")
 _TRIP_SHAPE_PATTERNS = (
@@ -81,6 +105,20 @@ _CITY_ALIASES = {
     "st petersburg": "LED",
     "спб": "LED",
 }
+_RU_MONTH_NUMBERS = {
+    "января": 1,
+    "февраля": 2,
+    "марта": 3,
+    "апреля": 4,
+    "мая": 5,
+    "июня": 6,
+    "июля": 7,
+    "августа": 8,
+    "сентября": 9,
+    "октября": 10,
+    "ноября": 11,
+    "декабря": 12,
+}
 _ANYWHERE_ALIASES = {
     "anywhere",
     "куда угодно",
@@ -89,6 +127,7 @@ _ANYWHERE_ALIASES = {
     "везде",
 }
 _INFLECTED_LOCATION_ALIASES = {
+    "санкт петербурга": "Санкт Петербург",
     "францию": "Франция",
 }
 
@@ -410,6 +449,11 @@ class IntentParser:
         selected = selections or {}
         if not isinstance(selected, Mapping):
             raise TypeError("selections must be a mapping")
+        selected = dict(selected)
+        natural_round_trip = _natural_round_trip_dates(text)
+        if natural_round_trip is not None:
+            selected.setdefault("departure_date", natural_round_trip[0].isoformat())
+            selected.setdefault("return_date", natural_round_trip[1].isoformat())
 
         clarifications: list[IntentClarification] = []
         raw_legs = selected.get("legs")
@@ -449,6 +493,7 @@ class IntentParser:
             )
 
         date_mode = legs[0].date_constraint.mode if legs else DateMode.EXACT
+        adults, children, infants = _passenger_counts(text, selected)
         parsed = _with_semantic_clarifications(
             ParsedIntent(
                 origin_text=origin_text,
@@ -456,9 +501,9 @@ class IntentParser:
                 trip_shape=trip_shape,
                 date_mode=date_mode,
                 legs=legs,
-                adults=_positive_int(selected.get("adults", 1), "adults"),
-                children=_non_negative_int(selected.get("children", 0), "children"),
-                infants=_non_negative_int(selected.get("infants", 0), "infants"),
+                adults=adults,
+                children=children,
+                infants=infants,
                 nearby_radius_km=_nearby_radius_km(text, selected, normalized_preset),
                 currency=_string(selected.get("currency", "RUB"), "currency"),
                 requested_strategies=_strategies(selected, normalized_preset, text),
@@ -737,10 +782,12 @@ def _route_parts(text: str) -> tuple[str | None, str | None]:
     route_text = _RANGE_DATE_RE.sub("", text)
     route_text = _FLEX_DATE_RE.sub("", route_text)
     route_text = _EXACT_DATE_RE.sub("", route_text)
+    route_text = _RU_ROUND_TRIP_DATE_RE.sub("", route_text)
     route_text = _ROLLING_DATE_RE.sub("", route_text)
     for _, pattern in _TRIP_SHAPE_PATTERNS:
         route_text = pattern.sub("", route_text)
     route_text = _TRAILING_CONSTRAINT_RE.sub("", route_text)
+    route_text = _TRAILING_TRAVEL_DETAILS_RE.sub("", route_text)
     parts = _ROUTE_SEPARATOR_RE.split(route_text, maxsplit=1)
     if len(parts) == 2:
         return parts[0].strip(" ,") or None, parts[1].strip(" ,") or None
@@ -751,6 +798,22 @@ def _route_parts(text: str) -> tuple[str | None, str | None]:
         natural.group("origin").strip(" ,") or None,
         natural.group("destination").strip(" ,") or None,
     )
+
+
+def _natural_round_trip_dates(text: str) -> tuple[date, date] | None:
+    match = _RU_ROUND_TRIP_DATE_RE.search(text)
+    if match is None:
+        return None
+    month = _RU_MONTH_NUMBERS.get(_normalize_text(match.group("month")))
+    if month is None:
+        return None
+    year = int(match.group("year"))
+    try:
+        departure = date(year, month, int(match.group("departure_day")))
+        return_date = date(year, month, int(match.group("return_day")))
+    except ValueError:
+        return None
+    return departure, return_date
 
 
 def _trip_shape_from_text(text: str) -> TripShape | None:
@@ -968,6 +1031,25 @@ def _integer(value: object, field: str) -> int:
     if type(value) is not int:
         raise ValueError(f"{field} must be an integer")
     return value
+
+
+def _passenger_counts(
+    text: str,
+    selections: Mapping[str, object],
+) -> tuple[int, int, int]:
+    values = {
+        "adults": selections.get("adults", 1),
+        "children": selections.get("children", 0),
+        "infants": selections.get("infants", 0),
+    }
+    for field_name, pattern in _PASSENGER_COUNT_PATTERNS.items():
+        if match := pattern.search(text):
+            values[field_name] = int(match.group("count"))
+    return (
+        _positive_int(values["adults"], "adults"),
+        _non_negative_int(values["children"], "children"),
+        _non_negative_int(values["infants"], "infants"),
+    )
 
 
 def _positive_int(value: object, field: str) -> int:

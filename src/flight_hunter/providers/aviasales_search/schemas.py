@@ -71,6 +71,7 @@ class ParsedTicket:
     return_date: str | None
     segments: tuple[tuple[ParsedSegment, ...], ...]
     best_proposal: ParsedProposal
+    provider_airport_changes: tuple[tuple[str, str], ...] = ()
 
 
 def parse_chunks(chunks: list[dict[str, Any]]) -> tuple[ParsedTicket, ...]:
@@ -127,6 +128,7 @@ def _parse_ticket(
         return None
 
     segments: list[tuple[ParsedSegment, ...]] = []
+    provider_airport_changes: list[tuple[str, str]] = []
     for seg in segments_raw:
         if not isinstance(seg, dict):
             return None
@@ -144,8 +146,13 @@ def _parse_ticket(
                 return None
             seg_segments.append(_parse_segment(leg, airlines))
         direction = tuple(seg_segments)
-        _require_continuous_direction(direction)
+        direction_airport_changes = _provider_airport_changes(seg, direction)
+        _require_valid_direction(
+            direction,
+            provider_airport_changes=direction_airport_changes,
+        )
         segments.append(direction)
+        provider_airport_changes.extend(direction_airport_changes)
 
     outbound = segments[0]
     origin = outbound[0].origin
@@ -156,6 +163,8 @@ def _parse_ticket(
     if len(segments) == 2:
         inbound = segments[1]
         if inbound[0].origin != destination or inbound[-1].destination != origin:
+            if _provider_marks_different_airports(raw):
+                return None
             raise AviasalesSearchParseError("aviasales_search_invalid_directions")
         return_date = inbound[0].depart_at[:10]
 
@@ -170,18 +179,50 @@ def _parse_ticket(
         return_date=return_date,
         segments=tuple(segments),
         best_proposal=best,
+        provider_airport_changes=tuple(provider_airport_changes),
     )
 
 
-def _require_continuous_direction(direction: tuple[ParsedSegment, ...]) -> None:
+def _require_valid_direction(
+    direction: tuple[ParsedSegment, ...],
+    *,
+    provider_airport_changes: tuple[tuple[str, str], ...],
+) -> None:
     if not direction:
         raise AviasalesSearchParseError("aviasales_search_invalid_directions")
     for segment in direction:
         if not _IATA_RE.fullmatch(segment.origin) or not _IATA_RE.fullmatch(segment.destination):
             raise AviasalesSearchParseError("aviasales_search_invalid_directions")
-    for previous, current in pairwise(direction):
-        if previous.destination != current.origin:
-            raise AviasalesSearchParseError("aviasales_search_invalid_directions")
+    airport_changes = tuple(
+        (previous.destination, current.origin)
+        for previous, current in pairwise(direction)
+        if previous.destination != current.origin
+    )
+    if airport_changes != provider_airport_changes:
+        raise AviasalesSearchParseError("aviasales_search_invalid_directions")
+
+
+def _provider_airport_changes(
+    segment: dict[str, Any],
+    direction: tuple[ParsedSegment, ...],
+) -> tuple[tuple[str, str], ...]:
+    transfers = segment.get("transfers")
+    if not isinstance(transfers, list):
+        return ()
+    return tuple(
+        (previous.destination, current.origin)
+        for index, (previous, current) in enumerate(pairwise(direction))
+        if previous.destination != current.origin
+        and index < len(transfers)
+        and isinstance(transfer := transfers[index], dict)
+        and isinstance(tags := transfer.get("tags"), list)
+        and "airport_change" in tags
+    )
+
+
+def _provider_marks_different_airports(ticket: dict[str, Any]) -> bool:
+    tags = ticket.get("tags")
+    return isinstance(tags, list) and "airport_different" in tags
 
 
 def _parse_segment(leg: dict[str, Any], airlines: dict[str, Any]) -> ParsedSegment:

@@ -426,6 +426,25 @@ def test_poll_results_returns_empty_when_no_tickets_after_rounds() -> None:
     assert len(transport.post_calls) == 3
 
 
+def test_poll_results_once_treats_304_as_an_empty_incremental_update() -> None:
+    response = _FakeResponse(status_code=304)
+    transport = _FakeTransport(posts=[response])
+
+    result = _client(transport).poll_results_once(
+        RESULTS_HOST,
+        "sid-1",
+        last_update_timestamp=12,
+        limit=50,
+        request_id="request-1",
+    )
+
+    assert result.chunks == ()
+    assert result.last_update_timestamp == 12
+    assert result.has_tickets is False
+    assert result.not_modified is True
+    assert response.json_calls == 0
+
+
 def test_poll_results_once_makes_one_call_and_advances_cursor_monotonically() -> None:
     transport = _FakeTransport(
         posts=[

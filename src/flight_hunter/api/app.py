@@ -214,7 +214,6 @@ from flight_hunter.persistence.repositories import (
     WorkerHeartbeatRepository,
     WorkerQueueHealthRepository,
 )
-
 from flight_hunter.providers.aviasales_search.adapter import AviasalesSearchAdapter
 from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchAuthFailed,

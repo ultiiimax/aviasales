@@ -442,6 +442,7 @@ def test_poll_exact_once_returns_only_confirmed_sanitized_evidence() -> None:
         "evidence",
         "next_cursor",
         "complete",
+        "not_modified",
         "booking_descriptors",
     }
     first = outcome.evidence[0]
@@ -472,6 +473,25 @@ def test_poll_exact_once_returns_only_confirmed_sanitized_evidence() -> None:
             continue
         assert private_value not in public_text
     assert "proposal_id" not in public_text
+
+
+def test_poll_exact_once_propagates_not_modified_without_advancing_cursor() -> None:
+    transport = _FakeTransport(posts=[_FakeResponse(status_code=304)])
+    continuation = _continuation()
+
+    outcome = asyncio.run(
+        _gateway(transport).poll_exact_once(
+            continuation,
+            request_fingerprint="sha256:not-modified",
+            context=ExecutionContext.WORKER,
+        )
+    )
+
+    assert outcome.evidence == ()
+    assert outcome.next_cursor == continuation.last_update_timestamp
+    assert outcome.complete is False
+    assert outcome.not_modified is True
+    assert outcome.booking_descriptors == ()
 
 
 def test_poll_deduplicates_repeated_provider_ticket_and_private_descriptor() -> None:
@@ -514,20 +534,21 @@ def test_ticket_bearing_poll_does_not_claim_unproven_search_completion() -> None
         {"currency": "USD"},
     ],
 )
-def test_poll_rejects_ticket_that_does_not_match_bound_continuation(
+def test_poll_discards_ticket_that_does_not_match_bound_continuation(
     ticket_overrides: dict[str, Any],
 ) -> None:
     transport = _FakeTransport(posts=[_FakeResponse(payload=[_one_way_chunk(**ticket_overrides)])])
 
-    with pytest.raises(AviasalesSearchSchemaError):
-        asyncio.run(
-            _gateway(transport).poll_exact_once(
-                _continuation(),
-                request_fingerprint="sha256:bound-ticket",
-            )
+    outcome = asyncio.run(
+        _gateway(transport).poll_exact_once(
+            _continuation(),
+            request_fingerprint="sha256:bound-ticket",
         )
+    )
 
     assert len(transport.post_calls) == 1
+    assert outcome.evidence == ()
+    assert outcome.booking_descriptors == ()
 
 
 @pytest.mark.parametrize(

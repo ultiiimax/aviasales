@@ -1,6 +1,6 @@
 # Local Deployment Runbook — v1.0.0
 
-Дата: 2026-07-15. Поддерживаемая схема: один компьютер, loopback HTTP,
+Дата: 2026-07-17. Поддерживаемая схема: один компьютер, loopback HTTP,
 FastAPI + основной worker + agent-worker + SQLite. Публичная публикация не
 поддерживается.
 
@@ -32,9 +32,23 @@ uv run flight-hunter-worker --loop --roles agent --idle-sleep-seconds 10
 `AGENT_PROVIDER_CIRCUIT_COOLDOWN_SECONDS`. При disabled/missing/invalid
 credentials agent-worker делает terminal typed failure до HTTP.
 
-Создание первого владельца описано в `README.md`. После приёма invitation
-очисти `AUTH_BOOTSTRAP_TOKEN` в `.env`, если новые bootstrap invitations не
-нужны, и перезапусти все три процесса.
+Для личного direct-запуска оставь `AUTH_LOCAL_AUTO_LOGIN=true`. При первом
+открытии UI сам создаст или переиспользует единственного owner и выдаст обычную
+bearer-сессию. Код приглашения и имя вводить не нужно. Автовход работает только
+для реального loopback peer; Docker bridge, reverse proxy и LAN под него не
+подпадают.
+
+Перед поиском по городам/странам импортируй локальный каталог аэропортов:
+
+```powershell
+$airportCsv = Join-Path $env:TEMP 'ourairports-airports.csv'
+Invoke-WebRequest https://davidmegginson.github.io/ourairports-data/airports.csv -OutFile $airportCsv
+uv run flight-hunter-import-airports --airports-csv $airportCsv
+```
+
+Источник CSV — [OurAirports Data](https://ourairports.com/data/). Импортёр
+оставляет аэропорты с пригодными IATA/геоданными; повторный импорт безопасно
+обновляет локальный справочник.
 
 ## 2. Проверка состояния
 

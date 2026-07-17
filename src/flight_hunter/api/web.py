@@ -1819,6 +1819,17 @@ def render_index_html() -> str:
       gap: 12px;
     }
 
+    .agent-result-pagination {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 14px;
+      padding: 4px 2px 0;
+    }
+
     .agent-result-card {
       display: grid;
       gap: 12px;
@@ -2468,6 +2479,7 @@ def render_index_html() -> str:
   <script>
     const carrierCodePattern = /^[A-Z0-9]{2}$/;
     const carrierLogoOrigin = "https://pics.avs.io/80/80/";
+    const agentResultPageSize = 20;
     const providersList = document.querySelector("#providers-list");
     const resultsList = document.querySelector("#results-list");
     const confirmationList = document.querySelector("#confirmation-list");
@@ -2516,6 +2528,8 @@ def render_index_html() -> str:
     let agentSessionGeneration = 0;
     let pendingAgentChat = null;
     let localSessionPromise = null;
+    let agentVisibleResultCount = agentResultPageSize;
+    let agentVisibleResultRunId = null;
     const sessionTokenKey = "flight_hunter_session_token";
     const agentPlanStorageKey = "flight_hunter_agent_plan_id_v1";
     const agentRunStorageKey = "flight_hunter_agent_run_id_v1";
@@ -5223,6 +5237,22 @@ def render_index_html() -> str:
       })[value] || "Защита пересадки неизвестна";
     }
 
+    function agentAirportChanges(segments) {
+      const changes = [];
+      for (let index = 1; index < (segments || []).length; index += 1) {
+        const previous = segments[index - 1] || {};
+        const current = segments[index] || {};
+        if (
+          previous.destination
+          && current.origin
+          && previous.destination !== current.origin
+        ) {
+          changes.push({arrival: previous.destination, departure: current.origin});
+        }
+      }
+      return changes;
+    }
+
     async function resolveAgentBooking(token, button) {
       if (!token || !currentAgentPlan || !currentAgentRun || button.disabled) return;
       const originalLabel = button.textContent;
@@ -5260,6 +5290,11 @@ def render_index_html() -> str:
       const region = document.getElementById("agent-confirmed-results");
       const list = document.getElementById("agent-confirmed-results-list");
       const candidates = results.candidates || [];
+      const runId = currentAgentRun?.run_id || null;
+      if (runId !== agentVisibleResultRunId) {
+        agentVisibleResultRunId = runId;
+        agentVisibleResultCount = agentResultPageSize;
+      }
       list.replaceChildren();
       region.hidden = results.state === "not_ready";
       if (results.state !== "ready" || candidates.length === 0) {
@@ -5268,9 +5303,11 @@ def render_index_html() -> str:
           : "По этому запросу подтверждённых вариантов пока нет.";
         return;
       }
-      candidates.forEach((candidate) => {
+      const visibleCandidates = candidates.slice(0, agentVisibleResultCount);
+      visibleCandidates.forEach((candidate) => {
         const segments = candidate.segments || [];
         const legs = candidate.ordered_legs || [];
+        const airportChanges = agentAirportChanges(segments);
         const amount = candidate.total_amount || {};
         const card = document.createElement("article");
         card.className = "agent-result-card";
@@ -5324,11 +5361,24 @@ def render_index_html() -> str:
 
         const separateTickets = (candidate.ticket_boundaries || []).length;
         const unknownCosts = (candidate.unknown_costs || []).length;
-        if (separateTickets > 1 || unknownCosts > 0 || candidate.price_comparison_status !== "fully_priced") {
+        if (
+          separateTickets > 1
+          || unknownCosts > 0
+          || airportChanges.length > 0
+          || candidate.price_comparison_status !== "fully_priced"
+        ) {
           const warning = document.createElement("div");
           warning.className = "agent-result-warning";
           const parts = [];
           if (separateTickets > 1) parts.push(`${separateTickets} отдельных билета — перепроверьте пересадки`);
+          airportChanges.forEach((change) => {
+            const route = formatPlaceRouteFromCache(
+              {kind: "airport", code: change.arrival},
+              {kind: "airport", code: change.departure},
+              true
+            );
+            parts.push(`Смена аэропорта ${route}: стоимость наземного переезда не подтверждена`);
+          });
           if (unknownCosts > 0) parts.push(`не подтверждена стоимость ${unknownCosts} обязательных расходов`);
           if (candidate.price_comparison_status === "non_comparable") parts.push("итоговая цена несопоставима с обычным единым билетом");
           warning.textContent = parts.join(" · ") || "В итоговой стоимости есть неподтверждённые обязательные расходы.";
@@ -5376,6 +5426,24 @@ def render_index_html() -> str:
         card.append(actions);
         list.append(card);
       });
+
+      const pagination = document.createElement("div");
+      pagination.className = "agent-result-pagination";
+      const summary = document.createElement("span");
+      summary.textContent = `Показано ${visibleCandidates.length} из ${candidates.length}`;
+      pagination.append(summary);
+      if (visibleCandidates.length < candidates.length) {
+        const more = document.createElement("button");
+        more.type = "button";
+        more.className = "secondary";
+        more.textContent = `Показать ещё ${Math.min(agentResultPageSize, candidates.length - visibleCandidates.length)}`;
+        more.addEventListener("click", () => {
+          agentVisibleResultCount += agentResultPageSize;
+          renderAgentConfirmedResults(results);
+        });
+        pagination.append(more);
+      }
+      list.append(pagination);
     }
 
     function renderAgentRunResults(results) {
@@ -6230,11 +6298,12 @@ def render_index_html() -> str:
     document.querySelector("#search-form").addEventListener("input", updatePassengerSummary);
     document.querySelector("#assistant-form").addEventListener("submit", (event) => {
       event.preventDefault();
-      const prompt = text(new FormData(event.currentTarget).get("agent_prompt"));
+      const assistantForm = event.currentTarget;
+      const prompt = text(new FormData(assistantForm).get("agent_prompt"));
       if (!prompt) return;
       const operation = agentEditMode ? editAgentPlan(prompt) : requestAgentChat(prompt);
       void operation.then(() => {
-        if (sessionToken()) event.currentTarget.reset();
+        if (sessionToken()) assistantForm.reset();
       });
     });
     updatePassengerSummary();

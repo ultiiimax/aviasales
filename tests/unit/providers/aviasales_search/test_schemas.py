@@ -132,6 +132,47 @@ def test_parse_chunks_normalizes_reciprocal_round_trip_route() -> None:
     assert ticket.return_date == "2026-09-22"
 
 
+def test_parse_chunks_accepts_provider_tagged_airport_change() -> None:
+    chunk = _synthetic_round_trip_chunk()
+    tickets = chunk["tickets"]
+    legs = chunk["flight_legs"]
+    assert isinstance(tickets, list) and isinstance(tickets[0], dict)
+    assert isinstance(legs, list) and len(legs) == 2
+    assert isinstance(legs[0], dict) and isinstance(legs[1], dict)
+    legs[0]["destination"] = "SAW"
+    legs[1]["origin"] = "IST"
+    legs[1]["destination"] = "LED"
+    tickets[0]["segments"] = [
+        {
+            "flights": [0, 1],
+            "transfers": [{"tags": ["airport_change"]}],
+        }
+    ]
+    tickets[0]["tags"] = ["airport_change"]
+
+    ticket = parse_chunks([chunk])[0]
+
+    assert ticket.origin == "MOW"
+    assert ticket.destination == "LED"
+    assert tuple((segment.origin, segment.destination) for segment in ticket.segments[0]) == (
+        ("MOW", "SAW"),
+        ("IST", "LED"),
+    )
+    assert ticket.provider_airport_changes == (("SAW", "IST"),)
+
+
+def test_parse_chunks_skips_provider_tagged_different_airport_round_trip() -> None:
+    chunk = _synthetic_round_trip_chunk()
+    tickets = chunk["tickets"]
+    legs = chunk["flight_legs"]
+    assert isinstance(tickets, list) and isinstance(tickets[0], dict)
+    assert isinstance(legs, list) and isinstance(legs[1], dict)
+    legs[1]["origin"] = "BVA"
+    tickets[0]["tags"] = ["airport_different"]
+
+    assert parse_chunks([chunk]) == ()
+
+
 @pytest.mark.parametrize(
     "corruption",
     ["empty_direction", "discontinuous_direction", "nonreciprocal_return", "extra_direction"],

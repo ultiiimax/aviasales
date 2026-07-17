@@ -515,6 +515,7 @@ class ConfirmedOfferEvidence:
     price_basis: PriceBasis = PriceBasis.TOTAL_FOR_PASSENGERS
     ticket_shape: TicketShape | None = None
     checked_baggage: CheckedBaggageState | None = None
+    provider_airport_changes: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         _require_evidence_identity(self.id, self.provider_id)
@@ -529,6 +530,10 @@ class ConfirmedOfferEvidence:
         segments = _normalized_segments(self.segments)
         if len(segment_ids) != len(segments):
             raise ValueError("segment_ids must match segments")
+        provider_airport_changes = _normalized_provider_airport_changes(
+            self.provider_airport_changes,
+            segments,
+        )
         passenger_mix = self.passenger_mix or PassengerMix(adults=self.passengers)
         if not isinstance(passenger_mix, PassengerMix):
             raise TypeError("passenger_mix must be PassengerMix")
@@ -561,6 +566,7 @@ class ConfirmedOfferEvidence:
         object.__setattr__(self, "price_basis", price_basis)
         object.__setattr__(self, "ticket_shape", ticket_shape)
         object.__setattr__(self, "checked_baggage", checked_baggage)
+        object.__setattr__(self, "provider_airport_changes", provider_airport_changes)
         object.__setattr__(
             self,
             "protection_status",
@@ -833,7 +839,10 @@ def _require_money(value: Money, field_name: str) -> None:
 
 
 def _inferred_checked_baggage(summary: str | None) -> CheckedBaggageState:
-    if summary is not None and re.search(r"(?:^|,\s*)baggage:[1-9][0-9]*", summary):
+    if summary is not None and re.search(
+        r"(?:^|,\s*)(?:baggage:|checked baggage )[1-9][0-9]*",
+        summary,
+    ):
         return CheckedBaggageState.INCLUDED
     return CheckedBaggageState.UNKNOWN
 
@@ -876,3 +885,31 @@ def _normalized_segments(
     if not all(isinstance(segment, FlightSegmentSummary) for segment in normalized):
         raise TypeError("segments must contain FlightSegmentSummary values")
     return normalized
+
+
+def _normalized_provider_airport_changes(
+    value: tuple[tuple[str, str], ...],
+    segments: tuple[FlightSegmentSummary, ...],
+) -> tuple[tuple[str, str], ...]:
+    if isinstance(value, str):
+        raise TypeError("provider_airport_changes must be an ordered collection")
+    normalized: list[tuple[str, str]] = []
+    for item in value:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise TypeError("provider_airport_changes must contain airport pairs")
+        from_airport, to_airport = item
+        if not isinstance(from_airport, str) or not isinstance(to_airport, str):
+            raise TypeError("provider airport change codes must be strings")
+        pair = (from_airport.upper(), to_airport.upper())
+        if pair[0] == pair[1] or not _IATA_RE.fullmatch(pair[0]) or not _IATA_RE.fullmatch(pair[1]):
+            raise ValueError("provider airport change codes must be distinct IATA codes")
+        normalized.append(pair)
+    actual = tuple(
+        (previous.destination, current.origin)
+        for previous, current in pairwise(segments)
+        if previous.destination != current.origin
+    )
+    result = tuple(normalized)
+    if result != actual:
+        raise ValueError("provider airport changes must match segment gaps")
+    return result

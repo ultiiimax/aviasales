@@ -818,6 +818,158 @@ async def test_exact_run_transitions_queued_running_completed_through_start_and_
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("not_modified", (False, True))
+async def test_exact_run_repolls_after_provider_unchanged_response(
+    tmp_path: Path,
+    execution_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    not_modified: bool,
+) -> None:
+    engine, sessions = await _session_factory(
+        tmp_path,
+        f"exact-unchanged-{not_modified}.db",
+    )
+    await _seed_run(sessions, date_mode="exact")
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+    original_poll = ResumableFakeGateway.poll_exact_once
+
+    async def poll_with_initial_not_modified(
+        fake_gateway: ResumableFakeGateway,
+        continuation: ExactSearchContinuation,
+        *,
+        request_fingerprint: str,
+        **kwargs: object,
+    ) -> ExactPollOutcome:
+        if not fake_gateway.poll_calls:
+            fake_gateway.poll_calls.append(continuation)
+            return ExactPollOutcome(
+                evidence=(),
+                next_cursor=continuation.last_update_timestamp,
+                complete=False,
+                not_modified=not_modified,
+            )
+        return await original_poll(
+            fake_gateway,
+            continuation,
+            request_fingerprint=request_fingerprint,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(ResumableFakeGateway, "poll_exact_once", poll_with_initial_not_modified)
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+        )
+        operations = await AgentOperationRepository(session).list_operations(
+            HOUSEHOLD_ID,
+            RUN_ID,
+        )
+
+    assert terminal.status == "completed"
+    assert terminal.http_attempts_consumed == 3
+    assert len(gateway.poll_calls) == 2
+    assert [operation.kind for operation in operations[:3]] == [
+        AgentOperationKind.EXACT_START,
+        AgentOperationKind.EXACT_POLL,
+        AgentOperationKind.EXACT_POLL,
+    ]
+    assert all(operation.status is AgentOperationStatus.SUCCEEDED for operation in operations)
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_exact_run_accepts_live_evidence_when_provider_cursor_stays_zero(
+    tmp_path: Path,
+    execution_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "exact-zero-cursor-evidence.db")
+    await _seed_run(sessions, date_mode="exact")
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock)
+
+    async def poll_with_zero_cursor(
+        fake_gateway: ResumableFakeGateway,
+        continuation: ExactSearchContinuation,
+        **_kwargs: object,
+    ) -> ExactPollOutcome:
+        fake_gateway.poll_calls.append(continuation)
+        return ExactPollOutcome(
+            evidence=(fake_gateway.evidence_for(continuation),),
+            next_cursor=continuation.last_update_timestamp,
+            complete=False,
+        )
+
+    monkeypatch.setattr(ResumableFakeGateway, "poll_exact_once", poll_with_zero_cursor)
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+        )
+        evidence_count = (
+            await session.execute(
+                select(func.count()).select_from(agent_confirmed_offer_evidence_table)
+            )
+        ).scalar_one()
+    assert terminal.status == "completed"
+    assert evidence_count == 1
+    assert len(gateway.poll_calls) == 1
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_exact_run_accepts_provider_tagged_airport_change(
+    tmp_path: Path,
+    execution_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, sessions = await _session_factory(tmp_path, "exact-provider-airport-change.db")
+    await _seed_run(
+        sessions,
+        date_mode="exact",
+        requested_strategies=("through_ticket",),
+    )
+    clock = MutableClock()
+    gateway = ResumableFakeGateway(clock, connecting_evidence=True)
+
+    async def poll_with_airport_change(
+        fake_gateway: ResumableFakeGateway,
+        continuation: ExactSearchContinuation,
+        **_kwargs: object,
+    ) -> ExactPollOutcome:
+        fake_gateway.poll_calls.append(continuation)
+        base = fake_gateway.evidence_for(continuation)
+        segments = (replace(base.segments[0], destination="SAW"), *base.segments[1:])
+        evidence = replace(
+            base,
+            segments=segments,
+            provider_airport_changes=(("SAW", fake_gateway.connection_airport),),
+        )
+        return ExactPollOutcome(
+            evidence=(evidence,),
+            next_cursor=continuation.last_update_timestamp + 1,
+            complete=False,
+        )
+
+    monkeypatch.setattr(ResumableFakeGateway, "poll_exact_once", poll_with_airport_change)
+    async with sessions() as session:
+        terminal = await _run_until_terminal(
+            _service(execution_module, session, gateway, clock),
+            session,
+        )
+        evidence_count = (
+            await session.execute(
+                select(func.count()).select_from(agent_confirmed_offer_evidence_table)
+            )
+        ).scalar_one()
+    assert terminal.status == "completed"
+    assert evidence_count == 1
+    await engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_flexible_calendar_shortlists_by_amount_recency_and_stable_tie_break(
     tmp_path: Path,
     execution_module: ModuleType,
@@ -5294,7 +5446,7 @@ async def test_malformed_start_outcome_is_schema_failure_before_success_handoff(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("malformation", ("cursor", "binding", "cardinality"))
-async def test_invalid_poll_outcome_never_becomes_live_or_materializes_another_poll(
+async def test_invalid_poll_outcome_never_becomes_live(
     tmp_path: Path,
     execution_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
@@ -5322,7 +5474,7 @@ async def test_invalid_poll_outcome_never_becomes_live_or_materializes_another_p
             if malformation == "cursor":
                 return ExactPollOutcome(
                     evidence=(),
-                    next_cursor=continuation.last_update_timestamp,
+                    next_cursor=(1 if continuation.last_update_timestamp == 0 else 0),
                     complete=False,
                 )
             base = fake_gateway.evidence_for(continuation)
@@ -5375,18 +5527,21 @@ async def test_invalid_poll_outcome_never_becomes_live_or_materializes_another_p
         )
 
     assert terminal.status == "failed"
-    assert [operation.kind for operation in operations] == [
+    expected_kinds = [
         AgentOperationKind.EXACT_START,
         AgentOperationKind.EXACT_POLL,
     ]
-    assert operations[1].status is AgentOperationStatus.FAILED
-    assert operations[1].error_code == "provider_schema"
+    if malformation == "cursor":
+        expected_kinds.append(AgentOperationKind.EXACT_POLL)
+    assert [operation.kind for operation in operations] == expected_kinds
+    assert operations[-1].status is AgentOperationStatus.FAILED
+    assert operations[-1].error_code == "provider_schema"
     assert evidence_count == 0
-    assert [row["circuit_outcome"] for row in reservations] == [
-        "success",
-        "non_transient_failure",
-    ]
-    assert len(gateway.poll_calls) == 1
+    expected_circuit_outcomes = ["success", "non_transient_failure"]
+    if malformation == "cursor":
+        expected_circuit_outcomes.insert(1, "success")
+    assert [row["circuit_outcome"] for row in reservations] == expected_circuit_outcomes
+    assert len(gateway.poll_calls) == (2 if malformation == "cursor" else 1)
     await engine.dispose()
 
 

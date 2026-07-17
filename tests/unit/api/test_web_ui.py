@@ -157,6 +157,16 @@ def test_carrier_logo_uses_fixed_origin_and_one_shot_fallback() -> None:
     assert "appendCarrierStrip(card, hiddenCitySegments)" in agent_results
 
 
+def test_agent_confirmed_results_render_in_bounded_pages() -> None:
+    html = TestClient(create_app()).get("/").text
+    confirmed = _javascript_sync_function(html, "renderAgentConfirmedResults")
+
+    assert "const agentResultPageSize = 20;" in html
+    assert "candidates.slice(0, agentVisibleResultCount)" in confirmed
+    assert "Показать ещё" in confirmed
+    assert "Показано" in confirmed
+
+
 def test_web_ui_contains_readable_russian_without_mojibake() -> None:
     response = TestClient(create_app()).get("/")
 
@@ -508,6 +518,15 @@ def test_web_agent_entry_points_auth_render_and_revision_actions_share_plan_card
     assert "agent-operation-error" in html
 
 
+def test_web_agent_submit_retains_form_reference_across_async_completion() -> None:
+    html = TestClient(create_app()).get("/").text
+
+    assert "const assistantForm = event.currentTarget" in html
+    assert "new FormData(assistantForm)" in html
+    assert "assistantForm.reset()" in html
+    assert "event.currentTarget.reset()" not in html
+
+
 def test_web_empty_clarification_action_enters_current_plan_edit_mode() -> None:
     html = TestClient(create_app()).get("/").text
     revise = _javascript_function(html, "reviseAgentPlan")
@@ -661,6 +680,17 @@ def test_web_agent_run_persists_only_versioned_id_and_blocks_duplicate_execute()
     assert "candidate.ranking_reasons" not in confirmed
     assert 'region.hidden = results.state === "not_ready"' in confirmed
     assert "agentExecuteInFlight || !executeReady" in html
+
+
+def test_web_warns_about_provider_itinerary_airport_changes() -> None:
+    html = TestClient(create_app()).get("/").text
+    confirmed = _javascript_sync_function(html, "renderAgentConfirmedResults")
+    airport_changes = _javascript_sync_function(html, "agentAirportChanges")
+
+    assert "previous.destination !== current.origin" in airport_changes
+    assert "agentAirportChanges(segments)" in confirmed
+    assert "Смена аэропорта" in confirmed
+    assert "стоимость наземного переезда не подтверждена" in confirmed
 
 
 def _javascript_function(html: str, name: str) -> str:

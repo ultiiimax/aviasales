@@ -83,6 +83,26 @@ def test_ru_en_location_aliases_are_deterministic(
     assert isinstance(parsed.travel_intent, TravelIntent)
 
 
+def test_natural_russian_round_trip_is_complete_without_overlay() -> None:
+    parsed = IntentParser().parse(
+        (
+            "Найди самый дешёвый вариант из Санкт-Петербурга во Францию "
+            "с 10 по 17 сентября 2026 года, 1 взрослый, эконом"  # noqa: RUF001
+        ),
+        preset=None,
+        selections={"adults": 2, "children": 0, "infants": 0, "currency": "RUB"},
+    )
+
+    assert parsed.origin_scope == LocationScope(LocationScopeKind.CITY, "LED")
+    assert parsed.destination_scope == LocationScope(LocationScopeKind.COUNTRY, "FR")
+    assert parsed.trip_shape is TripShape.ROUND_TRIP
+    assert parsed.date_constraints[0].start_date == date(2026, 9, 10)
+    assert parsed.date_constraints[1].start_date == date(2026, 9, 17)
+    assert parsed.adults == 1
+    assert parsed.clarifications == ()
+    assert isinstance(parsed.travel_intent, TravelIntent)
+
+
 @pytest.mark.parametrize(
     ("selections", "expected_mode", "expected_end", "expected_flex"),
     (

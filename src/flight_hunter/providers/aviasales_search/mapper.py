@@ -105,6 +105,7 @@ def map_parsed_ticket_to_evidence(
         seller_name=ticket.best_proposal.gate_name or None,
         baggage_summary=_baggage_summary(ticket),
         checked_baggage=_checked_baggage(ticket),
+        provider_airport_changes=ticket.provider_airport_changes,
     )
 
 
@@ -271,9 +272,9 @@ def _baggage_summary(ticket: ParsedTicket) -> str | None:
     handbag = ticket.best_proposal.handbag
     parts: list[str] = []
     if count is not None and count > 0:
-        parts.append(f"baggage:{count}")
+        parts.append(f"checked baggage {count}")
     if handbag:
-        parts.append(f"handbag:{handbag}")
+        parts.append(f"cabin baggage {handbag}")
     return ", ".join(parts) if parts else None
 
 

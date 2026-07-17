@@ -400,6 +400,101 @@ def test_known_airport_transfer_cost_remains_fully_priced_and_comparable() -> No
     assert "unknown_mandatory_transfer_cost" not in risky.reasons
 
 
+def test_provider_itinerary_airport_change_is_ranked_as_a_visible_risk() -> None:
+    base = _offer(
+        36,
+        origin="LED",
+        destination="CDG",
+        amount_minor=8_000,
+        depart_at="2026-09-10T08:00:00+03:00",
+        arrive_at="2026-09-10T16:00:00+02:00",
+        protection=ProtectionStatus.UNKNOWN,
+    )
+    first_id, first = _segment(
+        "segment-36-a",
+        "LED",
+        "SAW",
+        "2026-09-10T08:00:00+03:00",
+        "2026-09-10T11:00:00+03:00",
+    )
+    second_id, second = _segment(
+        "segment-36-b",
+        "IST",
+        "CDG",
+        "2026-09-10T14:00:00+03:00",
+        "2026-09-10T16:00:00+02:00",
+    )
+    candidate = replace(
+        base,
+        segment_ids=(first_id, second_id),
+        segments=(first, second),
+        provider_airport_changes=(("SAW", "IST"),),
+    )
+
+    snapshot = CandidateRanker().rank((candidate,), comparison_currency="RUB")
+
+    risky = snapshot.view(RankingView.RISKY).candidates[0]
+    assert "airport_change" in risky.reasons
+
+
+def test_round_trip_report_keeps_route_endpoints_with_provider_airport_changes() -> None:
+    base = _offer(
+        360,
+        origin="LED",
+        destination="CDG",
+        amount_minor=18_000,
+        depart_at="2026-09-10T08:00:00+03:00",
+        arrive_at="2026-09-10T16:00:00+02:00",
+        protection=ProtectionStatus.UNKNOWN,
+    )
+    segment_values = (
+        _segment(
+            "segment-360-a",
+            "LED",
+            "SAW",
+            "2026-09-10T08:00:00+03:00",
+            "2026-09-10T11:00:00+03:00",
+        ),
+        _segment(
+            "segment-360-b",
+            "IST",
+            "CDG",
+            "2026-09-10T14:00:00+03:00",
+            "2026-09-10T16:00:00+02:00",
+        ),
+        _segment(
+            "segment-360-c",
+            "CDG",
+            "IST",
+            "2026-09-17T10:00:00+02:00",
+            "2026-09-17T14:00:00+03:00",
+        ),
+        _segment(
+            "segment-360-d",
+            "SAW",
+            "LED",
+            "2026-09-17T17:00:00+03:00",
+            "2026-09-17T20:00:00+03:00",
+        ),
+    )
+    candidate = replace(
+        base,
+        return_date=date(2026, 9, 17),
+        ticket_shape=None,
+        segment_ids=tuple(segment_id for segment_id, _ in segment_values),
+        segments=tuple(segment for _, segment in segment_values),
+        provider_airport_changes=(("SAW", "IST"), ("IST", "SAW")),
+    )
+    snapshot = CandidateRanker().rank((candidate,), comparison_currency="RUB")
+    report = FactReportBuilder().build(snapshot, (candidate,))
+    fact = report.candidate(CandidateReference(CandidateKind.CONFIRMED_OFFER, candidate.id))
+
+    assert tuple((leg.origin, leg.destination) for leg in fact.ordered_legs) == (
+        ("LED", "CDG"),
+        ("CDG", "LED"),
+    )
+
+
 def test_multi_city_fastest_sums_leg_travel_without_counting_planned_stay() -> None:
     first_leg = _offer(
         34,

@@ -119,6 +119,7 @@ class PollSearchResult:
     chunks: tuple[dict[str, object], ...]
     last_update_timestamp: int
     has_tickets: bool
+    not_modified: bool = False
 
     def __repr__(self) -> str:
         return "PollSearchResult(<private>)"
@@ -507,7 +508,9 @@ class AviasalesSearchClient:
             extra_headers={"X-Request-Id": request_id},
             full_url=True,
         )
-        chunks = _validated_poll_chunks(_json_value(response))
+        chunks = (
+            () if response.status_code == 304 else _validated_poll_chunks(_json_value(response))
+        )
         cursor = max(
             (
                 timestamp
@@ -520,6 +523,7 @@ class AviasalesSearchClient:
             chunks=chunks,
             last_update_timestamp=max(last_update_timestamp, cursor),
             has_tickets=any(bool(chunk.get("tickets")) for chunk in chunks),
+            not_modified=response.status_code == 304,
         )
 
     def get_purchase_url(

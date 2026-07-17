@@ -1,18 +1,27 @@
 # Aviasales Search API Contract Notes
 
 Verified: 2026-07-17. Sanitized live checks established that Suggest and exact
-start returned schema-valid HTTP 200 responses, one exact poll returned a
-schema-valid list, and Explore calendar returned schema-valid rows with
+start returned schema-valid HTTP 200 responses, exact polls returned both
+schema-valid lists and an empty HTTP 304 incremental response, and Explore calendar returned schema-valid rows with
 `locale=ru_RU`. The older `locale=ru` value returned HTTP 400 with an invalid
 locale classification. No prices, search IDs, result hosts, booking URLs,
 credentials or raw payloads were recorded. Search/result/click field provenance
 also uses the sanitized 2026-07-04 capture against `tickets-api.aviasales.ru`.
 
 The 2026-07-17 release smoke imported the local Aviasales kit without executing
-its Python client, ran one `MOW` → `LED` exact-search operation and received 50
-schema-valid `live` items. Only status, count, source, freshness and timestamps
-were retained; no price, credential, provider reference, raw payload or booking
-URL was recorded.
+its Python client. A sanitized `LED` → `CDG` one-way smoke received 50
+schema-valid `live` items; a separate round-trip check received 48 valid offers.
+The live result also confirmed a provider-tagged airport-change itinerary whose
+adjacent flights used different Istanbul airports. Only status, counts, source,
+freshness, timestamps and the minimum structural tags needed to verify the
+contract were retained; no price, credential, provider reference, raw payload
+or booking URL was recorded.
+
+The same verification found valid Paris-area round trips where outbound and
+return use different airports. Aviasales marks these rows with
+`airport_different`. The v1 reciprocal round-trip evidence model cannot express
+that shape without losing facts, so those rows are skipped individually; other
+well-formed tickets in the same chunk continue through exact request binding.
 
 Hot offers: APK contract statically verified 2026-07-15. No live hot-offer smoke
 was run, so the hot-offer section makes no claim of current upstream availability
@@ -147,6 +156,18 @@ cursor and whether that response contains tickets. The legacy synchronous
 `poll_results` wrapper repeats that primitive for compatibility. Approved agent
 runs use a client with `max_retries=0`; each retry is therefore a separate
 leased/budget-reserved operation attempt rather than hidden transport work.
+
+Live verification on 2026-07-17 returned both ticket-bearing and empty chunks
+with `last_update_timestamp=0`. Confirmed, request-bound evidence counts as
+useful progress even when the provider cursor does not advance; an empty chunk
+stores no evidence and consumes one of the explicitly bounded poll rounds before
+retrying. A cursor regression is still rejected as a schema error, so an
+unchanged empty response cannot create live evidence or an unbounded loop.
+
+An HTTP 304 poll with an empty body means that this cursor has no incremental
+update yet. It is normalized to an empty chunk tuple without JSON decoding and
+without advancing the cursor; the same bounded poll loop can then continue.
+Malformed bodies remain schema errors.
 
 The gateway continuation binds the normalized route, departure/return dates,
 currency, passenger total and caller-supplied operation UUID at start. Poll has
@@ -287,7 +308,9 @@ Top-level keys (verified from live capture 2026-07-04):
 - `id`: internal ticket id
 - `signature`: ticket signature (redacted in fixtures)
 - `segments[]`: each `{flights: [leg_index, ...], transfers: [], tags: []}` —
-  `flights` are **indices** into the chunk's `flight_legs` array
+  `flights` are **indices** into the chunk's `flight_legs` array. A verified
+  cross-airport connection contains a transfer object tagged
+  `airport_change`; the ticket is tagged the same way.
 - `proposals[]`: each `{id: "agent_id:index", price: {value, currency_code},
   price_per_person, agent_id, flight_terms, unified_price, weight, tags,
   minimum_fare, is_warmcache, cashback, cashback_per_person}`
@@ -307,11 +330,19 @@ Top-level keys (verified from live capture 2026-07-04):
 Dictionaries keyed by IATA/id. `airlines[id].name.ru.default`, `agents[id].label.ru.default`
 (or `.gate_name`), `places.airports[iata].name.ru.default`.
 
-An exact ticket has one non-empty, internally continuous outbound direction
-and at most one non-empty return direction. A return must be reciprocal to the
-outbound route; extra, discontinuous or non-reciprocal direction groups are
-schema failures. Normalization derives the public origin/destination from the
-outbound and the return date from the inbound departure.
+An exact ticket has one non-empty outbound direction and at most one non-empty
+return direction. Adjacent flights must be continuous unless the corresponding
+provider transfer object explicitly carries the verified `airport_change` tag;
+an untagged gap remains a schema failure. A return must be reciprocal to the
+outbound route, and extra or non-reciprocal direction groups are rejected.
+Normalization derives the public origin/destination from the outbound and the
+return date from the inbound departure. Provider-tagged airport changes remain
+visible in the segment path, receive a ranking risk penalty and are shown in the
+UI with unknown ground-transfer cost rather than being silently discarded.
+Provider-tagged `airport_different` round trips are valid upstream alternatives,
+not corrupt schema; they are omitted until the typed model carries distinct
+return-airport endpoints. Other route/date/currency mismatches are filtered at
+the gateway and never become confirmed evidence.
 
 ## Resumable agent gateway boundary
 

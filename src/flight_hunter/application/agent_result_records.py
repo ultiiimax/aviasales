@@ -103,6 +103,13 @@ def confirmed_record_to_evidence(
         _optional_text(itinerary.get("ticket_shape"))
         or (TicketShape.ROUND_TRIP.value if return_date is not None else TicketShape.ONE_WAY.value)
     )
+    provider_airport_changes = tuple(
+        _provider_airport_change_pair(value)
+        for value in _sequence(
+            itinerary.get("provider_airport_changes", ()),
+            "provider airport changes",
+        )
+    )
     return ConfirmedOfferEvidence(
         id=record.id,
         provider_id=record.provider_id,
@@ -123,6 +130,7 @@ def confirmed_record_to_evidence(
         price_basis=price_basis,
         ticket_shape=ticket_shape,
         checked_baggage=checked_baggage,
+        provider_airport_changes=provider_airport_changes,
     )
 
 
@@ -328,6 +336,16 @@ def _optional_money(value: object) -> Money | None:
     return Money(
         _integer(payload.get("minor_units"), "money minor units"),
         _text(payload.get("currency"), "money currency"),
+    )
+
+
+def _provider_airport_change_pair(value: object) -> tuple[str, str]:
+    pair = _sequence(value, "provider airport change")
+    if len(pair) != 2:
+        raise StoredAgentEvidenceError("provider airport change must contain two airports")
+    return (
+        _text(pair[0], "provider airport change origin"),
+        _text(pair[1], "provider airport change destination"),
     )
 
 

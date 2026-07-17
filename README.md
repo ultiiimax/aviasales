@@ -41,8 +41,9 @@ uv run alembic upgrade head
 ```
 
 Initializer создаёт `.env`, генерирует `APP_SECRET_KEY` и
-`AUTH_BOOTSTRAP_TOKEN`, выбирает локальную SQLite и оставляет внешние провайдеры
-выключенными. Существующий `.env` он не перезаписывает без `--force`.
+`AUTH_BOOTSTRAP_TOKEN`, включает автоматический локальный профиль, выбирает
+локальную SQLite и оставляет внешние провайдеры выключенными. Существующий
+`.env` он не перезаписывает без `--force`.
 
 Если есть локальный API kit с Aviasales, импортируй его отдельной командой. Она
 читает только `aviasales/keys.json` и строковые константы `client.py`, не
@@ -77,28 +78,27 @@ Invoke-RestMethod http://127.0.0.1:8000/readyz
 uv run flight-hunter-worker-healthcheck --role flight_hunter_worker
 ```
 
-### Первый владелец
+### Локальный профиль
 
-Сначала создай одноразовое owner invitation. Команда читает bootstrap token из
-локального `.env`, но не печатает его:
+При первом открытии `http://127.0.0.1:8000` приложение само создаёт владельца,
+выдаёт обычную bearer-сессию и сохраняет её в browser storage. Вводить код,
+имя или повторно отправлять первый запрос агенту не нужно. В меню
+«Локальный профиль» остаётся только кнопка восстановления
+«Переподключить профиль».
 
-```powershell
-$bootstrapToken = (Select-String -Path .env -Pattern '^AUTH_BOOTSTRAP_TOKEN=(.+)$').Matches[0].Groups[1].Value
-$headers = @{ 'X-Flight-Hunter-Bootstrap-Token' = $bootstrapToken }
-$body = @{ household_name = 'Моя семья'; recipient_label = 'owner' } | ConvertTo-Json
-$invitation = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/auth/bootstrap-invitation -Headers $headers -ContentType 'application/json' -Body $body
-$invitation.invitation_code
-```
-
-В web UI введи полученный код и имя. После входа session token хранится в
-локальном browser storage. В релизе обязательно:
+Для личного direct-запуска оставь:
 
 ```env
+AUTH_LOCAL_AUTO_LOGIN=true
 AUTH_ALLOW_LEGACY_HEADERS=false
 ```
 
-После создания владельца можно очистить `AUTH_BOOTSTRAP_TOKEN` в `.env` и
-перезапустить API/worker. Это выключит выпуск новых bootstrap invitations.
+Автовход доверяет только реальному loopback peer (`127.0.0.1`, `::1`), не
+заголовкам `Forwarded`/`X-Forwarded-For`. Запросы через container bridge,
+reverse proxy или сеть намеренно отклоняются. Для такого развёртывания установи
+`AUTH_LOCAL_AUTO_LOGIN=false` и используй invitation API или отдельный
+аутентифицированный proxy. Invitation endpoints сохранены для API-клиентов, но
+в личном web UI форма кода больше не показывается.
 
 ## Demo без внешней сети
 
@@ -164,6 +164,19 @@ demo содержит проверенные группы Москвы и Пар
 импортированный airport catalog добавляет конкретные аэропорты. Provider suggest
 можно подключить позже через тот же typed-контракт, не меняя search/watch API.
 
+Для полного локального каталога возьми официальный CSV
+[OurAirports](https://ourairports.com/data/) и импортируй его:
+
+```powershell
+$airportCsv = Join-Path $env:TEMP 'ourairports-airports.csv'
+Invoke-WebRequest https://davidmegginson.github.io/ourairports-data/airports.csv -OutFile $airportCsv
+uv run flight-hunter-import-airports --airports-csv $airportCsv
+```
+
+Если один provider-ticket требует переезда между разными аэропортами, карточка
+показывает оба аэропорта и отдельное предупреждение: стоимость наземного
+переезда считается неизвестной, а вариант получает дополнительный риск.
+
 Название авиакомпании берётся только из фактов сегмента. Логотип запрашивается
 по валидному двухсимвольному коду с фиксированного `https://pics.avs.io`;
 до загрузки и при ошибке остаётся детерминированная монограмма. URL картинки из
@@ -221,6 +234,11 @@ Compose применяет миграции только в API, ждёт `/read
 worker-процессов, использует общий named volume и публикует только
 `127.0.0.1:8000`. `worker` обслуживает browser/watch/deal/Telegram/maintenance,
 `agent-worker` — только durable agent runs.
+
+Важно: loopback auto-login не доверяет Docker bridge или reverse proxy. Для
+личного web UI без формы входа используй рекомендуемый direct-запуск выше. В
+container/multi-user режиме отключи `AUTH_LOCAL_AUTO_LOGIN` и подключайся через
+invitation API или доверенный аутентифицированный proxy.
 
 Статус и остановка:
 
@@ -313,6 +331,8 @@ rollback и restore drill:
 
 ## Основные endpoints
 
+- `POST /api/v1/auth/local-session` — loopback-only автоматическая owner-сессия;
+- `GET /api/v1/auth/me` — проверка текущей bearer-сессии;
 - `POST /api/v1/searches` — агрегированный поиск;
 - `POST /api/v1/agent/chat/turn` — typed intent, уточнение либо немедленный durable search;
 - `GET /api/v1/places/suggest` — локальные typed-подсказки городов/аэропортов;

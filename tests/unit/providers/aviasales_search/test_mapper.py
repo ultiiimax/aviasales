@@ -84,7 +84,7 @@ def test_map_parsed_ticket_produces_live_total_for_passengers_offer() -> None:
     assert offer.freshness == Freshness.LIVE
     assert offer.requires_live_confirmation is False
     assert offer.price_basis == PriceBasis.TOTAL_FOR_PASSENGERS
-    assert offer.baggage_summary == "baggage:1, handbag:1x8kg"
+    assert offer.baggage_summary == "checked baggage 1, cabin baggage 1x8kg"
     assert offer.seller_name == "Trip.com"
     assert offer.segments[0].flight_number == "DP6821"
     assert offer.segments[0].airline_name == "Pobeda"

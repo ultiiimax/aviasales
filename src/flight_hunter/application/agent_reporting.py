@@ -702,6 +702,9 @@ def _metrics(
     duration_seconds = _candidate_elapsed_seconds(candidate)
     airport_change = any(
         assumption.airport_change for assumption in _connection_assumptions(candidate)
+    ) or any(
+        inbound.destination != outbound.origin
+        for inbound, outbound in _connection_segment_pairs(candidate)
     )
     unknown_mandatory_cost = any(
         cost.kind is UnknownCostKind.GROUND_TRANSFER for cost in _unknown_costs(candidate)
@@ -1108,10 +1111,14 @@ def _confirmed_directions(
     if isinstance(candidate, ComposedRouteCandidate):
         return None
     segments = candidate.segments
-    if not segments or segments[0].origin != candidate.origin:
+    if (
+        not segments
+        or segments[0].origin != candidate.origin
+        or not _provider_airport_changes_are_bound(candidate)
+    ):
         return None
     if candidate.return_date is None:
-        if segments[-1].destination != candidate.destination or not _continuous_segments(segments):
+        if segments[-1].destination != candidate.destination:
             return None
         return (segments,)
     for boundary in range(1, len(segments)):
@@ -1121,15 +1128,18 @@ def _confirmed_directions(
             outbound[-1].destination == candidate.destination
             and inbound[0].origin == candidate.destination
             and inbound[-1].destination == candidate.origin
-            and _continuous_segments(outbound)
-            and _continuous_segments(inbound)
         ):
             return outbound, inbound
     return None
 
 
-def _continuous_segments(segments: Sequence[FlightSegmentSummary]) -> bool:
-    return all(inbound.destination == outbound.origin for inbound, outbound in pairwise(segments))
+def _provider_airport_changes_are_bound(candidate: ConfirmedOfferEvidence) -> bool:
+    actual = tuple(
+        (previous.destination, current.origin)
+        for previous, current in pairwise(candidate.segments)
+        if previous.destination != current.origin
+    )
+    return actual == candidate.provider_airport_changes
 
 
 def _ordered_legs(candidate: RankInput) -> tuple[ComposedRouteLeg, ...]:

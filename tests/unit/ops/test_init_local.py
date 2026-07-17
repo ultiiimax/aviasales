@@ -19,6 +19,7 @@ def test_initializer_generates_safe_local_secrets(tmp_path: Path) -> None:
     assert len(values["APP_SECRET_KEY"]) >= 43
     assert len(values["AUTH_BOOTSTRAP_TOKEN"]) >= 43
     assert values["AUTH_ALLOW_LEGACY_HEADERS"] == "false"
+    assert values["AUTH_LOCAL_AUTO_LOGIN"] == "true"
     assert values["DATABASE_URL"] == "sqlite+aiosqlite:///./flight_hunter_dev.db"
     assert values["AVIASALES_SEARCH_SIGNATURE"] == ""
     assert values["AVIASALES_SEARCH_MARKER"] == ""
