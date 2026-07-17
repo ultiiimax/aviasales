@@ -4,9 +4,10 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
+from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from flight_hunter.persistence.models import mapper_registry
+from flight_hunter.persistence.models import mapper_registry, watches_table
 from flight_hunter.persistence.repositories import (
     AuditEventRepository,
     HouseholdWatchRepository,
@@ -315,6 +316,60 @@ async def test_repository_updates_watch_with_optimistic_version() -> None:
     assert stale.status == "version_conflict"
     assert stale.current_version == 2
     assert hidden.status == "not_found"
+
+
+@pytest.mark.anyio
+async def test_repository_classifies_zero_row_conditional_watch_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = await _session_factory()
+    async with session_factory() as session:
+        repository = HouseholdWatchRepository(session)
+        await repository.add_watch(
+            NewWatch(
+                id=WATCH_A,
+                household_id=HOUSEHOLD_A,
+                owner_user_id=UUID("aaaaaaaa-0000-0000-0000-000000000001"),
+                origin="WAW",
+                destination="BCN",
+                departure_date="2026-10-12",
+                return_date=None,
+                created_at=NOW,
+            )
+        )
+        await session.execute(
+            update(watches_table).where(watches_table.c.id == str(WATCH_A)).values(version=2)
+        )
+
+        async def stale_precheck(_household_id: UUID, _watch_id: UUID) -> int:
+            return 1
+
+        monkeypatch.setattr(repository, "_active_watch_version", stale_precheck)
+        conflict = await repository.update_watch(
+            household_id=HOUSEHOLD_A,
+            watch_id=WATCH_A,
+            expected_version=1,
+            updated_at=NOW + timedelta(minutes=5),
+            updates={"enabled": False},
+        )
+
+        await session.execute(delete(watches_table).where(watches_table.c.id == str(WATCH_A)))
+        disappeared = await repository.update_watch(
+            household_id=HOUSEHOLD_A,
+            watch_id=WATCH_A,
+            expected_version=1,
+            updated_at=NOW + timedelta(minutes=10),
+            updates={"enabled": False},
+        )
+
+    assert conflict.status == "version_conflict"
+    assert conflict.current_version == 2
+    assert conflict.watch is not None
+    assert conflict.watch.version == 2
+    assert conflict.watch.enabled is True
+    assert disappeared.status == "not_found"
+    assert disappeared.current_version is None
+    assert disappeared.watch is None
 
 
 @pytest.mark.anyio

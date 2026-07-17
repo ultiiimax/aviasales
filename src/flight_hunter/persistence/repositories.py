@@ -2579,7 +2579,7 @@ class HouseholdWatchRepository:
             )
         values["updated_at"] = updated_at
         values["version"] = watches_table.c.version + 1
-        await self._session.execute(
+        result = await self._session.execute(
             update(watches_table)
             .where(watches_table.c.household_id == str(household_id))
             .where(watches_table.c.id == str(watch_id))
@@ -2588,6 +2588,15 @@ class HouseholdWatchRepository:
             .where(watches_table.c.version == expected_version)
             .values(**values)
         )
+        if cast(CursorResult[Any], result).rowcount != 1:
+            current = await self.get_watch(household_id, watch_id)
+            if current is None:
+                return WatchMutationResult(status="not_found", watch=None, current_version=None)
+            return WatchMutationResult(
+                status="version_conflict",
+                watch=current,
+                current_version=current.version,
+            )
         watch = await self.get_watch(household_id, watch_id)
         return WatchMutationResult(
             status="updated",

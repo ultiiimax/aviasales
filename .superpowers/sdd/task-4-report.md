@@ -68,3 +68,29 @@ not opened or migrated. No live provider call was made.
 Legacy service/repository constructors retain explicit `legacy-provider-city-v1` defaults for
 historical fixtures and the offline seed path. Public watch create and every route-changing public
 update always resolve complete current snapshots.
+
+## Review fix: zero-row optimistic update
+
+The repository now checks the affected-row count of the conditional `UPDATE`. If the row changed
+after the optimistic precheck, it returns `version_conflict` with the current watch and version; if
+the row disappeared, it returns `not_found`.
+
+RED was reproduced with real SQL by advancing the stored version after the precheck: the old code
+returned a false `updated` result. The same regression also deletes the row before the conditional
+update and verifies the disappearance classification.
+
+```text
+pytest <new zero-row repository node> + <existing partial-update API node>
+  2 passed in 1.15s
+
+ruff format --check <repository + repository test>
+  2 files already formatted
+
+ruff check <repository + repository test>
+  All checks passed
+
+mypy src/flight_hunter/persistence/repositories.py
+  Success: no issues found in 1 source file
+```
+
+No full suite was run, as requested. The active user database was not opened or migrated.
