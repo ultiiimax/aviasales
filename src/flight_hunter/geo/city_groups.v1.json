@@ -1,0 +1,54 @@
+{
+  "version": "city-groups-v1-2026-07-17",
+  "groups": [
+    {
+      "code": "MOW",
+      "country_code": "RU",
+      "allowed_member_countries": [
+        "RU"
+      ],
+      "names": {
+        "ru": "Москва",
+        "en": "Moscow"
+      },
+      "aliases": [
+        "москва",
+        "moscow"
+      ],
+      "airport_codes": [
+        "DME",
+        "SVO",
+        "VKO",
+        "ZIA"
+      ],
+      "coverage": "complete",
+      "membership_version": "mow-2026-07-17",
+      "observed_at": "2026-07-17",
+      "provenance": "bundled_city_group"
+    },
+    {
+      "code": "PAR",
+      "country_code": "FR",
+      "allowed_member_countries": [
+        "FR"
+      ],
+      "names": {
+        "ru": "Париж",
+        "en": "Paris"
+      },
+      "aliases": [
+        "париж",
+        "paris"
+      ],
+      "airport_codes": [
+        "BVA",
+        "CDG",
+        "ORY"
+      ],
+      "coverage": "complete",
+      "membership_version": "par-2026-07-17",
+      "observed_at": "2026-07-17",
+      "provenance": "bundled_city_group"
+    }
+  ]
+}

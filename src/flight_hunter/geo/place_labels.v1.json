@@ -1,0 +1,109 @@
+{
+  "version": "place-labels-v1-2026-07-17",
+  "labels": [
+    {
+      "kind": "airport",
+      "code": "DME",
+      "names": {"ru": "Домодедово"},
+      "city_names": {"ru": "Москва"},
+      "aliases": ["домодедово", "москва"],
+      "provenance": "bundled_place_label"
+    },
+    {
+      "kind": "airport",
+      "code": "SVO",
+      "names": {"ru": "Шереметьево"},
+      "city_names": {"ru": "Москва"},
+      "aliases": ["шереметьево", "москва"],
+      "provenance": "bundled_place_label"
+    },
+    {
+      "kind": "airport",
+      "code": "VKO",
+      "names": {"ru": "Внуково"},
+      "city_names": {"ru": "Москва"},
+      "aliases": ["внуково", "москва"],
+      "provenance": "bundled_place_label"
+    },
+    {
+      "kind": "airport",
+      "code": "ZIA",
+      "names": {"ru": "Жуковский"},
+      "city_names": {"ru": "Москва"},
+      "aliases": ["жуковский", "москва"],
+      "provenance": "bundled_place_label"
+    },
+    {
+      "kind": "airport",
+      "code": "BVA",
+      "names": {"ru": "Бове"},
+      "city_names": {"ru": "Париж"},
+      "aliases": ["бове", "париж"],
+      "provenance": "bundled_place_label"
+    },
+    {
+      "kind": "airport",
+      "code": "CDG",
+      "names": {"ru": "Шарль-де-Голль"},
+      "city_names": {"ru": "Париж"},
+      "aliases": ["шарль-де-голль", "париж"],
+      "provenance": "bundled_place_label"
+    },
+    {
+      "kind": "airport",
+      "code": "ORY",
+      "names": {"ru": "Орли"},
+      "city_names": {"ru": "Париж"},
+      "aliases": ["орли", "париж"],
+      "provenance": "bundled_place_label"
+    },
+    {
+      "kind": "airport",
+      "code": "LED",
+      "names": {"ru": "Пулково"},
+      "city_names": {"ru": "Санкт-Петербург"},
+      "aliases": ["пулково", "санкт-петербург", "спб", "питер"],
+      "provenance": "bundled_place_label"
+    },
+    {
+      "kind": "airport",
+      "code": "WAW",
+      "names": {"ru": "Варшава — Шопен"},
+      "city_names": {"ru": "Варшава"},
+      "aliases": ["шопен", "варшава"],
+      "provenance": "bundled_place_label"
+    },
+    {
+      "kind": "airport",
+      "code": "WMI",
+      "names": {"ru": "Варшава — Модлин"},
+      "city_names": {"ru": "Варшава"},
+      "aliases": ["модлин", "варшава"],
+      "provenance": "bundled_place_label"
+    },
+    {
+      "kind": "airport",
+      "code": "BCN",
+      "names": {"ru": "Барселона — Эль-Прат"},
+      "city_names": {"ru": "Барселона"},
+      "aliases": ["эль-прат", "барселона"],
+      "provenance": "bundled_place_label"
+    },
+    {
+      "kind": "airport",
+      "code": "PVG",
+      "names": {"ru": "Шанхай — Пудун"},
+      "city_names": {"ru": "Шанхай"},
+      "aliases": ["пудун", "шанхай"],
+      "provenance": "bundled_place_label"
+    },
+    {
+      "kind": "airport",
+      "code": "SHA",
+      "names": {"ru": "Шанхай — Хунцяо"},
+      "city_names": {"ru": "Шанхай"},
+      "aliases": ["хунцяо", "шанхай"],
+      "provenance": "bundled_place_label"
+    }
+  ]
+}
