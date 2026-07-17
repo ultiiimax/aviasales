@@ -16,7 +16,19 @@ This file is maintained by coding agents. Mark a slice done only after implement
 | Skyscanner Live | contract only | none | no | no | no | 2026-06-23 |
 | Duffel | contract only | none | no | no | no | 2026-06-23 |
 
-## Current Slice: API-kit agent integration and UI polish
+## Current Slice: Loopback local auto-login
+
+- Goal: open the personal loopback UI with a ready owner session so durable
+  agent search, history and watches work without invitation setup.
+- Design:
+  `docs/superpowers/specs/2026-07-17-local-auto-login-design.md`.
+- Plan:
+  - [ ] Add the config-gated loopback local-session endpoint and owner reuse.
+  - [ ] Replace invitation controls with automatic profile status/reconnect UI.
+  - [ ] Enable local auto-login in the ignored machine `.env` and update docs.
+  - [ ] Run focused API/UI/browser verification and restart the local release.
+
+## Previous Slice: API-kit agent integration and UI polish
 
 - Goal: accept a normal trip request once, start the durable Aviasales search
   immediately when the intent is complete, and present progress/results without
