@@ -43,6 +43,25 @@ def test_root_ui_is_readable_and_has_no_mojibake(page: Page, local_server: Local
     assert console_errors == []
 
 
+def test_local_profile_connects_without_invitation(page: Page, local_server: LocalServer) -> None:
+    page.goto(local_server.url, wait_until="networkidle")
+
+    expect(page.locator("#account-label")).to_have_text("Локальный профиль")
+    expect(page.locator("#auth-state")).to_contain_text("Готово")
+    expect(page.locator("#auth-reconnect-button")).to_be_enabled()
+    assert page.locator('input[name="invitation_code"]').count() == 0
+    assert page.locator('input[name="display_name"]').count() == 0
+
+    token = page.evaluate("() => window.localStorage.getItem('flight_hunter_session_token')")
+    assert isinstance(token, str) and token
+    me = page.request.get(
+        f"{local_server.url}/api/v1/auth/me",
+        headers=_auth_headers(token),
+    )
+    assert me.status == 200
+    assert me.json()["role"] == "owner"
+
+
 def test_owner_bootstrap_accept_and_me(page: Page, local_server: LocalServer) -> None:
     invitation = page.request.post(
         f"{local_server.url}/api/v1/auth/bootstrap-invitation",

@@ -195,7 +195,7 @@ def test_root_serves_search_screen_without_cached_radar_or_secrets() -> None:
     assert "/api/v1/personal-observations" in response.text
     assert "/api/v1/deals/discover" in response.text
     assert "/api/v1/manual-price-confirmations" in response.text
-    assert "/api/v1/auth/accept-invitation" in response.text
+    assert "/api/v1/auth/local-session" in response.text
     assert "/api/v1/auth/me" in response.text
     assert "/api/v1/watches" in response.text
     assert "/api/v1/admin/providers/health" in response.text
@@ -217,7 +217,14 @@ def test_root_serves_search_screen_without_cached_radar_or_secrets() -> None:
     assert 'id="agent-action-list"' in response.text
     assert 'id="confirmation-list"' in response.text
     assert "function authHeaders" in response.text
-    assert "function acceptInvitation" in response.text
+    assert "function ensureLocalSession" in response.text
+    assert "function reconnectLocalSession" in response.text
+    assert 'id="auth-reconnect-button"' in response.text
+    assert 'name="invitation_code"' not in response.text
+    assert 'name="display_name"' not in response.text
+    assert 'id="auth-submit-button"' not in response.text
+    assert 'id="auth-signout-button"' not in response.text
+    assert "function acceptInvitation" not in response.text
     assert "function recordManualConfirmation" in response.text
     assert "function renderManualConfirmations" in response.text
     assert "function renderWatches" in response.text
@@ -486,12 +493,14 @@ def test_web_agent_entry_points_auth_render_and_revision_actions_share_plan_card
     actions = _javascript_sync_function(html, "renderAgentActions")
 
     assert "authHeaders" in chat
+    assert "await ensureLocalSession()" in chat
     assert "renderAgentPlan(body.proposed_plan)" in chat
     assert '"Idempotency-Key": idempotencyKey' in chat
     assert '"run_started", "watch_created"' in chat
     assert "pollAgentRun(body.run" in chat
     assert "renderAgentRunPlaceholder(body.reply_ru, 0)" in chat
     assert "authHeaders" in preset
+    assert "await ensureLocalSession()" in preset
     assert "renderAgentPlan" in preset
     assert "reviseAgentPlan(action.parameters || {})" in actions
     assert "requestAgentChat" not in actions
@@ -508,12 +517,10 @@ def test_web_empty_clarification_action_enters_current_plan_edit_mode() -> None:
     assert "agentEditMode ? editAgentPlan(prompt) : requestAgentChat(prompt)" in html
 
 
-def test_web_signed_out_state_clears_agent_card_and_invalidates_polling() -> None:
+def test_web_local_profile_reconnect_clears_runtime_but_preserves_durable_ids() -> None:
     html = TestClient(create_app()).get("/").text
     clear_agent = _javascript_sync_function(html, "clearAgentSessionState")
-    clear_session = _javascript_sync_function(html, "clearSession")
-    signed_out = _javascript_sync_function(html, "renderSignedOutState")
-    refresh = _javascript_function(html, "refreshSessionState")
+    reconnect = _javascript_function(html, "reconnectLocalSession")
     poll = _javascript_function(html, "pollAgentRun")
 
     assert "agentSessionGeneration += 1" in clear_agent
@@ -525,61 +532,47 @@ def test_web_signed_out_state_clears_agent_card_and_invalidates_polling() -> Non
         assert f'getElementById("{control}").disabled = true' in clear_agent
     for sensitive_region in ("agent-plan-status", "agent-run-progress", "agent-partial-errors"):
         assert sensitive_region in clear_agent
-    assert "renderSignedOutState()" in clear_session
-    assert "clearAgentSessionState()" in signed_out
-    assert "clearSession()" in refresh
+    assert "window.localStorage.removeItem(sessionTokenKey)" in reconnect
+    assert "clearAgentSessionState()" in reconnect
+    assert "await ensureLocalSession()" in reconnect
+    assert "await loadSessionBoundData()" in reconnect
+    assert "window.localStorage.removeItem(agentPlanStorageKey)" not in reconnect
+    assert "window.localStorage.removeItem(agentRunStorageKey)" not in reconnect
     assert "sessionGeneration !== agentSessionGeneration" in poll
     assert "!sessionToken()" in poll
 
 
-def test_web_auth_refresh_is_bound_to_exact_session_identity() -> None:
+def test_web_local_profile_bootstrap_is_single_flight_and_generation_safe() -> None:
     html = TestClient(create_app()).get("/").text
-    identity = _javascript_sync_function(html, "sessionIdentityIsCurrent")
-    store = _javascript_sync_function(html, "storeSession")
-    refresh = _javascript_function(html, "refreshSessionState")
+    ensure = _javascript_function(html, "ensureLocalSession")
 
-    assert "clearAgentSessionState()" in store
-    assert "token === sessionToken()" in identity
-    assert "sessionGeneration === agentSessionGeneration" in identity
-    assert "const sessionGeneration = agentSessionGeneration" in refresh
-
-    guard = "if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;"
-    assert refresh.count(guard) == 3
-    fetch_position = refresh.index('await fetch("/api/v1/auth/me"')
-    response_guard_position = refresh.index(guard, fetch_position)
-    response_status_position = refresh.index("if (!response.ok)")
-    json_position = refresh.index("await response.json()")
-    success_guard_position = refresh.index(guard, json_position)
-    auth_ui_position = refresh.index("authState.textContent", success_guard_position)
-    catch_position = refresh.index("} catch (error) {")
-    error_guard_position = refresh.index(guard, catch_position)
-    clear_position = refresh.index("clearSession()", error_guard_position)
-
-    assert fetch_position < response_guard_position < response_status_position
-    assert json_position < success_guard_position < auth_ui_position
-    assert catch_position < error_guard_position < clear_position
+    assert "let localSessionPromise = null" in html
+    assert "if (sessionToken()) return true" in ensure
+    assert "if (localSessionPromise) return localSessionPromise" in ensure
+    assert "const requestGeneration = agentSessionGeneration" in ensure
+    assert 'fetch("/api/v1/auth/local-session", {method: "POST"})' in ensure
+    assert "requestGeneration !== agentSessionGeneration" in ensure
+    assert "if (localSessionPromise === pending)" in ensure
+    assert "localSessionPromise = null" in ensure
+    assert "window.localStorage.removeItem(agentPlanStorageKey)" not in ensure
+    assert "window.localStorage.removeItem(agentRunStorageKey)" not in ensure
 
 
-def test_web_auth_refresh_clears_missing_or_current_session_only_once() -> None:
+def test_web_auth_refresh_recovers_unauthorized_and_keeps_state_on_transient_error() -> None:
     html = TestClient(create_app()).get("/").text
-    clear_session = _javascript_sync_function(html, "clearSession")
-    signed_out = _javascript_sync_function(html, "renderSignedOutState")
     session_load = _javascript_function(html, "loadSessionBoundData")
     refresh = _javascript_function(html, "refreshSessionState")
 
-    assert "clearAgentSessionState()" not in clear_session
-    assert clear_session.count("renderSignedOutState()") == 1
-    assert signed_out.count("clearAgentSessionState()") == 1
-    assert refresh.count("clearSession()") == 2
-    assert "renderSignedOutState()" not in refresh
     assert "if (!sessionToken()) return;" in session_load
-    assert "renderSignedOutState()" not in session_load
-    assert "if (!token) {\n        clearSession();\n        return;" in refresh
-    assert (
-        "if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;\n"
-        "        clearSession();\n"
-        '        statusLine.textContent = "сессия истекла · войдите снова";'
-    ) in refresh
+    assert "if (!token) return ensureLocalSession()" in refresh
+    assert 'fetch("/api/v1/auth/me"' in refresh
+    assert "response.status === 401" in refresh
+    assert "window.localStorage.removeItem(sessionTokenKey)" in refresh
+    assert "clearAgentSessionState()" in refresh
+    assert "return ensureLocalSession()" in refresh
+    assert "Профиль временно недоступен" in refresh
+    assert "window.localStorage.removeItem(agentPlanStorageKey)" not in refresh
+    assert "window.localStorage.removeItem(agentRunStorageKey)" not in refresh
 
 
 def test_web_household_agent_actions_ignore_responses_from_old_session_generation() -> None:

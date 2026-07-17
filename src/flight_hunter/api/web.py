@@ -157,11 +157,9 @@ def render_index_html() -> str:
       margin-bottom: 16px;
     }
 
-    .auth-form {
+    .auth-controls {
       display: grid;
-      grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.7fr) auto auto;
       gap: 10px;
-      align-items: end;
       padding: 14px 16px;
     }
 
@@ -726,10 +724,6 @@ def render_index_html() -> str:
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
-      .auth-form {
-        grid-template-columns: 1fr 1fr;
-      }
-
       label.wide { grid-column: span 1; }
 
       .price,
@@ -760,10 +754,6 @@ def render_index_html() -> str:
       .search-form {
         grid-template-columns: 1fr;
         gap: 10px;
-      }
-
-      .auth-form {
-        grid-template-columns: 1fr;
       }
 
       .form-actions {
@@ -998,14 +988,12 @@ def render_index_html() -> str:
       line-height: 1.45;
     }
 
-    .auth-form {
-      grid-template-columns: 1fr 1fr;
+    .auth-controls {
       gap: 12px;
       padding: 16px 18px 18px;
     }
 
-    .auth-form .primary,
-    .auth-form .secondary {
+    .auth-controls .secondary {
       width: 100%;
     }
 
@@ -2091,7 +2079,6 @@ def render_index_html() -> str:
         display: none;
       }
 
-      .auth-form,
       .search-form {
         grid-template-columns: 1fr;
       }
@@ -2191,26 +2178,18 @@ def render_index_html() -> str:
                   stroke-width="1.8" stroke-linecap="round"/>
               </svg>
             </span>
-            <span id="account-label">Войти</span>
+            <span id="account-label">Локальный профиль</span>
             <span class="account-chevron" aria-hidden="true">⌄</span>
           </summary>
           <div class="account-popover" id="account-popover">
             <div class="account-copy">
-              <h2 id="auth-heading">Локальный доступ</h2>
-              <p>Одноразовый код нужен только для личных планов, истории и отслеживаний.</p>
+              <h2 id="auth-heading">Локальный профиль</h2>
+              <p>Планы, история и отслеживания сохраняются автоматически на этом компьютере.</p>
             </div>
-            <form class="auth-form" id="auth-form">
-              <div class="auth-state" id="auth-state" role="status" aria-live="polite"></div>
-              <label>Код приглашения
-                <input name="invitation_code" autocomplete="one-time-code"
-                  placeholder="Вставьте одноразовый код">
-              </label>
-              <label>Ваше имя
-                <input name="display_name" autocomplete="name" placeholder="Например, Алексей">
-              </label>
-              <button class="primary" type="submit" id="auth-submit-button">Войти</button>
-              <button class="secondary" type="button" id="auth-signout-button">Выйти</button>
-            </form>
+            <div class="auth-controls">
+              <div class="auth-state" id="auth-state" role="status" aria-live="polite">Подключаем профиль…</div>
+              <button class="secondary" type="button" id="auth-reconnect-button">Переподключить профиль</button>
+            </div>
           </div>
         </details>
       </div>
@@ -2437,7 +2416,7 @@ def render_index_html() -> str:
           <button class="secondary" type="button" id="refresh-watches-button">Обновить список</button>
         </div>
         <div class="watch-list" id="watch-list">
-          <div class="empty-state">Войдите, чтобы видеть отслеживания.</div>
+          <div class="empty-state">Подключаем локальный профиль…</div>
         </div>
         <div class="watch-history" id="watch-history-list"></div>
       </section>
@@ -2480,7 +2459,7 @@ def render_index_html() -> str:
           <button class="secondary" type="button" id="refresh-audit-button">Обновить</button>
         </div>
         <div class="admin-health-list" id="audit-list">
-          <div class="empty-state">Войдите, чтобы видеть журнал.</div>
+          <div class="empty-state">Подключаем локальный профиль…</div>
         </div>
       </details>
     </section>
@@ -2517,10 +2496,8 @@ def render_index_html() -> str:
     const agentEdgeReady = document.querySelector("#agent-edge-ready");
     const airportChoiceList = document.querySelector("#airport-choice-list");
     const agentActionList = document.querySelector("#agent-action-list");
-    const authForm = document.querySelector("#auth-form");
     const authState = document.querySelector("#auth-state");
-    const authSubmitButton = document.querySelector("#auth-submit-button");
-    const authSignoutButton = document.querySelector("#auth-signout-button");
+    const authReconnectButton = document.querySelector("#auth-reconnect-button");
     const accountMenu = document.querySelector(".account-menu");
     const accountLabel = document.querySelector("#account-label");
     let browserSources = [];
@@ -2538,6 +2515,7 @@ def render_index_html() -> str:
     let agentEditMode = false;
     let agentSessionGeneration = 0;
     let pendingAgentChat = null;
+    let localSessionPromise = null;
     const sessionTokenKey = "flight_hunter_session_token";
     const agentPlanStorageKey = "flight_hunter_agent_plan_id_v1";
     const agentRunStorageKey = "flight_hunter_agent_run_id_v1";
@@ -2612,9 +2590,9 @@ def render_index_html() -> str:
     function storeSession(session) {
       clearAgentSessionState();
       window.localStorage.setItem(sessionTokenKey, session.session_token);
-      accountLabel.textContent = householdRoleLabel(session.role);
-      authState.textContent = `Вход выполнен · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
-      authSignoutButton.disabled = false;
+      accountLabel.textContent = "Локальный профиль";
+      authState.textContent = `Готово · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
+      authReconnectButton.disabled = false;
       accountMenu.open = false;
     }
 
@@ -2669,28 +2647,11 @@ def render_index_html() -> str:
       agentActionList.replaceChildren();
       airportChoiceList.replaceChildren();
       chatLog.replaceChildren();
-      addMessage("bot", "Для планов и истории нужен локальный вход. Нажмите «Войти» вверху; точный поиск билетов доступен и без входа.");
+      addMessage("bot", "Опишите поездку обычными словами — я соберу маршрут и проверю доступные варианты.");
     }
 
-    function clearSession() {
-      window.localStorage.removeItem(sessionTokenKey);
-      window.localStorage.removeItem(agentPlanStorageKey);
-      window.localStorage.removeItem(agentRunStorageKey);
-      accountLabel.textContent = "Войти";
-      authState.textContent = "Вход не выполнен";
-      authSignoutButton.disabled = true;
-      renderSignedOutState();
-    }
-
-    function renderSignedOutState() {
-      clearAgentSessionState();
-      watchList.innerHTML = '<div class="empty-state">Войдите, чтобы видеть отслеживания.</div>';
-      auditList.innerHTML = '<div class="empty-state">Войдите, чтобы видеть аудит.</div>';
-      renderSignedOutConfirmationState();
-    }
-
-    function renderSignedOutConfirmationState() {
-      confirmationList.innerHTML = '<div class="empty-state">Войдите, чтобы видеть подтверждения.</div>';
+    function renderLocalProfilePendingConfirmationState() {
+      confirmationList.innerHTML = '<div class="empty-state">Подключаем локальный профиль…</div>';
     }
 
     async function loadSessionBoundData() {
@@ -2703,59 +2664,83 @@ def render_index_html() -> str:
       ]);
     }
 
+    async function ensureLocalSession() {
+      if (sessionToken()) return true;
+      if (localSessionPromise) return localSessionPromise;
+      const requestGeneration = agentSessionGeneration;
+      authState.textContent = "Подключаем профиль…";
+      authReconnectButton.disabled = true;
+      const pending = (async () => {
+        try {
+          const response = await fetch("/api/v1/auth/local-session", {method: "POST"});
+          if (!response.ok) throw new Error(await codedMessage(response));
+          const session = await response.json();
+          if (requestGeneration !== agentSessionGeneration || sessionToken()) {
+            return Boolean(sessionToken());
+          }
+          storeSession(session);
+          statusLine.textContent = "локальный профиль готов";
+          return true;
+        } catch (error) {
+          if (requestGeneration === agentSessionGeneration && !sessionToken()) {
+            authState.textContent = `Профиль временно недоступен: ${error.message}`;
+            statusLine.textContent = "локальный профиль недоступен";
+          }
+          return false;
+        }
+      })();
+      localSessionPromise = pending;
+      try {
+        return await pending;
+      } finally {
+        if (localSessionPromise === pending) {
+          localSessionPromise = null;
+          authReconnectButton.disabled = false;
+        }
+      }
+    }
+
     async function refreshSessionState() {
       const token = sessionToken();
-      if (!token) {
-        clearSession();
-        return;
-      }
+      if (!token) return ensureLocalSession();
       const sessionGeneration = agentSessionGeneration;
       try {
         const response = await fetch("/api/v1/auth/me", {
           headers: {"Authorization": `Bearer ${token}`}
         });
-        if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;
+        if (!sessionIdentityIsCurrent(token, sessionGeneration)) return false;
+        if (response.status === 401) {
+          window.localStorage.removeItem(sessionTokenKey);
+          clearAgentSessionState();
+          return ensureLocalSession();
+        }
         if (!response.ok) throw new Error(await codedMessage(response));
         const session = await response.json();
-        if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;
-        accountLabel.textContent = householdRoleLabel(session.role);
-        authState.textContent = `Вход выполнен · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
-        authSignoutButton.disabled = false;
+        if (!sessionIdentityIsCurrent(token, sessionGeneration)) return false;
+        accountLabel.textContent = "Локальный профиль";
+        authState.textContent = `Готово · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
+        authReconnectButton.disabled = false;
+        return true;
       } catch (error) {
-        if (!sessionIdentityIsCurrent(token, sessionGeneration)) return;
-        clearSession();
-        statusLine.textContent = "сессия истекла · войдите снова";
+        if (!sessionIdentityIsCurrent(token, sessionGeneration)) return false;
+        authState.textContent = `Профиль временно недоступен: ${error.message}`;
+        statusLine.textContent = "локальный профиль временно недоступен";
+        return false;
       }
     }
 
-    async function acceptInvitation(event) {
-      event.preventDefault();
-      const form = new FormData(authForm);
-      const invitationCode = text(form.get("invitation_code"));
-      const displayName = text(form.get("display_name"));
-      if (!invitationCode || !displayName) {
-        authState.textContent = "Введите код приглашения и имя";
-        return;
-      }
-      authSubmitButton.disabled = true;
+    async function reconnectLocalSession() {
+      authReconnectButton.disabled = true;
+      localSessionPromise = null;
+      window.localStorage.removeItem(sessionTokenKey);
+      clearAgentSessionState();
+      authState.textContent = "Переподключаем профиль…";
       try {
-        const response = await fetch("/api/v1/auth/accept-invitation", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({
-            invitation_code: invitationCode,
-            display_name: displayName
-          })
-        });
-        if (!response.ok) throw new Error(await codedMessage(response));
-        storeSession(await response.json());
-        authForm.reset();
-        statusLine.textContent = "локальный вход выполнен";
-        await loadSessionBoundData();
-      } catch (error) {
-        authState.textContent = `Не удалось войти: ${error.message}`;
+        const ready = await ensureLocalSession();
+        if (ready) await loadSessionBoundData();
+        return ready;
       } finally {
-        authSubmitButton.disabled = false;
+        authReconnectButton.disabled = false;
       }
     }
 
@@ -4486,7 +4471,7 @@ def render_index_html() -> str:
       if (sessionToken()) {
         loadManualConfirmations();
       } else {
-        renderSignedOutConfirmationState();
+        renderLocalProfilePendingConfirmationState();
       }
     }
 
@@ -5870,19 +5855,12 @@ def render_index_html() -> str:
       return response.json();
     }
 
-    function promptForLocalAccess() {
-      accountMenu.open = true;
-      authState.textContent = "Войдите один раз, чтобы агент мог сохранять план и продолжать его после перезапуска.";
-      statusLine.textContent = "нужен локальный вход";
-    }
-
     async function requestAgentChat(prompt) {
-      const sessionGeneration = agentSessionGeneration;
-      if (!sessionToken()) {
-        promptForLocalAccess();
-        addMessage("bot", "Открыл вход в правом верхнем углу. После входа запрос останется в поле — отправьте его ещё раз.");
+      if (!(await ensureLocalSession())) {
+        addMessage("bot", "Не удалось подключить локальный профиль. Нажмите «Переподключить профиль» и попробуйте ещё раз.");
         return;
       }
+      const sessionGeneration = agentSessionGeneration;
       lastAgentPrompt = prompt;
       addMessage("user", prompt);
       statusLine.textContent = "понимаю маршрут...";
@@ -5978,12 +5956,11 @@ def render_index_html() -> str:
     }
 
     async function requestAgentPlan(presetId, visiblePrompt) {
-      const sessionGeneration = agentSessionGeneration;
-      if (!sessionToken()) {
-        promptForLocalAccess();
-        addMessage("bot", "Для этого сценария нужен локальный вход — форма уже открыта в правом верхнем углу.");
+      if (!(await ensureLocalSession())) {
+        addMessage("bot", "Не удалось подключить локальный профиль. Нажмите «Переподключить профиль» и повторите сценарий.");
         return;
       }
+      const sessionGeneration = agentSessionGeneration;
       addMessage("user", visiblePrompt);
       statusLine.textContent = "ИИ думает...";
       try {
@@ -6243,11 +6220,7 @@ def render_index_html() -> str:
     document.getElementById("agent-plan-full").addEventListener("click", cloneAgentPlanAsFull);
     document.getElementById("agent-run-cancel").addEventListener("click", cancelAgentRun);
     document.getElementById("agent-plan-edit").addEventListener("click", beginAgentPlanEdit);
-    authForm.addEventListener("submit", acceptInvitation);
-    authSignoutButton.addEventListener("click", () => {
-      clearSession();
-      statusLine.textContent = "вы вышли из локального профиля";
-    });
+    authReconnectButton.addEventListener("click", reconnectLocalSession);
     personalObserveButton.addEventListener("click", runPersonalObservation);
     dealDiscoveryButton.addEventListener("click", runDealDiscovery);
     createWatchButton.addEventListener("click", createWatchFromSearch);
@@ -6260,8 +6233,9 @@ def render_index_html() -> str:
       const prompt = text(new FormData(event.currentTarget).get("agent_prompt"));
       if (!prompt) return;
       const operation = agentEditMode ? editAgentPlan(prompt) : requestAgentChat(prompt);
-      void operation;
-      if (sessionToken()) event.currentTarget.reset();
+      void operation.then(() => {
+        if (sessionToken()) event.currentTarget.reset();
+      });
     });
     updatePassengerSummary();
     renderAgentRuntime({
@@ -6276,7 +6250,10 @@ def render_index_html() -> str:
     loadBrowserSources();
     loadAdminHealth();
     loadAgentPresets();
-    refreshSessionState().then(loadSessionBoundData);
+    refreshSessionState().then((ready) => {
+      if (ready) return loadSessionBoundData();
+      return undefined;
+    });
     window.addEventListener("unhandledrejection", (event) => {
       event.preventDefault();
       if (!sessionToken()) return;

@@ -246,6 +246,6 @@ def _open_authenticated_agent(
         [session_token, plan_id],
     )
     page.reload(wait_until="networkidle")
-    expect(page.locator("#auth-state")).to_contain_text("Вход выполнен")
+    expect(page.locator("#auth-state")).to_contain_text("Готово")
     if plan_id is not None:
         expect(page.locator("#agent-plan-card")).to_be_visible()
