@@ -139,6 +139,67 @@ async def test_identity_repository_revokes_sessions_and_disables_membership() ->
     assert auth_session is None
 
 
+@pytest.mark.anyio
+async def test_active_owner_identities_are_enabled_deterministic_and_bounded() -> None:
+    session_factory = await _session_factory()
+    identities = (
+        (
+            UUID("10000000-0000-0000-0000-000000000001"),
+            UUID("20000000-0000-0000-0000-000000000001"),
+            NOW,
+        ),
+        (
+            UUID("10000000-0000-0000-0000-000000000002"),
+            UUID("20000000-0000-0000-0000-000000000002"),
+            NOW + timedelta(seconds=1),
+        ),
+        (
+            UUID("10000000-0000-0000-0000-000000000003"),
+            UUID("20000000-0000-0000-0000-000000000003"),
+            NOW + timedelta(seconds=2),
+        ),
+        (
+            UUID("10000000-0000-0000-0000-000000000004"),
+            UUID("20000000-0000-0000-0000-000000000004"),
+            NOW - timedelta(seconds=1),
+        ),
+    )
+    async with session_factory() as session:
+        repository = IdentityRepository(session)
+        for household_id, user_id, created_at in identities:
+            await repository.add_household(
+                household_id=household_id,
+                name=f"Family {household_id}",
+                created_at=created_at,
+            )
+            await repository.add_user(
+                user_id=user_id,
+                display_name=f"Owner {user_id}",
+                created_at=created_at,
+            )
+            await repository.add_membership(
+                household_id=household_id,
+                user_id=user_id,
+                role=HouseholdRole.OWNER,
+                created_at=created_at,
+            )
+        disabled = await repository.disable_membership(
+            household_id=identities[3][0],
+            user_id=identities[3][1],
+            disabled_at=NOW,
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        owners = await IdentityRepository(session).active_owner_identities(limit=2)
+
+    assert disabled
+    assert [(owner.household_id, owner.user_id) for owner in owners] == [
+        identities[0][:2],
+        identities[1][:2],
+    ]
+
+
 async def _session_factory():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:

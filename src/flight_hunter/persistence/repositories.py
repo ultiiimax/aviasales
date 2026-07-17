@@ -117,6 +117,12 @@ class HouseholdMembershipRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ActiveOwnerIdentityRecord:
+    household_id: UUID
+    user_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
 class AuthInvitationRecord:
     id: UUID
     household_id: UUID
@@ -1607,6 +1613,34 @@ class ManualPriceConfirmationRepository:
 class IdentityRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def active_owner_identities(
+        self,
+        *,
+        limit: int = 2,
+    ) -> tuple[ActiveOwnerIdentityRecord, ...]:
+        bounded_limit = min(max(limit, 1), 10)
+        result = await self._session.execute(
+            select(
+                household_memberships_table.c.household_id,
+                household_memberships_table.c.user_id,
+            )
+            .where(household_memberships_table.c.role == HouseholdRole.OWNER.value)
+            .where(household_memberships_table.c.disabled_at.is_(None))
+            .order_by(
+                household_memberships_table.c.created_at,
+                household_memberships_table.c.household_id,
+                household_memberships_table.c.user_id,
+            )
+            .limit(bounded_limit)
+        )
+        return tuple(
+            ActiveOwnerIdentityRecord(
+                household_id=UUID(row.household_id),
+                user_id=UUID(row.user_id),
+            )
+            for row in result.fetchall()
+        )
 
     async def add_household(
         self,
