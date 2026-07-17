@@ -55,6 +55,7 @@ class AppSettings:
     agent_codex_cli_enabled: bool = False
     agent_codex_cli_timeout_seconds: int = 8
     agent_codex_cli_service_tier: str = "fast"
+    agent_codex_cli_max_output_bytes: int = 16_384
     agent_openai_enabled: bool = False
     agent_openai_model: str = "gpt-5.5"
     agent_openai_timeout_seconds: int = 8
@@ -207,6 +208,10 @@ class AppSettings:
                 default=8,
             ),
             agent_codex_cli_service_tier=os.getenv("AGENT_CODEX_CLI_SERVICE_TIER", "fast"),
+            agent_codex_cli_max_output_bytes=_env_int(
+                "AGENT_CODEX_CLI_MAX_OUTPUT_BYTES",
+                default=16_384,
+            ),
             agent_openai_enabled=_env_bool("AGENT_OPENAI_ENABLED", default=False),
             agent_openai_model=os.getenv("AGENT_OPENAI_MODEL", "gpt-5.5"),
             agent_openai_timeout_seconds=_env_int(

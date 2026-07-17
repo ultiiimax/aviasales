@@ -1629,6 +1629,30 @@ class AgentRunRepository:
             execute_idempotency_key,
         )
 
+    async def get_by_execute_idempotency_prefix(
+        self,
+        household_id: UUID,
+        execute_idempotency_prefix: str,
+    ) -> AgentPlanRunRecord | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(agent_plan_runs_table)
+                    .where(agent_plan_runs_table.c.household_id == str(household_id))
+                    .where(
+                        agent_plan_runs_table.c.execute_idempotency_key.like(
+                            f"{execute_idempotency_prefix}%"
+                        )
+                    )
+                    .order_by(agent_plan_runs_table.c.created_at.desc())
+                    .limit(1)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return _run_record(row) if row is not None else None
+
     async def list_runs(
         self,
         household_id: UUID,

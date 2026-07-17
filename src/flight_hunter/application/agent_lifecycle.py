@@ -260,6 +260,8 @@ class PlanSummaryView:
     hidden_city_enabled: bool
     hidden_city_warning_version: str | None = None
     hidden_city_warnings: tuple[HiddenCityWarning, ...] = ()
+    baggage_preference: str = "unspecified"
+    wants_watch: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +372,7 @@ class RunView:
     cancellation_requested: bool
     coverage_report: CoverageReportView | None
     coverage_error_code: str | None
+    idempotent_replay: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,7 +575,8 @@ class AgentLifecycleService:
                 command.idempotency_key,
             )
             if existing is not None:
-                return await self._project_run(_bound_idempotent_run(existing, command))
+                projected = await self._project_run(_bound_idempotent_run(existing, command))
+                return replace(projected, idempotent_replay=True)
             if (
                 command.revision_id is None
                 or command.expected_revision is None
@@ -589,7 +593,8 @@ class AgentLifecycleService:
                 command.idempotency_key,
             )
             if existing is not None:
-                return await self._project_run(_bound_idempotent_run(existing, command))
+                projected = await self._project_run(_bound_idempotent_run(existing, command))
+                return replace(projected, idempotent_replay=True)
             revision = await self._expire_if_due(revision)
             if revision.state == "expired":
                 raise AgentLifecycleError("agent_plan_expired")
@@ -646,6 +651,41 @@ class AgentLifecycleService:
             projected = await self._project_run(_bound_idempotent_run(stored, command))
         _log_run_lifecycle("agent_run_approved", projected)
         return projected
+
+    async def get_chat_replay(
+        self,
+        *,
+        household_id: UUID,
+        user_id: UUID,
+        session_id: UUID,
+        execute_idempotency_prefix: str,
+        execute_idempotency_key: str,
+    ) -> tuple[PlanView, RunView] | None:
+        async with self._owned_transaction():
+            run = await self._runs.get_by_execute_idempotency(
+                household_id,
+                execute_idempotency_key,
+            )
+            if run is None:
+                conflict = await self._runs.get_by_execute_idempotency_prefix(
+                    household_id,
+                    execute_idempotency_prefix,
+                )
+                if conflict is not None:
+                    raise AgentLifecycleError("agent_run_idempotency_conflict")
+                return None
+            approval = await self._runs.get_approval(household_id, run.approval_id)
+            if (
+                approval is None
+                or approval.approved_by_user_id != user_id
+                or approval.snapshot.approved_by_session_id != session_id
+            ):
+                raise AgentLifecycleError("agent_run_idempotency_conflict")
+            revision = await self._plans.get_revision(household_id, run.revision_id)
+            if revision is None or revision.plan_id != run.plan_id:
+                raise AgentLifecycleError("agent_plan_not_found")
+            projected = await self._project_run(run)
+            return _plan_view(revision), replace(projected, idempotent_replay=True)
 
     async def get_plan(self, household_id: UUID, plan_id: UUID) -> PlanView:
         async with self._owned_transaction():
@@ -1390,6 +1430,8 @@ def _intent_payload(parsed: ParsedIntent) -> dict[str, object]:
         "nearby_radius_km": parsed.nearby_radius_km,
         "currency": parsed.currency,
         "requested_strategies": [strategy.value for strategy in parsed.requested_strategies],
+        "baggage_preference": parsed.baggage_preference,
+        "wants_watch": parsed.wants_watch,
         "preset_id": parsed.preset_id.value if parsed.preset_id is not None else None,
         "analysis_modes": (
             [mode.value for mode in preset_edits.analysis_modes] if preset_edits is not None else []
@@ -1678,6 +1720,11 @@ def _plan_summary_view(revision: AgentPlanRevisionRecord) -> PlanSummaryView:
         hidden_city_enabled=hidden_city_enabled,
         hidden_city_warning_version=(HIDDEN_CITY_WARNING_VERSION if hidden_city_enabled else None),
         hidden_city_warnings=HIDDEN_CITY_WARNINGS if hidden_city_enabled else (),
+        baggage_preference=_required_stored_str(
+            intent.get("baggage_preference", "unspecified"),
+            "baggage_preference",
+        ),
+        wants_watch=_stored_bool(intent.get("wants_watch", False), "wants_watch"),
     )
 
 
@@ -2328,6 +2375,11 @@ def _parsed_intent(revision: AgentPlanRevisionRecord) -> ParsedIntent:
         requested_strategies=tuple(
             RouteStrategy(str(value)) for value in _sequence(intent.get("requested_strategies", []))
         ),
+        baggage_preference=cast(
+            Literal["checked", "carry_on", "none", "unspecified"],
+            str(intent.get("baggage_preference", "unspecified")),
+        ),
+        wants_watch=bool(intent.get("wants_watch", False)),
         clarifications=clarifications,
         preset_id=AgentPresetId(str(preset_raw)) if preset_raw is not None else None,
     )
@@ -2621,6 +2673,12 @@ def _sequence(value: object) -> Sequence[object]:
 def _stored_int(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise RuntimeError(f"stored agent plan {field_name} must be an integer")
+    return value
+
+
+def _stored_bool(value: object, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise RuntimeError(f"stored agent plan {field_name} must be a boolean")
     return value
 
 

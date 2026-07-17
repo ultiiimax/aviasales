@@ -29,6 +29,8 @@ from flight_hunter.agent.chat import (
     AgentTurnResponse,
     AirportOption,
 )
+from flight_hunter.agent.codex_cli import CodexCliAgentAdapter
+from flight_hunter.agent.openai_responses import OpenAIResponsesAgentAdapter
 from flight_hunter.agent.presets import AgentPreset, apply_preset_edits, list_presets
 from flight_hunter.api.agent_routes import (
     AgentRouteError,
@@ -38,13 +40,19 @@ from flight_hunter.api.agent_routes import (
     create_agent_router,
 )
 from flight_hunter.api.agent_schemas import AgentPlanResponse as DurableAgentPlanResponse
+from flight_hunter.api.agent_schemas import AgentRunResponse as DurableAgentRunResponse
 from flight_hunter.api.web import (
     render_index_html,
     render_pwa_icon_svg,
     render_service_worker_js,
     render_web_manifest,
 )
-from flight_hunter.application.agent_intent import IntentParser
+from flight_hunter.application.agent_intent import (
+    IntentOverlay,
+    IntentOverlayProvider,
+    IntentOverlayTransportError,
+    IntentParser,
+)
 from flight_hunter.application.agent_lifecycle import (
     AgentLifecycleError,
     AgentLifecycleService,
@@ -52,6 +60,7 @@ from flight_hunter.application.agent_lifecycle import (
 )
 from flight_hunter.application.agent_planning import AgentPlanBuilder
 from flight_hunter.application.agent_scope import ScopeResolver
+from flight_hunter.application.agent_tools import AgentToolGateway
 from flight_hunter.application.airport_service import (
     AirportAutocompleteMatch,
     AirportService,
@@ -694,8 +703,13 @@ class AgentRuntimeResponse(BaseModel):
 
 
 class AgentChatTurnResponse(BaseModel):
+    outcome: Literal["clarification", "run_started", "watch_created", "failure"]
     reply_ru: str
     proposed_plan: DurableAgentPlanResponse
+    run: DurableAgentRunResponse | None
+    idempotent_replay: bool
+    warnings: list[str]
+    watch_id: UUID | None
     extracted: dict[str, object]
     missing_slots: list[str]
     airport_options: dict[str, list[AgentAirportOptionResponse]]
@@ -1360,6 +1374,7 @@ def create_app(
 ) -> FastAPI:
     load_env_file()
     settings = settings or AppSettings.from_env()
+    agent_intent_adapter = agent_intent_adapter or _configured_agent_intent_adapter(settings)
     app = FastAPI(title="Flight Hunter", version=__version__)
     registry = ProviderRegistry.default(clock=lambda: datetime.now(UTC), settings=settings)
     provider_instances = (
@@ -1433,7 +1448,9 @@ def create_app(
 
         return AgentLifecycleService(
             session=session,
-            parser=IntentParser(),
+            parser=IntentParser(
+                overlay_provider=_intent_overlay_provider(agent_intent_adapter),
+            ),
             builder=AgentPlanBuilder(
                 clock=lifecycle_clock,
                 settings=settings,
@@ -2474,9 +2491,10 @@ def create_app(
             default=None,
             alias="X-Flight-Hunter-User-Id",
         ),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> AgentChatTurnResponse:
         async with session_factory() as auth_session:
-            auth_context = await _optional_auth_context_from_headers(
+            auth_context = await _agent_auth_context_from_headers(
                 auth_session,
                 settings=settings,
                 authorization_header=authorization_header,
@@ -2485,10 +2503,22 @@ def create_app(
             )
         if auth_context is None:
             raise AgentRouteError("auth_context_missing")
-        household_id, user_id = auth_context
+        household_id, user_id, session_id = auth_context
+        key = (idempotency_key or "").strip()
+        if not key or len(key) > 200:
+            raise AgentRouteError("idempotency_key_required")
         async with session_factory() as session:
+            lifecycle = agent_lifecycle_service(session)
+            gateway = AgentToolGateway(
+                lifecycle,
+                watch_service=WatchService(
+                    HouseholdWatchRepository(session),
+                    audit_repository=AuditEventRepository(session),
+                ),
+            )
             service = AgentChatService(
-                plan_creator=agent_lifecycle_service(session),
+                plan_creator=gateway,
+                search_gateway=gateway,
             )
             try:
                 response = await service.handle_turn(
@@ -2508,6 +2538,8 @@ def create_app(
                         children=body.children,
                         infants=body.infants,
                         currency=body.currency,
+                        session_id=session_id,
+                        idempotency_key=key,
                     )
                 )
             except AgentLifecycleError as error:
@@ -4137,6 +4169,25 @@ async def _optional_auth_context_from_headers(
     return _auth_context(household_header, user_header)
 
 
+async def _agent_auth_context_from_headers(
+    session: AsyncSession,
+    *,
+    settings: AppSettings,
+    authorization_header: str | None,
+    household_header: str | None,
+    user_header: str | None,
+) -> tuple[UUID, UUID, UUID] | None:
+    auth_session = await _auth_session_from_authorization(session, authorization_header)
+    if auth_session is not None:
+        return auth_session.household_id, auth_session.user_id, auth_session.id
+    if not settings.auth_allow_legacy_headers:
+        return None
+    context = _auth_context(household_header, user_header)
+    if context is None:
+        return None
+    return context[0], context[1], UUID(int=0)
+
+
 async def _user_context_from_headers(
     session: AsyncSession,
     *,
@@ -4677,8 +4728,13 @@ def _agent_preset_response(preset: AgentPreset) -> AgentPresetResponse:
 
 def _agent_chat_turn_response(response: AgentTurnResponse) -> AgentChatTurnResponse:
     return AgentChatTurnResponse(
+        outcome=response.outcome,
         reply_ru=response.reply_ru,
         proposed_plan=DurableAgentPlanResponse.from_view(response.proposed_plan),
+        run=(DurableAgentRunResponse.from_view(response.run) if response.run is not None else None),
+        idempotent_replay=response.idempotent_replay,
+        warnings=list(response.warnings),
+        watch_id=response.watch_id,
         extracted=response.extracted,
         missing_slots=list(response.missing_slots),
         airport_options={
@@ -5596,6 +5652,59 @@ def _telegram_response_status(code: TelegramWebhookDecisionCode) -> tuple[int, s
         TelegramWebhookDecisionCode.INVALID_UPDATE: (400, "rejected"),
         TelegramWebhookDecisionCode.SECRET_MISMATCH: (403, "rejected"),
     }[code]
+
+
+def _configured_agent_intent_adapter(settings: AppSettings) -> AgentIntentAdapter | None:
+    if settings.agent_codex_cli_enabled:
+        return CodexCliAgentAdapter(
+            enabled=True,
+            service_tier=settings.agent_codex_cli_service_tier,
+            timeout_seconds=settings.agent_codex_cli_timeout_seconds,
+            max_output_bytes=settings.agent_codex_cli_max_output_bytes,
+        )
+    if settings.agent_openai_enabled and settings.openai_api_key:
+        return OpenAIResponsesAgentAdapter(
+            api_key=settings.openai_api_key,
+            model=settings.agent_openai_model,
+            timeout_seconds=settings.agent_openai_timeout_seconds,
+            base_url=settings.openai_base_url,
+        )
+    return None
+
+
+def _intent_overlay_provider(
+    adapter: AgentIntentAdapter | None,
+) -> IntentOverlayProvider | None:
+    if adapter is None:
+        return None
+
+    def provide(
+        text: str,
+        _preset: object,
+        _selections: object,
+    ) -> IntentOverlay:
+        draft = adapter.extract_intent(text)
+        if draft is None:
+            raise IntentOverlayTransportError("intent overlay unavailable")
+        return IntentOverlay(
+            origin_text=draft.origin_query or draft.origin,
+            destination_text=draft.destination_query or draft.destination,
+            departure_date=draft.departure_date,
+            return_date=draft.return_date,
+            date_hint=draft.date_hint,
+            trip_shape=draft.trip_shape,
+            date_mode=draft.date_mode,
+            adults=draft.adults,
+            children=draft.children,
+            infants=draft.infants,
+            currency=draft.currency,
+            nearby_radius_km=draft.nearby_radius_km,
+            requested_strategy_ids=draft.requested_strategies,
+            baggage_preference=draft.baggage_preference,
+            wants_watch=draft.wants_watch,
+        )
+
+    return provide
 
 
 app = create_app()

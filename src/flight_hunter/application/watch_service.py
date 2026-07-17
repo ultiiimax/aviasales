@@ -35,6 +35,7 @@ class CreateWatchCommand:
     currency: str = "RUB"
     scan_interval_seconds: int = 21_600
     allowed_provider_ids: tuple[str, ...] = ()
+    watch_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +72,7 @@ class WatchService:
     async def create_watch(self, command: CreateWatchCommand) -> WatchRecord:
         now = self._clock()
         watch = NewWatch(
-            id=self._id_factory(),
+            id=command.watch_id or self._id_factory(),
             household_id=command.household_id,
             owner_user_id=command.owner_user_id,
             origin=command.origin,

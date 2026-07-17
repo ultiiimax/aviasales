@@ -9,9 +9,9 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import date, timedelta
 from types import MappingProxyType
-from typing import Protocol
+from typing import Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from flight_hunter.agent.presets import PRESET_EDITS, AgentPresetId
 from flight_hunter.application.agent_scope import (
@@ -41,6 +41,12 @@ _RANGE_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*(?:\.\.|—|–)\s*(\d{4}-\d
 _FLEX_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*(?:±|\+/-)\s*(\d+)")
 _ROLLING_DATE_RE = re.compile(
     r"\s*,?\s*(?:rolling\s+90\s+days|(?:ближайшие\s+)?90\s+дней)\b",
+    re.IGNORECASE,
+)
+_TRAILING_CONSTRAINT_RE = re.compile(
+    r"(?:\s*,?\s+(?:с\s+багажом|с\s+ручной\s+кладью|без\s+багажа|"
+    r"следи(?:ть)?\s+за\s+цен(?:ой|ами)|отслеживай\s+цен(?:у|ы)|"
+    r"можно\s+отдельными\s+билетами|разбей\s+билет|самопересадк\w*))+$",
     re.IGNORECASE,
 )
 _IATA_RE = re.compile(r"^[A-Z]{3}$")
@@ -236,6 +242,8 @@ class ParsedIntent:
     requested_strategies: tuple[RouteStrategy, ...] = ()
     clarifications: tuple[IntentClarification, ...] = ()
     preset_id: AgentPresetId | None = None
+    baggage_preference: Literal["checked", "carry_on", "none", "unspecified"] = "unspecified"
+    wants_watch: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "trip_shape", TripShape(self.trip_shape))
@@ -249,6 +257,10 @@ class ParsedIntent:
             tuple(RouteStrategy(value) for value in self.requested_strategies),
         )
         object.__setattr__(self, "clarifications", tuple(self.clarifications))
+        if self.baggage_preference not in {"checked", "carry_on", "none", "unspecified"}:
+            raise ValueError("baggage_preference is invalid")
+        if type(self.wants_watch) is not bool:
+            raise TypeError("wants_watch must be a boolean")
 
     @property
     def origin_scope(self) -> LocationScope | None:
@@ -300,7 +312,17 @@ class IntentOverlay(BaseModel):
     destination_text: str | None = None
     trip_shape: TripShape | None = None
     date_mode: DateMode | None = None
+    departure_date: str | None = None
+    return_date: str | None = None
+    date_hint: str | None = None
+    adults: int | None = Field(default=None, ge=1, le=9)
+    children: int | None = Field(default=None, ge=0, le=9)
+    infants: int | None = Field(default=None, ge=0, le=9)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    nearby_radius_km: int | None = Field(default=None, ge=0, le=500)
     requested_strategy_ids: tuple[RouteStrategy, ...] = ()
+    baggage_preference: Literal["checked", "carry_on", "none", "unspecified"] = "unspecified"
+    wants_watch: bool = False
 
 
 class IntentOverlayTransportError(RuntimeError):
@@ -324,6 +346,12 @@ def merge_overlay(base: ParsedIntent, overlay: IntentOverlay) -> ParsedIntent:
         trip_shape=overlay.trip_shape or base.trip_shape,
         date_mode=overlay.date_mode or base.date_mode,
         requested_strategies=overlay.requested_strategy_ids or base.requested_strategies,
+        baggage_preference=(
+            overlay.baggage_preference
+            if overlay.baggage_preference != "unspecified"
+            else base.baggage_preference
+        ),
+        wants_watch=overlay.wants_watch or base.wants_watch,
         clarifications=tuple(retained),
     )
     return _with_semantic_clarifications(merged)
@@ -433,9 +461,11 @@ class IntentParser:
                 infants=_non_negative_int(selected.get("infants", 0), "infants"),
                 nearby_radius_km=_nearby_radius_km(text, selected, normalized_preset),
                 currency=_string(selected.get("currency", "RUB"), "currency"),
-                requested_strategies=_strategies(selected, normalized_preset),
+                requested_strategies=_strategies(selected, normalized_preset, text),
                 clarifications=tuple(_unique_clarifications(clarifications)),
                 preset_id=normalized_preset,
+                baggage_preference=_baggage_preference(text, selected),
+                wants_watch=_wants_watch(text, selected),
             )
         )
         return parsed, normalized_preset, selected
@@ -447,7 +477,7 @@ class IntentParser:
         selected: Mapping[str, object],
         parsed: ParsedIntent,
     ) -> ParsedIntent:
-        if self._overlay_provider is None:
+        if self._overlay_provider is None or not parsed.clarifications:
             return parsed
         try:
             raw_overlay = self._overlay_provider(text, normalized_preset, selected)
@@ -458,7 +488,52 @@ class IntentParser:
             )
         except (IntentOverlayTransportError, ValidationError):
             return parsed
-        return merge_overlay(parsed, overlay)
+        augmented = dict(selected)
+        if parsed.origin_scope is None and overlay.origin_text is not None:
+            augmented["origin"] = overlay.origin_text
+        if parsed.destination_scope is None and overlay.destination_text is not None:
+            augmented["destination"] = overlay.destination_text
+        if (
+            "trip_shape" not in augmented
+            and _trip_shape_from_text(text) is None
+            and overlay.trip_shape is not None
+        ):
+            augmented["trip_shape"] = overlay.trip_shape.value
+        date_missing = any(item.field == "date_constraint" for item in parsed.clarifications)
+        if date_missing and "departure_date" not in augmented and overlay.departure_date:
+            augmented["departure_date"] = overlay.departure_date
+        if date_missing and "date_mode" not in augmented and overlay.date_mode is not None:
+            augmented["date_mode"] = overlay.date_mode.value
+        return_missing = any(
+            item.field == "return_date_constraint" for item in parsed.clarifications
+        )
+        if return_missing and "return_date" not in augmented and overlay.return_date:
+            augmented["return_date"] = overlay.return_date
+        for field_name in ("adults", "children", "infants", "currency", "nearby_radius_km"):
+            value = getattr(overlay, field_name)
+            if field_name not in augmented and value is not None:
+                augmented[field_name] = value
+        if (
+            "requested_strategies" not in augmented
+            and not parsed.requested_strategies
+            and overlay.requested_strategy_ids
+        ):
+            augmented["requested_strategies"] = [
+                strategy.value for strategy in overlay.requested_strategy_ids
+            ]
+        if "baggage_preference" not in augmented and parsed.baggage_preference == "unspecified":
+            augmented["baggage_preference"] = overlay.baggage_preference
+        if "wants_watch" not in augmented and not parsed.wants_watch:
+            augmented["wants_watch"] = overlay.wants_watch
+        try:
+            merged, _preset, _selected = self._parse_deterministic(
+                text,
+                normalized_preset,
+                augmented,
+            )
+        except (TypeError, ValueError):
+            return parsed
+        return merged
 
 
 def _parse_explicit_legs(
@@ -571,6 +646,7 @@ def _trip_shape(
 def _strategies(
     selections: Mapping[str, object],
     preset: AgentPresetId | None,
+    text: str,
 ) -> tuple[RouteStrategy, ...]:
     explicit = selections.get("requested_strategies")
     if explicit is not None:
@@ -585,7 +661,19 @@ def _strategies(
         return (RouteStrategy.HIDDEN_CITY,)
     if preset is AgentPresetId.SPLIT_TICKET:
         return (RouteStrategy.SPLIT_TICKET,)
-    return ()
+    normalized = _normalize_text(text)
+    detected: list[RouteStrategy] = []
+    patterns = (
+        (RouteStrategy.HIDDEN_CITY, r"(?:скрыт\w*\s+город|выйти\s+на\s+пересадке)"),
+        (RouteStrategy.SPLIT_TICKET, r"(?:отдельн\w*\s+билет|разб(?:ей|ить)\s+маршрут)"),
+        (RouteStrategy.SELF_TRANSFER, r"(?:самопересадк\w*|self[\s-]*transfer)"),
+        (RouteStrategy.THROUGH_TICKET, r"(?:сквозн\w*\s+билет|единым\s+билетом)"),
+        (RouteStrategy.DIRECT, r"(?:прям(?:ой|ым)\s+рейс|без\s+пересадок)"),
+    )
+    for strategy, pattern in patterns:
+        if re.search(pattern, normalized):
+            detected.append(strategy)
+    return tuple(detected)
 
 
 def _nearby_radius_km(
@@ -611,6 +699,40 @@ def _nearby_radius_km(
     return 0
 
 
+def _baggage_preference(
+    text: str,
+    selections: Mapping[str, object],
+) -> Literal["checked", "carry_on", "none", "unspecified"]:
+    explicit = selections.get("baggage_preference")
+    if explicit is not None:
+        value = _string(explicit, "baggage_preference")
+        if value not in {"checked", "carry_on", "none", "unspecified"}:
+            raise ValueError("baggage_preference is invalid")
+        return cast(Literal["checked", "carry_on", "none", "unspecified"], value)
+    normalized = _normalize_text(text)
+    if re.search(r"(?:без\s+багажа|только\s+ручн\w+\s+кладь)", normalized):
+        return "none"
+    if re.search(r"(?:с\s+ручн\w+\s+кладью|carry[\s-]*on)", normalized):
+        return "carry_on"
+    if re.search(r"(?:с\s+багажом|checked\s+baggage)", normalized):
+        return "checked"
+    return "unspecified"
+
+
+def _wants_watch(text: str, selections: Mapping[str, object]) -> bool:
+    explicit = selections.get("wants_watch")
+    if explicit is not None:
+        if type(explicit) is not bool:
+            raise TypeError("wants_watch must be a boolean")
+        return explicit
+    return bool(
+        re.search(
+            r"(?:следи(?:ть)?\s+за\s+цен|отслеживай\s+цен|уведоми\s+когда)",
+            _normalize_text(text),
+        )
+    )
+
+
 def _route_parts(text: str) -> tuple[str | None, str | None]:
     route_text = _RANGE_DATE_RE.sub("", text)
     route_text = _FLEX_DATE_RE.sub("", route_text)
@@ -618,6 +740,7 @@ def _route_parts(text: str) -> tuple[str | None, str | None]:
     route_text = _ROLLING_DATE_RE.sub("", route_text)
     for _, pattern in _TRIP_SHAPE_PATTERNS:
         route_text = pattern.sub("", route_text)
+    route_text = _TRAILING_CONSTRAINT_RE.sub("", route_text)
     parts = _ROUTE_SEPARATOR_RE.split(route_text, maxsplit=1)
     if len(parts) == 2:
         return parts[0].strip(" ,") or None, parts[1].strip(" ,") or None

@@ -170,6 +170,8 @@ class AgentPlanSummaryResponse(BaseModel):
     hidden_city_enabled: bool
     hidden_city_warning_version: str | None
     hidden_city_warnings: list[AgentHiddenCityWarningResponse]
+    baggage_preference: str
+    wants_watch: bool
 
 
 class AgentPlanResponse(BaseModel):

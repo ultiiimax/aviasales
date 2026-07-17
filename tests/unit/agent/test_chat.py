@@ -47,9 +47,10 @@ async def test_agent_chat_delegates_free_text_to_durable_plan_creator() -> None:
     assert [action.kind for action in response.actions] == ["use_rolling_90_days"]
     assert response.actions[0].parameters == {"date_mode": "rolling_90_days"}
     assert all(action.kind != "search_cached_offers" for action in response.actions)
-    assert response.runtime.backend == "deterministic_harness"
+    assert response.outcome == "clarification"
+    assert response.runtime.backend == "deterministic_gateway"
     assert response.runtime.model is None
-    assert response.runtime.agentic_loop == "approval_gated_plan_lifecycle"
+    assert response.runtime.agentic_loop == "immediate_durable_search"
 
 
 @pytest.mark.anyio

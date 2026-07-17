@@ -178,7 +178,7 @@ async def test_free_text_chat_returns_missing_date_plan_reference_without_provid
 ) -> None:
     response = agent_api_harness.client.post(
         "/api/v1/agent/chat/turn",
-        headers=agent_api_harness.auth_headers,
+        headers={**agent_api_harness.auth_headers, "Idempotency-Key": "missing-date"},
         json={"message": "Найди самый дешёвый вариант из СПб во Францию"},
     )
 
@@ -197,6 +197,71 @@ async def test_free_text_chat_returns_missing_date_plan_reference_without_provid
     assert draft_scope["frozen"] is False
     assert plan["clarifications"][0]["code"] == "date_required"
     assert plan["clarifications"][0]["actions"][0]["action_id"] == ("use_rolling_90_days")
+    assert body["outcome"] == "clarification"
+    assert body["run"] is None
+    assert agent_api_harness.provider.calls == 0
+
+
+@pytest.mark.anyio
+async def test_complete_chat_starts_once_and_same_key_replays_the_run(
+    agent_api_harness: _Harness,
+) -> None:
+    headers = {**agent_api_harness.auth_headers, "Idempotency-Key": "chat-auto-run"}
+    payload = {"message": "LED → CDG 2026-10-12"}
+
+    first = agent_api_harness.client.post(
+        "/api/v1/agent/chat/turn",
+        headers=headers,
+        json=payload,
+    )
+    replay = agent_api_harness.client.post(
+        "/api/v1/agent/chat/turn",
+        headers=headers,
+        json=payload,
+    )
+    conflict = agent_api_harness.client.post(
+        "/api/v1/agent/chat/turn",
+        headers=headers,
+        json={"message": "LED → CDG 2026-10-13"},
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert first.json()["outcome"] == "run_started"
+    assert first.json()["run"]["status"] == "queued"
+    assert replay.json()["run"]["run_id"] == first.json()["run"]["run_id"]
+    assert replay.json()["idempotent_replay"] is True
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "agent_run_idempotency_conflict"
+    assert agent_api_harness.provider.calls == 0
+
+
+@pytest.mark.anyio
+async def test_explicit_watch_chat_creates_one_idempotent_watch(
+    agent_api_harness: _Harness,
+) -> None:
+    headers = {**agent_api_harness.auth_headers, "Idempotency-Key": "chat-watch"}
+    payload = {"message": "LED → CDG 2026-10-12, следи за ценой"}
+
+    first = agent_api_harness.client.post(
+        "/api/v1/agent/chat/turn",
+        headers=headers,
+        json=payload,
+    )
+    replay = agent_api_harness.client.post(
+        "/api/v1/agent/chat/turn",
+        headers=headers,
+        json=payload,
+    )
+    watches = agent_api_harness.client.get(
+        "/api/v1/watches",
+        headers=agent_api_harness.auth_headers,
+    )
+
+    assert first.status_code == 200
+    assert first.json()["outcome"] == "watch_created"
+    assert replay.json()["watch_id"] == first.json()["watch_id"]
+    assert len(watches.json()["watches"]) == 1
     assert agent_api_harness.provider.calls == 0
 
 
@@ -206,7 +271,7 @@ async def test_chat_rejects_unknown_date_mode_with_stable_typed_error(
 ) -> None:
     response = agent_api_harness.client.post(
         "/api/v1/agent/chat/turn",
-        headers=agent_api_harness.auth_headers,
+        headers={**agent_api_harness.auth_headers, "Idempotency-Key": "invalid-mode"},
         json={"message": "LED → CDG", "date_mode": "not_a_mode"},
     )
 
@@ -224,7 +289,7 @@ async def test_chat_rejects_non_iso_departure_date_with_stable_typed_error(
 ) -> None:
     response = agent_api_harness.client.post(
         "/api/v1/agent/chat/turn",
-        headers=agent_api_harness.auth_headers,
+        headers={**agent_api_harness.auth_headers, "Idempotency-Key": "invalid-date"},
         json={"message": "LED → CDG", "departure_date": "not-a-date"},
     )
 
@@ -247,7 +312,7 @@ async def test_chat_maps_public_lifecycle_error_without_internal_details(
     monkeypatch.setattr(AgentChatService, "handle_turn", reject_turn)
     response = agent_api_harness.client.post(
         "/api/v1/agent/chat/turn",
-        headers=agent_api_harness.auth_headers,
+        headers={**agent_api_harness.auth_headers, "Idempotency-Key": "mapped-error"},
         json={"message": "LED → CDG"},
     )
 
@@ -265,7 +330,7 @@ async def test_rolling_90_day_quick_plan_is_not_clamped_or_made_executable(
 ) -> None:
     response = agent_api_harness.client.post(
         "/api/v1/agent/chat/turn",
-        headers=agent_api_harness.auth_headers,
+        headers={**agent_api_harness.auth_headers, "Idempotency-Key": "rolling-window"},
         json={
             "message": "Найди самый дешёвый вариант из СПб во Францию",
             "date_mode": "rolling_90_days",
@@ -346,10 +411,12 @@ async def test_bounded_plan_exposes_sanitized_frozen_plan_card_summary(
             "cost_model_version": "aviasales-v1",
             "requests_per_minute": 20,
         },
-        "hidden_city_enabled": False,
-        "hidden_city_warning_version": None,
-        "hidden_city_warnings": [],
-    }
+            "hidden_city_enabled": False,
+            "hidden_city_warning_version": None,
+            "hidden_city_warnings": [],
+            "baggage_preference": "unspecified",
+            "wants_watch": False,
+        }
     assert plan["estimate"] == {
         "calendar_searches": 7,
         "exact_searches": 7,
@@ -433,7 +500,7 @@ async def test_canonical_compat_and_chat_share_the_same_frozen_runtime_settings(
     )
     chat = client.post(
         "/api/v1/agent/chat/turn",
-        headers=agent_api_harness.auth_headers,
+        headers={**agent_api_harness.auth_headers, "Idempotency-Key": "shared-settings"},
         json={"message": "LED → CDG 2026-10-12"},
     )
 
@@ -537,12 +604,12 @@ async def test_configured_legacy_model_is_not_claimed_when_plan_parser_does_not_
     )
     response = client.post(
         "/api/v1/agent/chat/turn",
-        headers=agent_api_harness.auth_headers,
+        headers={**agent_api_harness.auth_headers, "Idempotency-Key": "legacy-model"},
         json={"message": "LED → CDG 2026-10-12"},
     )
 
     assert response.status_code == 200
-    assert response.json()["runtime"]["backend"] == "deterministic_harness"
+    assert response.json()["runtime"]["backend"] == "deterministic_gateway"
     assert response.json()["runtime"]["model"] is None
     assert "sk-test" not in response.text
     client.close()

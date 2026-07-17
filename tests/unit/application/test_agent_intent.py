@@ -131,6 +131,19 @@ def test_rolling_90_days_text_does_not_pollute_destination_alias() -> None:
     assert parsed.clarifications == ()
 
 
+def test_watch_baggage_and_split_ticket_phrases_stay_typed() -> None:
+    parsed = IntentParser().parse(
+        "LED → CDG 2026-09-10, с багажом, следи за ценой, можно отдельными билетами",  # noqa: RUF001
+        preset=None,
+        selections={},
+    )
+
+    assert parsed.clarifications == ()
+    assert parsed.wants_watch is True
+    assert parsed.baggage_preference == "checked"
+    assert parsed.requested_strategies == (RouteStrategy.SPLIT_TICKET,)
+
+
 def test_one_way_round_trip_open_jaw_and_ordered_multi_city() -> None:
     parser = IntentParser()
     one_way = parser.parse(
@@ -287,6 +300,29 @@ def test_overlay_transport_or_validation_failure_returns_deterministic_base() ->
     )
 
 
+def test_parser_overlay_only_fills_fields_left_unresolved() -> None:
+    def conflicting_overlay(*_args: object) -> IntentOverlay:
+        return IntentOverlay(
+            origin_text="MOW",
+            destination_text="JFK",
+            trip_shape=TripShape.ONE_WAY,
+            date_mode=DateMode.FLEXIBLE,
+            return_date="2026-09-20",
+        )
+
+    parsed = IntentParser(overlay_provider=conflicting_overlay).parse(
+        "LED → CDG туда-обратно 2026-09-10",
+        preset=None,
+        selections={},
+    )
+
+    assert parsed.origin_scope == LocationScope(LocationScopeKind.AIRPORT, "LED")
+    assert parsed.destination_scope == LocationScope(LocationScopeKind.AIRPORT, "CDG")
+    assert parsed.trip_shape is TripShape.ROUND_TRIP
+    assert parsed.date_mode is DateMode.EXACT
+    assert parsed.legs[1].date_constraint.start_date == date(2026, 9, 20)
+
+
 def test_overlay_fallback_does_not_swallow_unclassified_programming_errors() -> None:
     def programming_error(*_args: object) -> IntentOverlay:
         raise RuntimeError("bug")
@@ -295,7 +331,7 @@ def test_overlay_fallback_does_not_swallow_unclassified_programming_errors() -> 
         IntentParser(overlay_provider=programming_error).parse(
             "LED → France",
             preset=None,
-            selections={"departure_date": "2026-09-10"},
+            selections={},
         )
 
 

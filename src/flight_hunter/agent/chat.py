@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
-from flight_hunter.application.agent_lifecycle import CreateAgentPlan, PlanView
+from flight_hunter.application.agent_lifecycle import CreateAgentPlan, PlanView, RunView
+from flight_hunter.application.agent_tools import (
+    AgentActionGrant,
+    AgentPlanBinding,
+    AgentToolGateway,
+    AgentWatchCreationError,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +31,8 @@ class AgentTurnRequest:
     children: int = 0
     infants: int = 0
     currency: str = "RUB"
+    session_id: UUID | None = None
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +83,11 @@ class AgentTurnResponse:
     actions: tuple[AgentAction, ...]
     audit_events: tuple[AgentAuditEvent, ...]
     runtime: AgentRuntimeInfo
+    outcome: Literal["clarification", "run_started", "watch_created", "failure"]
+    run: RunView | None = None
+    idempotent_replay: bool = False
+    warnings: tuple[str, ...] = ()
+    watch_id: UUID | None = None
 
 
 @dataclass(slots=True)
@@ -84,6 +99,15 @@ class IntentDraft:
     departure_date: str | None = None
     return_date: str | None = None
     date_hint: str | None = None
+    trip_shape: str | None = None
+    date_mode: str | None = None
+    adults: int | None = None
+    children: int | None = None
+    infants: int | None = None
+    currency: str | None = None
+    nearby_radius_km: int | None = None
+    requested_strategies: tuple[str, ...] = ()
+    baggage_preference: str = "unspecified"
     wants_watch: bool = False
 
 
@@ -103,27 +127,101 @@ class AgentChatService:
         self,
         *,
         plan_creator: AgentPlanCreator,
+        search_gateway: AgentToolGateway | None = None,
     ) -> None:
         self._plan_creator = plan_creator
+        self._search_gateway = search_gateway
 
     async def handle_turn(self, request: AgentTurnRequest) -> AgentTurnResponse:
         if request.household_id is None or request.user_id is None:
             raise ValueError("authenticated household and user are required")
         selections = _selections(request)
-        plan = await self._plan_creator.create_plan(
-            CreateAgentPlan(
+        request_fingerprint = _request_fingerprint(request.message, selections)
+        run: RunView | None = None
+        plan: PlanView
+        if (
+            self._search_gateway is not None
+            and request.session_id is not None
+            and request.idempotency_key is not None
+        ):
+            replay = await self._search_gateway.replay_search(
                 household_id=request.household_id,
                 user_id=request.user_id,
-                text=request.message,
-                selections=selections,
+                session_id=request.session_id,
+                idempotency_key=request.idempotency_key,
+                request_fingerprint=request_fingerprint,
             )
-        )
+        else:
+            replay = None
+        if replay is not None:
+            plan, run = replay
+        else:
+            plan = await self._plan_creator.create_plan(
+                CreateAgentPlan(
+                    household_id=request.household_id,
+                    user_id=request.user_id,
+                    text=request.message,
+                    selections=selections,
+                )
+            )
         actions = _clarification_actions(plan.clarifications)
         missing_slots = tuple(
             str(item["field"]) for item in plan.clarifications if isinstance(item.get("field"), str)
         )
+        outcome: Literal["clarification", "run_started", "watch_created", "failure"]
+        reply = _reply(plan)
+        if run is not None:
+            outcome = "run_started"
+            reply = "Возвращаю уже запущенный поиск."
+        elif plan.summary.hidden_city_enabled and not plan.clarifications:
+            outcome = "clarification"
+            missing_slots = ("hidden_city_warning",)
+            reply = "Подтвердите риски скрытого города перед запуском поиска."
+        elif plan.executable and not plan.clarifications and self._search_gateway is not None:
+            if request.session_id is None or request.idempotency_key is None:
+                raise ValueError("session and idempotency key are required for search execution")
+            run = await self._search_gateway.start_search(
+                plan,
+                AgentActionGrant(
+                    kind="search_execute",
+                    household_id=request.household_id,
+                    user_id=request.user_id,
+                    session_id=request.session_id,
+                    binding=AgentPlanBinding.from_plan(plan),
+                    idempotency_key=request.idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                ),
+            )
+            outcome = "run_started"
+            reply = "Поиск запущен. Уже проверяю живые варианты."
+        else:
+            outcome = "clarification"
+        warnings: tuple[str, ...] = ()
+        watch_id: UUID | None = None
+        if run is not None and plan.summary.wants_watch and self._search_gateway is not None:
+            assert request.session_id is not None
+            assert request.idempotency_key is not None
+            try:
+                watch = await self._search_gateway.create_watch(
+                    plan,
+                    AgentActionGrant(
+                        kind="watch_create",
+                        household_id=request.household_id,
+                        user_id=request.user_id,
+                        session_id=request.session_id,
+                        binding=AgentPlanBinding.from_plan(plan),
+                        idempotency_key=f"{request.idempotency_key}:watch",
+                        request_fingerprint=request_fingerprint,
+                    ),
+                )
+            except AgentWatchCreationError as error:
+                warnings = (error.code,)
+            else:
+                watch_id = watch.id
+                outcome = "watch_created"
+                reply = "Поиск запущен, отслеживание цены создано."
         return AgentTurnResponse(
-            reply_ru=_reply(plan),
+            reply_ru=reply,
             proposed_plan=plan,
             extracted=dict(selections),
             missing_slots=missing_slots,
@@ -135,13 +233,22 @@ class AgentChatService:
                     tool_name="create_agent_plan",
                     summary=(
                         f"plan_id={plan.plan_id} revision={plan.revision} "
-                        f"state={plan.state} coverage={plan.coverage}"
+                        f"state={plan.state} coverage={plan.coverage} outcome={outcome}"
                     ),
-                    policy_decision="approval_required_before_provider_calls",
-                    related_id=str(plan.plan_id),
+                    policy_decision=(
+                        "user_message_authorized_search"
+                        if run is not None
+                        else "clarification_required"
+                    ),
+                    related_id=str(run.run_id if run is not None else plan.plan_id),
                 ),
             ),
-            runtime=_runtime_info(),
+            runtime=_runtime_info(search_started=run is not None),
+            outcome=outcome,
+            run=run,
+            idempotent_replay=run.idempotent_replay if run is not None else False,
+            warnings=warnings,
+            watch_id=watch_id,
         )
 
 
@@ -166,6 +273,16 @@ def _selections(request: AgentTurnRequest) -> dict[str, object]:
     if request.currency != "RUB":
         selected["currency"] = request.currency
     return selected
+
+
+def _request_fingerprint(message: str, selections: Mapping[str, object]) -> str:
+    canonical = json.dumps(
+        {"message": message.strip(), "selections": dict(selections)},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _clarification_actions(
@@ -213,12 +330,12 @@ def _reply(plan: PlanView) -> str:
     return "План сохранён. Проверьте объём и подтвердите запуск."
 
 
-def _runtime_info() -> AgentRuntimeInfo:
+def _runtime_info(*, search_started: bool = False) -> AgentRuntimeInfo:
     return AgentRuntimeInfo(
-        backend="deterministic_harness",
-        agentic_loop="approval_gated_plan_lifecycle",
+        backend="deterministic_gateway",
+        agentic_loop="immediate_durable_search",
         model=None,
         fallback_backend=None,
-        live_calls_allowed=False,
+        live_calls_allowed=search_started,
         cloudflare_ready=True,
     )
