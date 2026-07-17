@@ -36,3 +36,25 @@ uv run --no-sync pytest tests/unit/api/test_web_ui.py::test_carrier_logo_uses_fi
 git diff --check
 exit 0
 ```
+
+## Review correction
+
+The first implementation treated a valid carrier code and carrier name as two
+aliases for deduplication. That incorrectly collapsed distinct coded carriers
+when their names happened to match. Deduplication is now code-first: a valid
+code is the sole identity, while the normalized name is used only when no valid
+code exists.
+
+RED:
+
+```text
+uv run --no-sync pytest tests/unit/api/test_web_ui.py::test_carrier_logo_uses_fixed_origin_and_one_shot_fallback -q
+1 failed: missing code-first `const identity = safeCode`
+```
+
+GREEN:
+
+```text
+uv run --no-sync pytest tests/unit/api/test_web_ui.py::test_carrier_logo_uses_fixed_origin_and_one_shot_fallback tests/unit/api/test_web_ui.py::test_routes_use_shared_typed_place_lookup_and_honest_human_labels -q
+2 passed in 0.25s
+```

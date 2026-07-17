@@ -3898,12 +3898,14 @@ def render_index_html() -> str:
         const code = text(segment?.airline_code).toUpperCase();
         const safeCode = carrierCodePattern.test(code) ? code : "";
         const name = text(segment?.airline_name);
-        const identityKeys = [];
-        if (safeCode) identityKeys.push(`code:${safeCode}`);
-        if (name) identityKeys.push(`name:${name.toLocaleLowerCase("ru-RU")}`);
-        if (identityKeys.length === 0) identityKeys.push("unknown");
-        if (identityKeys.some((identity) => seen.has(identity))) return;
-        identityKeys.forEach((identity) => seen.add(identity));
+        const normalizedName = name.toLocaleLowerCase("ru-RU");
+        const identity = safeCode
+          ? `code:${safeCode}`
+          : name
+            ? `name:${normalizedName}`
+            : "unknown";
+        if (seen.has(identity)) return;
+        seen.add(identity);
         carriers.push({code: safeCode, name});
       });
 

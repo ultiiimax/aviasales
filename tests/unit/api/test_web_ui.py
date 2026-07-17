@@ -131,6 +131,8 @@ def test_carrier_logo_uses_fixed_origin_and_one_shot_fallback() -> None:
     assert "const carrierCodePattern = /^[A-Z0-9]{2}$/;" in html
     assert 'const carrierLogoOrigin = "https://pics.avs.io/80/80/";' in html
     assert "carrierCodePattern.test(code)" in carrier_strip
+    assert "const identity = safeCode" in carrier_strip
+    assert "identityKeys" not in carrier_strip
     assert "`${carrierLogoOrigin}${encodeURIComponent(carrier.code)}.png`" in carrier_strip
     assert "slice(0, 3)" in carrier_strip
     assert "carrier-logo-failed" in carrier_strip
