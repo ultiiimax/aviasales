@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -165,12 +167,14 @@ class CodexCliAgentAdapter:
         service_tier: str = "fast",
         timeout_seconds: int = 8,
         max_output_bytes: int = 16_384,
+        model_name: str | None = None,
         validator: CodexIntentDraftValidator | None = None,
     ) -> None:
         self.enabled = enabled
         self.service_tier = service_tier if service_tier in {"fast", "flex"} else "fast"
         self.timeout_seconds = max(1, timeout_seconds)
         self.max_output_bytes = max(1_024, max_output_bytes)
+        self.model_name = model_name.strip() if model_name and model_name.strip() else None
         self._validator = validator or CodexIntentDraftValidator(
             max_output_bytes=self.max_output_bytes
         )
@@ -203,6 +207,8 @@ class CodexCliAgentAdapter:
         command.extend(("--output-schema", schema_path))
         if output_path is not None:
             command.extend(("--output-last-message", output_path))
+        if self.model_name is not None:
+            command.extend(("--model", self.model_name))
         command.append("-")
         return tuple(command)
 
@@ -213,8 +219,8 @@ class CodexCliAgentAdapter:
         if executable is None:
             return None
         workspace = Path.cwd().resolve()
-        with tempfile.TemporaryDirectory(prefix="flight-hunter-intent-") as raw_directory:
-            directory = Path(raw_directory)
+        directory = Path(tempfile.mkdtemp(prefix="flight-hunter-intent-"))
+        try:
             schema_path = directory / "intent.schema.json"
             output_path = directory / "intent.output.json"
             schema_path.write_text(
@@ -230,20 +236,16 @@ class CodexCliAgentAdapter:
             )
             command[0] = executable
             try:
-                completed = subprocess.run(
+                returncode = _run_codex_process(
                     command,
-                    input=_prompt(message).encode("utf-8"),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    input_bytes=_prompt(message).encode("utf-8"),
                     cwd=directory,
                     env=_minimal_environment(workspace),
-                    timeout=self.timeout_seconds,
-                    check=False,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    timeout_seconds=self.timeout_seconds,
                 )
-            except (OSError, subprocess.TimeoutExpired):
+            except OSError:
                 return None
-            if completed.returncode != 0 or not output_path.is_file():
+            if returncode != 0 or not output_path.is_file():
                 return None
             try:
                 if output_path.stat().st_size > self.max_output_bytes:
@@ -251,10 +253,91 @@ class CodexCliAgentAdapter:
                 raw_output = output_path.read_text(encoding="utf-8")
             except (OSError, UnicodeError):
                 return None
+        finally:
+            _cleanup_intent_directory(directory)
         result = self._validator.validate_json(raw_output)
         if result.draft is None:
             return None
         return _intent_draft(result.draft)
+
+
+def _run_codex_process(
+    command: list[str],
+    *,
+    input_bytes: bytes,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_seconds: int,
+) -> int | None:
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if os.name == "nt":
+        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd=cwd,
+        env=env,
+        creationflags=creationflags,
+        start_new_session=os.name != "nt",
+    )
+    try:
+        process.communicate(input=input_bytes, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(process)
+        try:
+            process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+        return None
+    return process.returncode
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            terminated = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            process.kill()
+        else:
+            if terminated.returncode != 0:
+                process.kill()
+        return
+    kill_process_group = getattr(os, "killpg", None)
+    sigkill = getattr(signal, "SIGKILL", None)
+    if kill_process_group is None or sigkill is None:
+        process.kill()
+        return
+    try:
+        kill_process_group(process.pid, sigkill)
+    except (PermissionError, ProcessLookupError):
+        process.kill()
+
+
+def _cleanup_intent_directory(directory: Path) -> None:
+    for delay_seconds in (0.0, 0.05, 0.15, 0.3, 0.5):
+        if delay_seconds:
+            time.sleep(delay_seconds)
+        try:
+            shutil.rmtree(directory)
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            continue
+        else:
+            return
+    shutil.rmtree(directory, ignore_errors=True)
 
 
 def _intent_draft(draft: CodexIntentDraft) -> IntentDraft:

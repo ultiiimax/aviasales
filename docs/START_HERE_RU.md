@@ -36,7 +36,7 @@ http://127.0.0.1:8000/
 ```env
 APP_SECRET_KEY=replace-with-strong-random-secret
 AVIASALES_SEARCH_ENABLED=true
-AVIASALES_SEARCH_SIGNATURE=856890a7-59b2-4043-9bc7-e478bb4e6405
+AVIASALES_SEARCH_SIGNATURE=replace-with-provider-signature
 AVIASALES_SEARCH_MARKER=mobile_app.replace-with-md5-of-android-id
 AVIASALES_SEARCH_INTERNAL_RPM=20
 ```

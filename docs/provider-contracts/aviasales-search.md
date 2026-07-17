@@ -1,12 +1,18 @@
 # Aviasales Search API Contract Notes
 
-Verified: 2026-07-14. Sanitized live checks established that Suggest and exact
+Verified: 2026-07-17. Sanitized live checks established that Suggest and exact
 start returned schema-valid HTTP 200 responses, one exact poll returned a
 schema-valid list, and Explore calendar returned schema-valid rows with
 `locale=ru_RU`. The older `locale=ru` value returned HTTP 400 with an invalid
 locale classification. No prices, search IDs, result hosts, booking URLs,
 credentials or raw payloads were recorded. Search/result/click field provenance
 also uses the sanitized 2026-07-04 capture against `tickets-api.aviasales.ru`.
+
+The 2026-07-17 release smoke imported the local Aviasales kit without executing
+its Python client, ran one `MOW` → `LED` exact-search operation and received 50
+schema-valid `live` items. Only status, count, source, freshness and timestamps
+were retained; no price, credential, provider reference, raw payload or booking
+URL was recorded.
 
 Hot offers: APK contract statically verified 2026-07-15. No live hot-offer smoke
 was run, so the hot-offer section makes no claim of current upstream availability

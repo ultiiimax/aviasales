@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from time import perf_counter
@@ -31,7 +31,12 @@ from flight_hunter.agent.chat import (
 )
 from flight_hunter.agent.codex_cli import CodexCliAgentAdapter
 from flight_hunter.agent.openai_responses import OpenAIResponsesAgentAdapter
-from flight_hunter.agent.presets import AgentPreset, apply_preset_edits, list_presets
+from flight_hunter.agent.presets import (
+    AgentPreset,
+    AgentPresetId,
+    apply_preset_edits,
+    list_presets,
+)
 from flight_hunter.api.agent_routes import (
     AgentRouteError,
     agent_lifecycle_route_error,
@@ -5658,6 +5663,7 @@ def _configured_agent_intent_adapter(settings: AppSettings) -> AgentIntentAdapte
     if settings.agent_codex_cli_enabled:
         return CodexCliAgentAdapter(
             enabled=True,
+            model_name=settings.agent_codex_cli_model,
             service_tier=settings.agent_codex_cli_service_tier,
             timeout_seconds=settings.agent_codex_cli_timeout_seconds,
             max_output_bytes=settings.agent_codex_cli_max_output_bytes,
@@ -5680,28 +5686,31 @@ def _intent_overlay_provider(
 
     def provide(
         text: str,
-        _preset: object,
-        _selections: object,
+        preset: AgentPresetId | None,
+        selections: Mapping[str, object],
     ) -> IntentOverlay:
+        del preset, selections
         draft = adapter.extract_intent(text)
         if draft is None:
             raise IntentOverlayTransportError("intent overlay unavailable")
-        return IntentOverlay(
-            origin_text=draft.origin_query or draft.origin,
-            destination_text=draft.destination_query or draft.destination,
-            departure_date=draft.departure_date,
-            return_date=draft.return_date,
-            date_hint=draft.date_hint,
-            trip_shape=draft.trip_shape,
-            date_mode=draft.date_mode,
-            adults=draft.adults,
-            children=draft.children,
-            infants=draft.infants,
-            currency=draft.currency,
-            nearby_radius_km=draft.nearby_radius_km,
-            requested_strategy_ids=draft.requested_strategies,
-            baggage_preference=draft.baggage_preference,
-            wants_watch=draft.wants_watch,
+        return IntentOverlay.model_validate(
+            {
+                "origin_text": draft.origin_query or draft.origin,
+                "destination_text": draft.destination_query or draft.destination,
+                "departure_date": draft.departure_date,
+                "return_date": draft.return_date,
+                "date_hint": draft.date_hint,
+                "trip_shape": draft.trip_shape,
+                "date_mode": draft.date_mode,
+                "adults": draft.adults,
+                "children": draft.children,
+                "infants": draft.infants,
+                "currency": draft.currency,
+                "nearby_radius_km": draft.nearby_radius_km,
+                "requested_strategy_ids": draft.requested_strategies,
+                "baggage_preference": draft.baggage_preference,
+                "wants_watch": draft.wants_watch,
+            }
         )
 
     return provide

@@ -411,12 +411,12 @@ async def test_bounded_plan_exposes_sanitized_frozen_plan_card_summary(
             "cost_model_version": "aviasales-v1",
             "requests_per_minute": 20,
         },
-            "hidden_city_enabled": False,
-            "hidden_city_warning_version": None,
-            "hidden_city_warnings": [],
-            "baggage_preference": "unspecified",
-            "wants_watch": False,
-        }
+        "hidden_city_enabled": False,
+        "hidden_city_warning_version": None,
+        "hidden_city_warnings": [],
+        "baggage_preference": "unspecified",
+        "wants_watch": False,
+    }
     assert plan["estimate"] == {
         "calendar_searches": 7,
         "exact_searches": 7,

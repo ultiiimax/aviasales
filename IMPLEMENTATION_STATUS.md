@@ -7,7 +7,7 @@ This file is maintained by coding agents. Mark a slice done only after implement
 | Provider | Adapter | Credentials | Enabled | Background allowed | Merge allowed | Last verification |
 |---|---|---:|---:|---:|---:|---|
 | Fake | implemented offline demo | none | yes | yes | yes | n/a |
-| Aviasales Search | implemented mobile API, live | `AVIASALES_SEARCH_SIGNATURE`, `AVIASALES_SEARCH_MARKER` | env flag | yes | yes | 2026-07-16 exact mapping/booking boundary reverified against sanitized capture; last live schema checks remain 2026-07-14 |
+| Aviasales Search | implemented mobile API, live | `AVIASALES_SEARCH_SIGNATURE`, `AVIASALES_SEARCH_MARKER` | env flag | yes | yes | 2026-07-17 local kit imported safely; one exact live smoke returned 50 schema-valid live items |
 | SearXNG | implemented URL discovery | self-hosted optional | env flag | no, user action | candidate only | 2026-06-29 |
 | Crawl4AI | implemented markdown extraction | self-hosted optional | env flag | no, user action | candidate only | 2026-06-29 |
 | Deal discovery | implemented orchestrator | local components | component flags | no, user action | candidate only | 2026-06-29 |
@@ -16,7 +16,46 @@ This file is maintained by coding agents. Mark a slice done only after implement
 | Skyscanner Live | contract only | none | no | no | no | 2026-06-23 |
 | Duffel | contract only | none | no | no | no | 2026-06-23 |
 
-## Current Slice: Human-readable places and airlines
+## Current Slice: API-kit agent integration and UI polish
+
+- Goal: accept a normal trip request once, start the durable Aviasales search
+  immediately when the intent is complete, and present progress/results without
+  exposing internal plan machinery.
+- Design:
+  `docs/superpowers/specs/2026-07-17-api-kit-agent-ui-polish-design.md`.
+- Implementation plan:
+  `docs/superpowers/plans/2026-07-17-api-kit-agent-ui-polish.md`.
+- Delivered:
+  - [x] Add a non-executing, redacted local API-kit importer and wire the real
+    Aviasales credentials into the ignored `.env`.
+  - [x] Add an identity-bound typed agent gateway with durable immediate search,
+    replay-safe chat idempotency and separate explicit watch creation.
+  - [x] Add a bounded read-only Codex CLI intent overlay while keeping the
+    deterministic parser authoritative and provider facts outside the model;
+    pin the locally available `gpt-5.4-mini` model and keep a 15-second fallback.
+  - [x] Replace the plan-first UI with one composer, editable example presets,
+    five human progress stages and collapsed diagnostics/manual controls.
+  - [x] Render one factual card per candidate with place names/flags, carrier
+    names/logos, ranking badges, baggage/protection/source facts and lazy booking.
+  - [x] Reverify the provider with one sanitized exact live smoke: `ok`, 50
+    schema-valid items, source `aviasales_search`, freshness `live`.
+  - [x] Finish focused release checks and restart the local release.
+- Release verification on 2026-07-17: the imported credentials passed one
+  sanitized exact live smoke with 50 `live` items. The focused agent/import/UI
+  set passes 101 tests, and one Chromium E2E passes. Ruff check/format is clean
+  for all 21 changed Python files and mypy is clean for the 11 changed typed
+  source modules. In-app browser QA passed at
+  the default desktop viewport and `390×844`: no console warnings/errors,
+  framework overlay or page-level horizontal overflow; preset insertion,
+  focus, signed-out handoff and prompt preservation work. `/healthz=ok`,
+  `/readyz=ready`, and both `flight-hunter-worker` and
+  `flight-hunter-agent-worker` heartbeats are healthy. No migration was needed.
+  A real local Codex call with `gpt-5.4-mini` returned a schema-valid intent;
+  Windows wrapper timeouts and exit races are covered by process-tree termination
+  plus bounded temporary-directory cleanup. The real credentials remain only in
+  ignored `.env` and were not printed.
+
+## Previous Slice: Human-readable places and airlines
 
 - Goal: remove mandatory IATA knowledge from the UI, preserve city-versus-airport
   semantics, and show factual flags, place names and airline identity.

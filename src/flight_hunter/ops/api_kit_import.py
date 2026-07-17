@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -121,6 +122,11 @@ def _literal_client_constants(source: str) -> dict[str, str]:
         if name not in _CLIENT_NAMES:
             continue
         if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            if name == "MARKER":
+                # Real kits commonly derive MARKER from the literal ANDROID_ID.
+                # Do not execute or interpret that expression; the importer derives
+                # the same bounded value itself below.
+                continue
             raise _ApiKitInvalid
         parsed = value.value.strip()
         if not parsed:
@@ -229,7 +235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if result.configured:
         print('{"configured":true,"provider":"aviasales_search"}')
         return 0
-    print(result.code, file=os.sys.stderr)
+    print(result.code, file=sys.stderr)
     return 3 if result.code == "api_kit_env_write_failed" else 2
 
 

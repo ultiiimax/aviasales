@@ -53,7 +53,8 @@ class AppSettings:
     agent_mcp_enabled: bool = False
     agent_mcp_server: str | None = None
     agent_codex_cli_enabled: bool = False
-    agent_codex_cli_timeout_seconds: int = 8
+    agent_codex_cli_model: str = "gpt-5.4-mini"
+    agent_codex_cli_timeout_seconds: int = 15
     agent_codex_cli_service_tier: str = "fast"
     agent_codex_cli_max_output_bytes: int = 16_384
     agent_openai_enabled: bool = False
@@ -203,9 +204,11 @@ class AppSettings:
             agent_mcp_enabled=_env_bool("AGENT_MCP_ENABLED", default=False),
             agent_mcp_server=_env_optional("AGENT_MCP_SERVER"),
             agent_codex_cli_enabled=_env_bool("AGENT_CODEX_CLI_ENABLED", default=False),
+            agent_codex_cli_model=os.getenv("AGENT_CODEX_CLI_MODEL", "gpt-5.4-mini").strip()
+            or "gpt-5.4-mini",
             agent_codex_cli_timeout_seconds=_env_int(
                 "AGENT_CODEX_CLI_TIMEOUT_SECONDS",
-                default=8,
+                default=15,
             ),
             agent_codex_cli_service_tier=os.getenv("AGENT_CODEX_CLI_SERVICE_TIER", "fast"),
             agent_codex_cli_max_output_bytes=_env_int(

@@ -30,7 +30,21 @@ def test_readme_is_the_local_v1_operator_entrypoint() -> None:
         assert command in readme
 
     assert "466 passed" not in readme
-    assert "856890a7-59b2-4043-9bc7-e478bb4e6405" not in readme
+
+
+def test_documented_provider_signatures_are_placeholders() -> None:
+    allowed = {
+        "",
+        "...",
+        "<local-mobile-signature>",
+        "replace-with-provider-signature",
+    }
+    documents = (Path("README.md"), *sorted(Path("docs").rglob("*.md")))
+
+    for path in documents:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("AVIASALES_SEARCH_SIGNATURE="):
+                assert line.partition("=")[2] in allowed, path
 
 
 def test_readme_only_invokes_declared_project_scripts_and_make_targets() -> None:

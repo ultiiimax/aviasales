@@ -28,9 +28,7 @@ def _write_kit(
     (aviasales / "keys.json").write_text(json.dumps(payload), encoding="utf-8")
     marker_line = f'MARKER = "{marker}"\n' if marker is not None else ""
     (aviasales / "client.py").write_text(
-        f'X_SIGNATURE = "{client_signature}"\n'
-        f'ANDROID_ID = "{_ANDROID_ID}"\n'
-        f"{marker_line}",
+        f'X_SIGNATURE = "{client_signature}"\nANDROID_ID = "{_ANDROID_ID}"\n{marker_line}',
         encoding="utf-8",
     )
 
@@ -62,10 +60,7 @@ def test_import_is_atomic_and_rejects_conflicting_source(
         assert "KEEP=1\r\n" in rendered
         assert "AVIASALES_SEARCH_ENABLED=true\r\n" in rendered
         assert f"AVIASALES_SEARCH_SIGNATURE={_SIGNATURE}\r\n" in rendered
-        assert (
-            "AVIASALES_SEARCH_MARKER=mobile_app.0123456789abcdef0123456789abcdef\r\n"
-            in rendered
-        )
+        assert "AVIASALES_SEARCH_MARKER=mobile_app.0123456789abcdef0123456789abcdef\r\n" in rendered
     else:
         assert result.code == "api_kit_invalid"
         assert rendered == original
@@ -75,9 +70,7 @@ def test_import_derives_marker_from_utf8_android_id(tmp_path: Path) -> None:
     root = tmp_path / "kit"
     aviasales = root / "aviasales"
     aviasales.mkdir(parents=True)
-    (aviasales / "keys.json").write_text(
-        json.dumps({"x_signature": _SIGNATURE}), encoding="utf-8"
-    )
+    (aviasales / "keys.json").write_text(json.dumps({"x_signature": _SIGNATURE}), encoding="utf-8")
     (aviasales / "client.py").write_text(
         f'X_SIGNATURE = "{_SIGNATURE}"\nANDROID_ID = "тест-device"\n',
         encoding="utf-8",
@@ -90,6 +83,27 @@ def test_import_derives_marker_from_utf8_android_id(tmp_path: Path) -> None:
     assert result.configured
     rendered = env_path.read_text(encoding="utf-8")
     assert "AVIASALES_SEARCH_MARKER=mobile_app.78a1ba39020cc052b3e2ffca15c6e442\n" in rendered
+
+
+def test_import_ignores_derived_marker_expression_without_executing_it(tmp_path: Path) -> None:
+    root = tmp_path / "kit"
+    aviasales = root / "aviasales"
+    aviasales.mkdir(parents=True)
+    (aviasales / "keys.json").write_text(json.dumps({"x_signature": _SIGNATURE}), encoding="utf-8")
+    (aviasales / "client.py").write_text(
+        "import hashlib\n"
+        f'X_SIGNATURE = "{_SIGNATURE}"\n'
+        f'ANDROID_ID = "{_ANDROID_ID}"\n'
+        'MARKER = f"mobile_app.{hashlib.md5(ANDROID_ID.encode()).hexdigest()}"\n',
+        encoding="utf-8",
+    )
+    env_path = tmp_path / ".env"
+
+    result = import_aviasales_api_kit(api_kit_root=root, env_path=env_path)
+
+    assert result.configured
+    rendered = env_path.read_text(encoding="utf-8")
+    assert "AVIASALES_SEARCH_MARKER=mobile_app.8af7f921e8608d70781440a6b02a4585\n" in rendered
 
 
 def test_cli_redacts_values_and_write_failure_leaves_env_unchanged(

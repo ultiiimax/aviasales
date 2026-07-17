@@ -23,7 +23,8 @@ def test_env_example_exists_with_safe_placeholders() -> None:
     assert "AGENT_PROVIDER=deterministic_presets" in content
     assert "AGENT_MCP_ENABLED=false" in content
     assert "AGENT_CODEX_CLI_ENABLED=false" in content
-    assert "AGENT_CODEX_CLI_TIMEOUT_SECONDS=8" in content
+    assert "AGENT_CODEX_CLI_MODEL=gpt-5.4-mini" in content
+    assert "AGENT_CODEX_CLI_TIMEOUT_SECONDS=15" in content
     assert "AGENT_OPENAI_ENABLED=false" in content
     assert "AGENT_OPENAI_MODEL=gpt-5.5" in content
     assert "AGENT_OPENAI_TIMEOUT_SECONDS=8" in content

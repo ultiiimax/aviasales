@@ -26,7 +26,7 @@ def test_root_ui_is_readable_and_has_no_mojibake(page: Page, local_server: Local
 
     assert page.url == f"{local_server.url}/"
     assert page.title() == "Flight Hunter"
-    expect(page.get_by_role("button", name="Собрать план")).to_be_visible()
+    expect(page.get_by_role("button", name="Найти варианты")).to_be_visible()
     expect(page.get_by_role("heading", name="Отслеживания")).to_be_visible()
     content = page.content()
     assert not any(

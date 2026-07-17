@@ -19,9 +19,11 @@ def test_web_ui_uses_search_first_russian_hierarchy() -> None:
         assert re.search(rf'class="[^"]*\b{class_name}\b[^"]*"', html)
     for text in (
         "Куда летим?",
-        "Собрать план",
+        "Найти варианты",
         "Задать точный маршрут",
         "Как работает поиск",
+        "Понимаю маршрут",
+        "Ищу живые варианты",
     ):
         assert text in html
     for old_heading in (">Agent cockpit<", ">Session<"):
@@ -149,7 +151,7 @@ def test_carrier_logo_uses_fixed_origin_and_one_shot_fallback() -> None:
     assert "label.textContent" in carrier_strip
     assert "innerHTML" not in carrier_strip
     assert "appendCarrierStrip(row, offer.segments)" in priced_offers
-    assert "appendCarrierStrip(card, candidate.segments)" in confirmed
+    assert "appendCarrierStrip(card, segments)" in confirmed
     assert "candidate.flown_segments" in agent_results
     assert "candidate.skipped_segments" in agent_results
     assert "appendCarrierStrip(card, hiddenCitySegments)" in agent_results
@@ -485,6 +487,10 @@ def test_web_agent_entry_points_auth_render_and_revision_actions_share_plan_card
 
     assert "authHeaders" in chat
     assert "renderAgentPlan(body.proposed_plan)" in chat
+    assert '"Idempotency-Key": idempotencyKey' in chat
+    assert '"run_started", "watch_created"' in chat
+    assert "pollAgentRun(body.run" in chat
+    assert "renderAgentRunPlaceholder(body.reply_ru, 0)" in chat
     assert "authHeaders" in preset
     assert "renderAgentPlan" in preset
     assert "reviseAgentPlan(action.parameters || {})" in actions
@@ -623,6 +629,7 @@ def test_web_agent_run_persists_only_versioned_id_and_blocks_duplicate_execute()
     reload = _javascript_function(html, "reloadAgentPlan")
     clear_agent = _javascript_sync_function(html, "clearAgentSessionState")
     confirmed = _javascript_sync_function(html, "renderAgentConfirmedResults")
+    ranking_badges = _javascript_sync_function(html, "appendAgentRankingBadges")
 
     assert 'const agentRunStorageKey = "flight_hunter_agent_run_id_v1"' in html
     persisted_line = next(
@@ -653,8 +660,9 @@ def test_web_agent_run_persists_only_versioned_id_and_blocks_duplicate_execute()
     assert "agentExecuteGeneration += 1" in clear_agent
 
     assert "candidate.sources" in confirmed
-    assert "candidate.rankings" in confirmed
-    assert "ranking.reasons" in confirmed
+    assert "candidate.rankings" in ranking_badges
+    assert "ranking.rank === 1" in ranking_badges
+    assert "ranking.reasons" not in confirmed
     assert "candidate.provider_id" not in confirmed
     assert "candidate.freshness" not in confirmed
     assert "candidate.ranking_reasons" not in confirmed

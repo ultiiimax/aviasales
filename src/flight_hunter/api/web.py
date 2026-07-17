@@ -1090,11 +1090,11 @@ def render_index_html() -> str:
       padding: 22px;
     }
 
-    #preset-list { order: 1; }
-    #chat-log { order: 2; }
-    #assistant-form { order: 3; }
-    #decision-rail { order: 4; }
-    #agent-plan-card { order: 5; }
+    #assistant-form { order: 1; }
+    #preset-list { order: 2; }
+    #chat-log { order: 3; }
+    #agent-plan-card { order: 4; }
+    #decision-rail { order: 5; }
     .technical-details { order: 6; }
 
     .hero-card .quick-actions {
@@ -1627,6 +1627,312 @@ def render_index_html() -> str:
       padding: 32px 20px;
     }
 
+    .agent-plan-card {
+      gap: 16px;
+      background: #ffffff;
+      box-shadow: 0 18px 44px rgba(26, 54, 93, 0.08);
+    }
+
+    .agent-plan-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .agent-plan-head h3 {
+      font-size: 21px;
+    }
+
+    #agent-plan-status {
+      color: #53657c;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .agent-progress-shell {
+      display: grid;
+      gap: 14px;
+      border: 1px solid #c9d9f3;
+      border-radius: 16px;
+      background: linear-gradient(135deg, #f5f9ff, #ffffff 68%);
+      padding: 16px;
+    }
+
+    .agent-stage-scroll {
+      overflow-x: auto;
+      scrollbar-width: thin;
+    }
+
+    .agent-stage-track {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(118px, 1fr));
+      min-width: 650px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .agent-stage {
+      position: relative;
+      display: grid;
+      justify-items: center;
+      gap: 7px;
+      color: #7a899d;
+      font-size: 11px;
+      font-weight: 690;
+      line-height: 1.25;
+      text-align: center;
+    }
+
+    .agent-stage:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      z-index: 0;
+      top: 14px;
+      left: calc(50% + 18px);
+      width: calc(100% - 36px);
+      height: 2px;
+      background: #dbe5f3;
+    }
+
+    .agent-stage-dot {
+      position: relative;
+      z-index: 1;
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border: 2px solid #cfdaea;
+      border-radius: 50%;
+      background: #ffffff;
+      color: #718198;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .agent-stage.is-done,
+    .agent-stage.is-active {
+      color: var(--ink);
+    }
+
+    .agent-stage.is-done .agent-stage-dot {
+      border-color: var(--ok);
+      background: var(--ok-soft);
+      color: var(--ok);
+    }
+
+    .agent-stage.is-done .agent-stage-dot::before {
+      content: "✓";
+    }
+
+    .agent-stage.is-done .agent-stage-dot {
+      font-size: 0;
+    }
+
+    .agent-stage.is-done .agent-stage-dot::before {
+      font-size: 13px;
+    }
+
+    .agent-stage.is-done:not(:last-child)::after {
+      background: #8fd0a5;
+    }
+
+    .agent-stage.is-active .agent-stage-dot {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #ffffff;
+      box-shadow: 0 0 0 5px rgba(21, 94, 239, 0.10);
+    }
+
+    .agent-stage.is-error .agent-stage-dot {
+      border-color: var(--danger);
+      background: var(--danger-soft);
+      color: var(--danger);
+    }
+
+    #agent-run-progress {
+      color: #31445c;
+      font-size: 14px;
+      font-weight: 680;
+      line-height: 1.45;
+      text-align: center;
+    }
+
+    .agent-plan-details {
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--surface-soft);
+      overflow: hidden;
+    }
+
+    .agent-plan-details > summary {
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      list-style: none;
+      color: #53657c;
+      font-size: 12px;
+      font-weight: 720;
+      padding: 0 13px;
+    }
+
+    .agent-plan-details > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .agent-plan-details > summary::after {
+      content: "+";
+      color: var(--accent-strong);
+      font-size: 18px;
+    }
+
+    .agent-plan-details[open] > summary::after {
+      content: "−";
+    }
+
+    .agent-plan-details[open] > summary {
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+    }
+
+    .agent-plan-details-body {
+      display: grid;
+      gap: 12px;
+      padding: 12px;
+    }
+
+    .agent-run-meta {
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    #agent-confirmed-results {
+      display: grid;
+      gap: 12px;
+      border: 0;
+      background: transparent;
+      padding: 0;
+    }
+
+    #agent-confirmed-results[hidden] {
+      display: none;
+    }
+
+    #agent-confirmed-results-heading {
+      font-size: 19px;
+    }
+
+    .agent-result-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .agent-result-card {
+      display: grid;
+      gap: 12px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #ffffff;
+      box-shadow: 0 10px 28px rgba(26, 54, 93, 0.06);
+      padding: 16px;
+    }
+
+    .agent-result-card:hover {
+      border-color: #a9bfdf;
+      box-shadow: 0 16px 34px rgba(26, 54, 93, 0.09);
+    }
+
+    .agent-result-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: start;
+    }
+
+    .agent-result-route {
+      color: var(--ink);
+      font-size: 17px;
+      font-weight: 790;
+      line-height: 1.3;
+    }
+
+    .agent-result-price {
+      color: var(--ink);
+      font-size: 23px;
+      font-weight: 840;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .agent-result-badges,
+    .agent-result-facts,
+    .agent-result-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .agent-result-fact {
+      min-height: 30px;
+      display: inline-flex;
+      align-items: center;
+      border-radius: 9px;
+      background: var(--surface-soft);
+      color: #4d6078;
+      font-size: 12px;
+      font-weight: 650;
+      padding: 5px 9px;
+    }
+
+    .agent-result-warning {
+      border-radius: 10px;
+      background: var(--warning-soft);
+      color: var(--warning);
+      font-size: 12px;
+      line-height: 1.45;
+      padding: 9px 11px;
+    }
+
+    .agent-result-segments {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+
+    .agent-result-segments > summary {
+      cursor: pointer;
+      color: #53657c;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .agent-segment-list {
+      display: grid;
+      gap: 6px;
+      margin-top: 9px;
+    }
+
+    .agent-segment-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: #53657c;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .agent-result-actions .primary {
+      min-height: 42px;
+    }
+
+    .agent-result-actions:empty {
+      display: none;
+    }
+
     @media (max-width: 1080px) {
       .topnav {
         display: none;
@@ -1711,6 +2017,12 @@ def render_index_html() -> str:
         scrollbar-width: none;
       }
 
+      .hero-card #preset-list {
+        display: flex;
+        grid-template-columns: none;
+        justify-content: flex-start;
+      }
+
       .hero-card .quick-actions::-webkit-scrollbar {
         display: none;
       }
@@ -1731,6 +2043,14 @@ def render_index_html() -> str:
       .agent-plan-grid,
       .agent-sidecars {
         grid-template-columns: 1fr;
+      }
+
+      .agent-result-head {
+        grid-template-columns: 1fr;
+      }
+
+      .agent-result-price {
+        font-size: 21px;
       }
 
       .search-form {
@@ -1820,6 +2140,11 @@ def render_index_html() -> str:
       .search-form .secondary {
         width: 100%;
       }
+
+      .agent-result-actions .primary,
+      .agent-result-actions .secondary {
+        width: 100%;
+      }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -1895,7 +2220,7 @@ def render_index_html() -> str:
       <div class="hero-copy">
         <p class="eyebrow">Умный поиск маршрута</p>
         <h1 id="assistant-heading">Куда летим?</h1>
-        <p>Опишите поездку обычными словами. Агент соберёт даты, аэропорты и пересадки в понятный план — без выдуманных цен.</p>
+        <p>Опишите поездку обычными словами. Если маршрута и дат достаточно, агент сразу проверит живые варианты — без второго подтверждения.</p>
       </div>
       <div class="hero-card">
         <div class="assistant-body">
@@ -1916,11 +2241,11 @@ def render_index_html() -> str:
               </div>
               <div class="runtime-node">
                 <span>План</span>
-                <strong id="agent-loop">проверяется перед запуском</strong>
+                <strong id="agent-loop">запускается из полного запроса</strong>
               </div>
               <div class="runtime-node">
                 <span>Актуальные цены</span>
-                <strong id="agent-live-policy">только после вашего клика</strong>
+                <strong id="agent-live-policy">сразу после отправки запроса</strong>
               </div>
               <div class="runtime-node">
                 <span>Данные</span>
@@ -1929,7 +2254,7 @@ def render_index_html() -> str:
             </div>
           </details>
           <div class="chat-log" id="chat-log" aria-live="polite">
-            <div class="message bot">Например: «Хочу самый дешёвый вариант из Санкт-Петербурга во Францию в сентябре на неделю». Я уточню только то, без чего нельзя начать поиск.</div>
+            <div class="message bot">Напишите откуда, куда и когда. Если чего-то критичного не хватает, я задам один короткий вопрос.</div>
           </div>
           <div class="agent-sidecars" id="decision-rail">
             <div>
@@ -1942,46 +2267,65 @@ def render_index_html() -> str:
             </div>
           </div>
           <section class="agent-plan-card" id="agent-plan-card" aria-labelledby="agent-plan-heading" hidden>
-            <div>
+            <div class="agent-plan-head">
+              <div>
               <h3 id="agent-plan-heading">План поиска</h3>
               <div id="agent-plan-status" role="status" aria-live="polite">План не создан</div>
+              </div>
             </div>
-            <dl class="agent-plan-grid">
-              <div><dt>Ревизия</dt><dd id="agent-plan-revision">Неизвестно</dd></div>
-              <div><dt>Замороженная область</dt><dd id="agent-plan-scope">Неизвестно</dd></div>
-              <div><dt>Даты</dt><dd id="agent-plan-date-mode">Неизвестно</dd></div>
-              <div><dt>Пассажиры</dt><dd id="agent-plan-passengers">Неизвестно</dd></div>
-              <div><dt>Покрытие</dt><dd id="agent-plan-coverage">Неизвестно</dd></div>
-              <div><dt>Стратегии</dt><dd id="agent-plan-strategies">Неизвестно</dd></div>
-              <div><dt>Hidden-city</dt><dd id="agent-plan-hidden-city">Неизвестно</dd></div>
-              <div><dt>Оценка</dt><dd id="agent-plan-estimate">Неизвестно</dd></div>
-              <div><dt>Лимит провайдера</dt><dd id="agent-plan-rpm">Неизвестно</dd></div>
-              <div><dt>Дедлайн</dt><dd id="agent-plan-deadline">Неизвестно</dd></div>
-              <div><dt>Источник</dt><dd id="agent-plan-source">Неизвестно</dd></div>
-              <div><dt>Истекает</dt><dd id="agent-plan-expiry">Неизвестно</dd></div>
-            </dl>
-            <section class="agent-hidden-city-warning" id="agent-hidden-city-warning" hidden>
-              <strong>Отдельное подтверждение hidden-city</strong>
-              <ul id="agent-hidden-city-warning-list"></ul>
-              <label>
-                <input type="checkbox" id="agent-hidden-city-ack">
-                Я прочитал риски багажа, отмены следующих сегментов и правил перевозчика.
-              </label>
-            </section>
-            <div class="quick-actions" aria-label="Действия с планом">
-              <button class="secondary" type="button" id="agent-plan-edit">Изменить план</button>
-              <button class="secondary" type="button" id="agent-plan-full">Проверить всю область</button>
-              <button class="primary" type="button" id="agent-plan-execute" disabled>Запустить поиск</button>
+            <div class="agent-progress-shell">
+              <div class="agent-stage-scroll">
+                <ol class="agent-stage-track" id="agent-stage-track" aria-label="Ход поиска">
+                  <li class="agent-stage" data-agent-stage="0"><span class="agent-stage-dot">1</span><span>Понимаю маршрут</span></li>
+                  <li class="agent-stage" data-agent-stage="1"><span class="agent-stage-dot">2</span><span>Проверяю даты и аэропорты</span></li>
+                  <li class="agent-stage" data-agent-stage="2"><span class="agent-stage-dot">3</span><span>Ищу живые варианты</span></li>
+                  <li class="agent-stage" data-agent-stage="3"><span class="agent-stage-dot">4</span><span>Сравниваю маршруты</span></li>
+                  <li class="agent-stage" data-agent-stage="4"><span class="agent-stage-dot">5</span><span>Готово</span></li>
+                </ol>
+              </div>
+              <div id="agent-run-progress" role="status" aria-live="polite">Готов принять маршрут.</div>
             </div>
-            <div class="agent-plan-region" id="agent-run-progress" role="status" aria-live="polite">Запуск ещё не создан.</div>
-            <button class="secondary" type="button" id="agent-run-cancel" disabled>Отменить запуск</button>
+            <button class="secondary" type="button" id="agent-run-cancel" disabled hidden>Остановить поиск</button>
+            <details class="agent-plan-details">
+              <summary>Детали и ручное управление</summary>
+              <div class="agent-plan-details-body">
+                <div class="agent-run-meta" id="agent-run-meta">Запуск ещё не создан.</div>
+                <dl class="agent-plan-grid">
+                  <div><dt>Ревизия</dt><dd id="agent-plan-revision">Неизвестно</dd></div>
+                  <div><dt>Замороженная область</dt><dd id="agent-plan-scope">Неизвестно</dd></div>
+                  <div><dt>Даты</dt><dd id="agent-plan-date-mode">Неизвестно</dd></div>
+                  <div><dt>Пассажиры</dt><dd id="agent-plan-passengers">Неизвестно</dd></div>
+                  <div><dt>Покрытие</dt><dd id="agent-plan-coverage">Неизвестно</dd></div>
+                  <div><dt>Стратегии</dt><dd id="agent-plan-strategies">Неизвестно</dd></div>
+                  <div><dt>Hidden-city</dt><dd id="agent-plan-hidden-city">Неизвестно</dd></div>
+                  <div><dt>Оценка</dt><dd id="agent-plan-estimate">Неизвестно</dd></div>
+                  <div><dt>Лимит провайдера</dt><dd id="agent-plan-rpm">Неизвестно</dd></div>
+                  <div><dt>Дедлайн</dt><dd id="agent-plan-deadline">Неизвестно</dd></div>
+                  <div><dt>Источник</dt><dd id="agent-plan-source">Неизвестно</dd></div>
+                  <div><dt>Истекает</dt><dd id="agent-plan-expiry">Неизвестно</dd></div>
+                </dl>
+                <section class="agent-hidden-city-warning" id="agent-hidden-city-warning" hidden>
+                  <strong>Отдельное подтверждение hidden-city</strong>
+                  <ul id="agent-hidden-city-warning-list"></ul>
+                  <label>
+                    <input type="checkbox" id="agent-hidden-city-ack">
+                    Я прочитал риски багажа, отмены следующих сегментов и правил перевозчика.
+                  </label>
+                </section>
+                <div class="quick-actions" aria-label="Действия с планом">
+                  <button class="secondary" type="button" id="agent-plan-edit">Изменить план</button>
+                  <button class="secondary" type="button" id="agent-plan-full">Проверить всю область</button>
+                  <button class="primary" type="button" id="agent-plan-execute" disabled>Запустить вручную</button>
+                </div>
+              </div>
+            </details>
             <section class="agent-plan-region" id="agent-fare-analysis" aria-labelledby="agent-fare-analysis-heading" hidden>
               <h4 id="agent-fare-analysis-heading">Анализ цены</h4>
               <div id="agent-fare-analysis-list">Анализ ещё не рассчитан.</div>
             </section>
             <section class="agent-plan-region" id="agent-confirmed-results" aria-labelledby="agent-confirmed-results-heading" hidden>
               <h4 id="agent-confirmed-results-heading">Подтверждённые варианты</h4>
-              <div id="agent-confirmed-results-list">Подтверждённых вариантов ещё нет.</div>
+              <div class="agent-result-list" id="agent-confirmed-results-list">Подтверждённых вариантов ещё нет.</div>
             </section>
             <section class="agent-plan-region" id="agent-risky-results" aria-labelledby="agent-risky-results-heading" hidden>
               <h4 id="agent-risky-results-heading">Hidden-city исследования</h4>
@@ -1992,7 +2336,7 @@ def render_index_html() -> str:
           <form class="assistant-input" id="assistant-form">
             <textarea name="agent_prompt" aria-label="Опишите поездку"
               placeholder="Например: самый дешёвый путь из Санкт-Петербурга во Францию в сентябре на неделю"></textarea>
-            <button class="primary" type="submit">Собрать план</button>
+            <button class="primary" type="submit">Найти варианты</button>
           </form>
         </div>
       </div>
@@ -2193,6 +2537,7 @@ def render_index_html() -> str:
     let lastAgentPrompt = "";
     let agentEditMode = false;
     let agentSessionGeneration = 0;
+    let pendingAgentChat = null;
     const sessionTokenKey = "flight_hunter_session_token";
     const agentPlanStorageKey = "flight_hunter_agent_plan_id_v1";
     const agentRunStorageKey = "flight_hunter_agent_run_id_v1";
@@ -2281,6 +2626,8 @@ def render_index_html() -> str:
       agentExecuteInFlight = false;
       agentEditMode = false;
       lastAgentPrompt = "";
+      pendingAgentChat = null;
+      document.getElementById("main-search").classList.remove("search-active");
       document.getElementById("agent-plan-card").hidden = true;
       [
         "agent-plan-status",
@@ -2296,6 +2643,7 @@ def render_index_html() -> str:
         "agent-plan-deadline",
         "agent-plan-source",
         "agent-plan-expiry",
+        "agent-run-meta",
         "agent-run-progress",
         "agent-fare-analysis-list",
         "agent-confirmed-results-list",
@@ -2312,10 +2660,12 @@ def render_index_html() -> str:
       document.getElementById("agent-plan-full").disabled = true;
       document.getElementById("agent-plan-edit").disabled = true;
       document.getElementById("agent-run-cancel").disabled = true;
+      document.getElementById("agent-run-cancel").hidden = true;
       document.getElementById("agent-fare-analysis").hidden = true;
       document.getElementById("agent-confirmed-results").hidden = true;
       document.getElementById("agent-risky-results").hidden = true;
       document.getElementById("agent-partial-errors").hidden = true;
+      renderAgentStages(-1);
       agentActionList.replaceChildren();
       airportChoiceList.replaceChildren();
       chatLog.replaceChildren();
@@ -2960,14 +3310,16 @@ def render_index_html() -> str:
       agentRuntime.textContent = details.model
         ? `ИИ-модель · ${details.model}`
         : "детерминированный локальный режим";
-      agentLoop.textContent = "запрос → понятный план → подтверждение → поиск";
+      agentLoop.textContent = "полный запрос → сразу живой поиск";
       agentLivePolicy.textContent = details.live_calls_allowed
-        ? "разрешены текущим действием"
-        : "только после вашего клика";
+        ? "живой поиск уже запущен"
+        : "запустится из полного запроса";
       agentEdgeReady.textContent = details.cloudflare_ready
         ? "локальное хранение · переносимый запуск"
         : "только локально";
-      agentMode.textContent = details.backend === "openai_responses" ? "ИИ подключён" : "локальный агент";
+      agentMode.textContent = ["openai_responses", "codex_cli"].includes(details.backend)
+        ? "ИИ подключён"
+        : "локальный агент";
     }
 
     function renderProviders(providers) {
@@ -4287,12 +4639,27 @@ def render_index_html() -> str:
         agentMode.textContent = "локальный агент";
       }
       presetList.replaceChildren();
+      const examples = {
+        flexible_dates: "Найди самый дешёвый билет из Санкт-Петербурга в Париж около 15 сентября, проверь даты ±3 дня",
+        nearby_airports: "Найди самый дешёвый путь из Москвы в Милан и проверь аэропорты в радиусе 150 км",
+        buy_timing: "Когда лучше покупать билет из Санкт-Петербурга в Стамбул на 12 октября? Проверь текущие цены",
+        split_ticket: "Найди дешёвый путь из Санкт-Петербурга в Лиссабон, включая отдельные билеты и самостоятельные пересадки",
+        hidden_city: "Проверь hidden-city варианты из Москвы в Париж без багажа и сначала покажи риски",
+        error_fare_sources: "Где сейчас искать аномально дешёвые билеты из России в Азию?",
+        geo_currency: "Сравни стоимость рейса Москва — Дубай в доступных валютах и странах сайта"
+      };
       agentPresets.forEach((preset) => {
         const button = document.createElement("button");
         button.className = "chip";
         button.type = "button";
         button.textContent = preset.title_ru;
-        button.addEventListener("click", () => requestAgentPlan(preset.id, preset.title_ru));
+        button.title = "Подставить пример в запрос";
+        button.addEventListener("click", () => {
+          const input = document.querySelector("#assistant-form textarea");
+          input.value = examples[preset.id] || preset.description_ru || preset.title_ru;
+          input.focus();
+          input.setSelectionRange(input.value.length, input.value.length);
+        });
         presetList.append(button);
       });
     }
@@ -4326,9 +4693,9 @@ def render_index_html() -> str:
 
     function agentPlanStateLabel(state) {
       const labels = {
-        draft: "Черновик — нужны уточнения",
-        awaiting_approval: "Ждёт явного запуска",
-        consumed: "Быстрый план уже запущен",
+        draft: "Нужно уточнить маршрут",
+        awaiting_approval: "Маршрут готов к поиску",
+        consumed: "Маршрут принят, поиск выполняется",
         expired: "План истёк",
         superseded: "Есть более новая ревизия"
       };
@@ -4409,6 +4776,7 @@ def render_index_html() -> str:
       const editReady = ["draft", "awaiting_approval"].includes(plan.state);
 
       document.getElementById("agent-plan-card").hidden = false;
+      document.getElementById("main-search").classList.add("search-active");
       document.getElementById("agent-plan-status").textContent =
         `${agentPlanStateLabel(plan.state)}${agentClarificationLabel(plan)}`;
       document.getElementById("agent-plan-revision").textContent =
@@ -4420,8 +4788,21 @@ def render_index_html() -> str:
           + `${passengers.infants} мл. · всего ${passengers.total} · ${passengers.currency}`
         : "Неизвестно";
       document.getElementById("agent-plan-coverage").textContent = plan.coverage || "Неизвестно";
+      const strategyLabels = {
+        nearby_airports: "ближайшие аэропорты",
+        flexible_dates: "гибкие даты",
+        split_ticket: "отдельные билеты",
+        self_transfer: "самостоятельные пересадки",
+        hidden_city: "hidden-city"
+      };
+      const selectedStrategies = (plan.enabled_strategies || [])
+        .map((value) => strategyLabels[value] || value);
+      if (summary.baggage_preference === "checked") selectedStrategies.push("с багажом");
+      if (summary.baggage_preference === "carry_on") selectedStrategies.push("только ручная кладь");
+      if (summary.baggage_preference === "none") selectedStrategies.push("без багажа");
+      if (summary.wants_watch === true) selectedStrategies.push("слежение за ценой");
       document.getElementById("agent-plan-strategies").textContent =
-        (plan.enabled_strategies || []).join(", ") || "Стандартный маршрут";
+        selectedStrategies.join(", ") || "Стандартный маршрут";
       document.getElementById("agent-plan-hidden-city").textContent = hiddenCityEnabled
         ? "Включён: только без регистрируемого багажа; сегменты после выхода могут отменить"
         : "Выключен";
@@ -4441,6 +4822,7 @@ def render_index_html() -> str:
       const warningList = document.getElementById("agent-hidden-city-warning-list");
       const warningAck = document.getElementById("agent-hidden-city-ack");
       warningRegion.hidden = !hiddenCityEnabled;
+      if (hiddenCityEnabled) document.querySelector(".agent-plan-details").open = true;
       warningAck.checked = false;
       warningList.replaceChildren();
       hiddenCityWarnings.forEach((warning) => {
@@ -4583,6 +4965,47 @@ def render_index_html() -> str:
       return messages[code] || fallback || code || "Неизвестная ошибка запуска";
     }
 
+    function renderAgentStages(activeIndex, state = "active") {
+      document.querySelectorAll("[data-agent-stage]").forEach((node) => {
+        const index = Number(node.dataset.agentStage);
+        node.classList.toggle("is-done", activeIndex >= 0 && index < activeIndex);
+        node.classList.toggle("is-active", state === "active" && index === activeIndex);
+        node.classList.toggle("is-error", state === "error" && index === activeIndex);
+        if (state === "done" && activeIndex === 4) {
+          node.classList.toggle("is-done", index <= activeIndex);
+          node.classList.remove("is-active", "is-error");
+        }
+      });
+    }
+
+    function agentRunStage(run) {
+      if (run.status === "queued") return 1;
+      if (run.status === "running" || run.status === "cancel_requested") {
+        const operations = run.operation_counts || {};
+        if ((operations.succeeded || 0) > 0) return 3;
+        if ((operations.attempted || 0) > 0 || (operations.leased || 0) > 0) return 2;
+        return 1;
+      }
+      return 4;
+    }
+
+    function agentRunProgressMessage(run) {
+      const operations = run.operation_counts || {};
+      const attempted = operations.attempted || 0;
+      const total = operations.total || 0;
+      const progress = total > 0 ? ` Проверено операций: ${attempted} из ${total}.` : "";
+      const messages = {
+        queued: "Маршрут понятен. Поиск поставлен в очередь.",
+        running: `Проверяю живые цены и сравниваю маршруты.${progress}`,
+        cancel_requested: "Останавливаю поиск и сохраняю уже найденные варианты.",
+        completed: "Готово. Ниже только варианты, подтверждённые источником.",
+        partial: "Поиск завершён частично. Показываю всё, что удалось подтвердить.",
+        failed: "Поиск не завершился. Выдуманных вариантов не добавлено.",
+        cancelled: "Поиск остановлен. Уже подтверждённые данные сохранены."
+      };
+      return messages[run.status] || `Состояние поиска: ${run.status}.`;
+    }
+
     function renderAgentRun(run) {
       currentAgentRun = run;
       window.localStorage.setItem(agentRunStorageKey, String(run.run_id));
@@ -4590,9 +5013,15 @@ def render_index_html() -> str:
       const cancelButton = document.getElementById("agent-run-cancel");
       const partialErrors = document.getElementById("agent-partial-errors");
       const terminalProblem = ["partial", "failed", "cancelled"].includes(run.status);
-      progress.textContent = `Запуск ${String(run.run_id).slice(0, 8)} · ${run.status} · `
-        + `дедлайн ${run.deadline_at}`;
+      const terminalSuccess = run.status === "completed";
+      const stage = agentRunStage(run);
+      renderAgentStages(stage, terminalSuccess ? "done" : terminalProblem ? "error" : "active");
+      progress.textContent = agentRunProgressMessage(run);
+      progress.title = `Запуск ${String(run.run_id).slice(0, 8)}`;
+      document.getElementById("agent-run-meta").textContent =
+        `Запуск ${run.run_id} · статус ${run.status} · дедлайн ${formatIsoMinute(run.deadline_at)}`;
       cancelButton.disabled = !["queued", "running"].includes(run.status);
+      cancelButton.hidden = !["queued", "running", "cancel_requested"].includes(run.status);
       cancelButton.title = run.status === "cancel_requested"
         ? "Отмена уже запрошена"
         : "Отменить выполняющийся запуск";
@@ -4778,6 +5207,70 @@ def render_index_html() -> str:
       await lookupAirportPlaces(codes);
     }
 
+    function appendAgentRankingBadges(container, candidate) {
+      const labels = {
+        balanced: ["Лучший вариант", "ok"],
+        cheapest: ["Самый дешёвый", "ok"],
+        fastest: ["Самый быстрый", "ok"],
+        low_risk: ["Меньше риска", "ok"],
+        split_self_transfer: ["Отдельные билеты", "warn"],
+        risky: ["Повышенный риск", "high"]
+      };
+      const winners = (candidate.rankings || []).filter((ranking) => ranking.rank === 1);
+      winners.forEach((ranking) => {
+        const [label, tone] = labels[ranking.view] || [ranking.view, "off"];
+        const badge = document.createElement("span");
+        badge.className = `badge ${tone}`;
+        badge.textContent = label;
+        container.append(badge);
+      });
+      const confirmed = document.createElement("span");
+      confirmed.className = "badge off";
+      confirmed.textContent = "Подтверждено источником";
+      container.append(confirmed);
+    }
+
+    function agentProtectionLabel(value) {
+      return ({
+        explicitly_protected: "Пересадка защищена единым билетом",
+        self_transfer: "Самостоятельная пересадка",
+        unknown: "Защита пересадки неизвестна"
+      })[value] || "Защита пересадки неизвестна";
+    }
+
+    async function resolveAgentBooking(token, button) {
+      if (!token || !currentAgentPlan || !currentAgentRun || button.disabled) return;
+      const originalLabel = button.textContent;
+      button.disabled = true;
+      button.textContent = "Открываю билет…";
+      try {
+        const response = await fetch(
+          `${agentPlanUrl(currentAgentPlan.plan_id)}/runs/${encodeURIComponent(currentAgentRun.run_id)}/booking-actions/resolve`,
+          {
+            method: "POST",
+            headers: authHeaders({"Content-Type": "application/json"}),
+            body: JSON.stringify({token})
+          }
+        );
+        if (!response.ok) throw new Error(await codedMessage(response));
+        const body = await response.json();
+        if (body.status !== "resolved" || !body.url) {
+          throw new Error("Ссылка на билет больше недоступна");
+        }
+        const target = new URL(body.url, window.location.origin);
+        if (!["http:", "https:"].includes(target.protocol)) {
+          throw new Error("Источник вернул неподдерживаемую ссылку");
+        }
+        window.location.assign(target.href);
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = originalLabel;
+        const errors = document.getElementById("agent-partial-errors");
+        errors.hidden = false;
+        errors.textContent = `Не удалось открыть билет: ${error.message}`;
+      }
+    }
+
     function renderAgentConfirmedResults(results) {
       const region = document.getElementById("agent-confirmed-results");
       const list = document.getElementById("agent-confirmed-results-list");
@@ -4786,58 +5279,116 @@ def render_index_html() -> str:
       region.hidden = results.state === "not_ready";
       if (results.state !== "ready" || candidates.length === 0) {
         list.textContent = results.state === "unavailable"
-          ? "Подтверждённые результаты недоступны: evidence не прошли проверку."
-          : "Подтверждённых вариантов нет.";
+          ? "Подтверждённые варианты недоступны: сохранённые данные не прошли проверку."
+          : "По этому запросу подтверждённых вариантов пока нет.";
         return;
       }
-      candidates.forEach((candidate, index) => {
-        const card = document.createElement("article");
-        card.className = "agent-hidden-city-result";
-        const title = document.createElement("strong");
+      candidates.forEach((candidate) => {
+        const segments = candidate.segments || [];
+        const legs = candidate.ordered_legs || [];
         const amount = candidate.total_amount || {};
-        const orderedRoute = (candidate.ordered_legs || []).map((leg) => (
+        const card = document.createElement("article");
+        card.className = "agent-result-card";
+
+        const head = document.createElement("div");
+        head.className = "agent-result-head";
+        const route = document.createElement("div");
+        route.className = "agent-result-route";
+        route.textContent = legs.map((leg) => (
           formatPlaceRouteFromCache(
             {kind: "airport", code: leg.origin},
             {kind: "airport", code: leg.destination},
             true
           )
-        )).join(" · ");
-        title.textContent = `${index + 1}. ${orderedRoute || "Маршрут не указан"}`;
+        )).join(" · ") || "Маршрут не указан";
+        const price = document.createElement("div");
+        price.className = "agent-result-price";
+        price.textContent = Number.isInteger(amount.minor_units) && amount.currency
+          ? formatMinorAmount(amount.minor_units, amount.currency)
+          : "Цена не подтверждена";
+        head.append(route, price);
+
+        const badges = document.createElement("div");
+        badges.className = "agent-result-badges";
+        appendAgentRankingBadges(badges, candidate);
+
         const facts = document.createElement("div");
-        facts.className = "small";
-        const sources = (candidate.sources || []).join(", ") || "источник неизвестен";
-        facts.textContent =
-          `${formatMinorAmount(amount.minor_units, amount.currency)}`
-          + ` · ${candidate.passengers} пасс. · CONFIRMED`
-          + ` · ${sources}`
-          + ` · наблюдалось ${candidate.observed_at || "неизвестно"}`;
-        const route = document.createElement("div");
-        route.className = "small";
-        route.textContent = (candidate.segments || []).length > 0
-          ? `Сегменты: ${(candidate.segments || []).map((segment) => (
-            formatPlaceRouteFromCache(
+        facts.className = "agent-result-facts";
+        const transferCount = Math.max(0, segments.length - Math.max(legs.length, 1));
+        const baggageValues = [...new Set((candidate.baggage_summaries || []).filter(Boolean))];
+        const sources = (candidate.sources || [])
+          .map((source) => providerLabels[source] || source)
+          .join(", ") || "источник не указан";
+        [
+          `${candidate.passengers || 1} пасс.`,
+          transferCount === 0 ? "Без пересадок" : `${transferCount} пересадок`,
+          agentProtectionLabel(candidate.protection_status),
+          baggageValues.length ? `Багаж: ${baggageValues.join(", ")}` : "Багаж: данных нет",
+          `Источник: ${sources}`,
+          `Проверено: ${formatIsoMinute(candidate.observed_at)}`
+        ].forEach((value) => {
+          const fact = document.createElement("span");
+          fact.className = "agent-result-fact";
+          fact.textContent = value;
+          facts.append(fact);
+        });
+
+        card.append(head, badges);
+        if (segments.length > 0) appendCarrierStrip(card, segments);
+        card.append(facts);
+
+        const separateTickets = (candidate.ticket_boundaries || []).length;
+        const unknownCosts = (candidate.unknown_costs || []).length;
+        if (separateTickets > 1 || unknownCosts > 0 || candidate.price_comparison_status !== "fully_priced") {
+          const warning = document.createElement("div");
+          warning.className = "agent-result-warning";
+          const parts = [];
+          if (separateTickets > 1) parts.push(`${separateTickets} отдельных билета — перепроверьте пересадки`);
+          if (unknownCosts > 0) parts.push(`не подтверждена стоимость ${unknownCosts} обязательных расходов`);
+          if (candidate.price_comparison_status === "non_comparable") parts.push("итоговая цена несопоставима с обычным единым билетом");
+          warning.textContent = parts.join(" · ") || "В итоговой стоимости есть неподтверждённые обязательные расходы.";
+          card.append(warning);
+        }
+
+        if (segments.length > 0) {
+          const details = document.createElement("details");
+          details.className = "agent-result-segments";
+          const summary = document.createElement("summary");
+          summary.textContent = `Показать ${segments.length} сегм.`;
+          const segmentList = document.createElement("div");
+          segmentList.className = "agent-segment-list";
+          segments.forEach((segment) => {
+            const row = document.createElement("div");
+            row.className = "agent-segment-row";
+            const segmentRoute = document.createElement("span");
+            segmentRoute.textContent = formatPlaceRouteFromCache(
               {kind: "airport", code: segment.origin},
               {kind: "airport", code: segment.destination},
               true
-            )
-          )).join(" · ")}`
-          : "Сегменты отдельно не указаны.";
-        const boundaries = document.createElement("div");
-        boundaries.className = "small";
-        boundaries.textContent = (candidate.ticket_boundaries || []).length > 1
-          ? `${candidate.ticket_boundaries.length} отдельных билета; self-transfer виден заранее.`
-          : "Один билет или граница билета не требует отдельного предупреждения.";
-        const reasons = document.createElement("div");
-        reasons.className = "small";
-        const rankingReasons = (candidate.rankings || [])
-          .flatMap((ranking) => ranking.reasons || []);
-        reasons.textContent = rankingReasons.join(" · ")
-          || "Ранжирование выполнено по подтверждённым фактам.";
-        card.append(title);
-        if ((candidate.segments || []).length > 0) {
-          appendCarrierStrip(card, candidate.segments);
+            );
+            const schedule = document.createElement("span");
+            const flight = [segment.airline_code, segment.flight_number].filter(Boolean).join(" ");
+            schedule.textContent = `${flight ? `${flight} · ` : ""}${formatIsoMinute(segment.depart_at)} → ${formatIsoMinute(segment.arrive_at)}`;
+            row.append(segmentRoute, schedule);
+            segmentList.append(row);
+          });
+          details.append(summary, segmentList);
+          card.append(details);
         }
-        card.append(facts, route, boundaries, reasons);
+
+        const actions = document.createElement("div");
+        actions.className = "agent-result-actions";
+        if (candidate.booking_action?.available && candidate.booking_action.token) {
+          const booking = document.createElement("button");
+          booking.className = "primary";
+          booking.type = "button";
+          booking.textContent = "Перейти к билету";
+          booking.addEventListener("click", () => {
+            void resolveAgentBooking(candidate.booking_action.token, booking);
+          });
+          actions.append(booking);
+        }
+        card.append(actions);
         list.append(card);
       });
     }
@@ -5301,11 +5852,14 @@ def render_index_html() -> str:
       renderAgentRun(run);
     }
 
-    function renderAgentRunPlaceholder(message) {
+    function renderAgentRunPlaceholder(message, stageIndex = -1) {
       currentAgentRun = null;
       window.localStorage.removeItem(agentRunStorageKey);
       document.getElementById("agent-run-progress").textContent = message;
+      document.getElementById("agent-run-meta").textContent = "Запуск ещё не создан.";
+      renderAgentStages(stageIndex);
       document.getElementById("agent-run-cancel").disabled = true;
+      document.getElementById("agent-run-cancel").hidden = true;
       document.getElementById("agent-partial-errors").hidden = true;
       document.getElementById("agent-partial-errors").textContent = "";
     }
@@ -5331,22 +5885,38 @@ def render_index_html() -> str:
       }
       lastAgentPrompt = prompt;
       addMessage("user", prompt);
-      statusLine.textContent = "агент думает...";
+      statusLine.textContent = "понимаю маршрут...";
       const payload = buildSearchPayload();
+      const turnBody = {
+        message: prompt,
+        passengers: payload.passengers,
+        adults: payload.adults,
+        children: payload.children,
+        infants: payload.infants,
+        currency: payload.currency
+      };
+      const requestSignature = JSON.stringify(turnBody);
+      if (!pendingAgentChat || pendingAgentChat.signature !== requestSignature) {
+        pendingAgentChat = {signature: requestSignature, key: freshIdempotencyKey()};
+      }
+      const idempotencyKey = pendingAgentChat.key;
+      const submit = document.querySelector("#assistant-form button[type='submit']");
+      submit.disabled = true;
+      submit.setAttribute("aria-busy", "true");
+      document.getElementById("main-search").classList.add("search-active");
+      document.getElementById("agent-plan-card").hidden = false;
+      document.getElementById("agent-plan-status").textContent = "Разбираю маршрут и ограничения";
+      renderAgentRunPlaceholder("Понимаю маршрут и проверяю, хватает ли данных для поиска.", 0);
       try {
         const response = await agentSessionFetch(
           "/api/v1/agent/chat/turn",
           {
             method: "POST",
-            headers: authHeaders({"Content-Type": "application/json"}),
-            body: JSON.stringify({
-              message: prompt,
-              passengers: payload.passengers,
-              adults: payload.adults,
-              children: payload.children,
-              infants: payload.infants,
-              currency: payload.currency
-            })
+            headers: authHeaders({
+              "Content-Type": "application/json",
+              "Idempotency-Key": idempotencyKey
+            }),
+            body: JSON.stringify(turnBody)
           },
           sessionGeneration
         );
@@ -5358,18 +5928,52 @@ def render_index_html() -> str:
         }
         const body = await response.json();
         if (!agentSessionIsCurrent(sessionGeneration)) return;
+        pendingAgentChat = null;
         addMessage("bot", body.reply_ru);
         renderAgentPlan(body.proposed_plan);
-        renderAgentRunPlaceholder("План создан, запуск ещё не выполнялся.");
         renderAgentRuntime(body.runtime);
         renderAirportChoices(body.airport_options);
         renderAgentActions(body.actions);
         syncExtractedRoute(body);
-        statusLine.textContent = "агент готов";
+        if (["run_started", "watch_created"].includes(body.outcome) && body.run) {
+          renderAgentRun(body.run);
+          if (body.idempotent_replay) {
+            addMessage("bot", "Этот же запрос уже был запущен — продолжаю существующий поиск без дубля.");
+          }
+          if (["queued", "running", "cancel_requested"].includes(body.run.status)) {
+            statusLine.textContent = body.outcome === "watch_created"
+              ? "поиск и слежение запущены"
+              : "ищу варианты...";
+            window.setTimeout(() => pollAgentRun(body.run, 1000, sessionGeneration), 1000);
+          } else {
+            await loadAgentRunResults(body.proposed_plan.plan_id, body.run.run_id, sessionGeneration);
+            statusLine.textContent = "готово";
+          }
+        } else {
+          renderAgentRunPlaceholder(body.reply_ru, 0);
+          statusLine.textContent = "нужно уточнение";
+        }
+        if ((body.warnings || []).length > 0) {
+          const warningLabels = {
+            agent_watch_scope_not_materializable: "Поиск запущен, но для слежения нужен точный город или аэропорт и конкретная дата."
+          };
+          const message = body.warnings.map((code) => warningLabels[code] || code).join(" ");
+          addMessage("bot", message);
+          const warnings = document.getElementById("agent-partial-errors");
+          warnings.hidden = false;
+          warnings.textContent = message;
+        }
+        document.getElementById("agent-plan-card").scrollIntoView({behavior: "smooth", block: "start"});
       } catch (error) {
         if (!agentSessionIsCurrent(sessionGeneration)) return;
-        addMessage("bot", `Агент не смог выполнить turn: ${error.message}`);
+        renderAgentStages(0, "error");
+        document.getElementById("agent-run-progress").textContent =
+          "Не удалось начать поиск. Запрос можно отправить ещё раз — дубль не создастся.";
+        addMessage("bot", `Не удалось начать поиск: ${error.message}`);
         statusLine.textContent = "ошибка агента";
+      } finally {
+        submit.disabled = false;
+        submit.setAttribute("aria-busy", "false");
       }
     }
 
@@ -5661,9 +6265,9 @@ def render_index_html() -> str:
     });
     updatePassengerSummary();
     renderAgentRuntime({
-      backend: "deterministic_harness",
-      agentic_loop: "approval_gated_plan_lifecycle",
-      live_calls_allowed: false,
+      backend: "deterministic_gateway",
+      agentic_loop: "immediate_durable_search",
+      live_calls_allowed: true,
       cloudflare_ready: true
     });
     renderAirportChoices({});
