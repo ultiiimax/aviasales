@@ -11,6 +11,7 @@ import pytest
 from flight_hunter.application.agent_scope import (
     AnywhereDiscoveryRule,
     CoverageMode,
+    FrozenAirportScope,
     GeographyChoice,
     GeographyClarification,
     ScopeResolver,
@@ -72,6 +73,15 @@ def _french_catalog() -> tuple[Airport, ...]:
         _airport("NOS", "Idle", "FR", scheduled_service=False),
         _airport("CLS", "Closed", "FR", active=False),
         _airport("BRU", "Brussels", "BE"),
+    )
+
+
+def _moscow_catalog() -> tuple[Airport, ...]:
+    return (
+        _airport("DME", "Moscow", "RU"),
+        _airport("SVO", "Moscow", "RU"),
+        _airport("VKO", "Moscow", "RU"),
+        _airport("ZIA", "Zhukovsky", "RU"),
     )
 
 
@@ -242,6 +252,30 @@ async def test_city_text_groups_catalog_matches_and_asks_when_name_is_ambiguous(
         ("ZSF",),
         ("PAR", "SPI"),
     )
+
+
+@pytest.mark.anyio
+async def test_city_text_moscow_resolves_complete_group() -> None:
+    resolver = ScopeResolver(repository=MutableAirportCatalog(_moscow_catalog()))
+
+    choice = await resolver.resolve_city_text("Москва")
+
+    assert isinstance(choice, GeographyChoice)
+    assert choice.scope == LocationScope(LocationScopeKind.CITY, "MOW")
+    assert choice.airport_codes == ("DME", "SVO", "VKO", "ZIA")
+
+
+@pytest.mark.anyio
+async def test_finite_mow_scope_freezes_all_group_airports() -> None:
+    resolver = ScopeResolver(repository=MutableAirportCatalog(_moscow_catalog()))
+
+    frozen = await resolver.resolve_finite(
+        LocationScope(LocationScopeKind.CITY, "MOW"),
+        coverage=CoverageMode.FULL,
+    )
+
+    assert isinstance(frozen, FrozenAirportScope)
+    assert frozen.airport_codes == ("DME", "SVO", "VKO", "ZIA")
 
 
 @pytest.mark.anyio

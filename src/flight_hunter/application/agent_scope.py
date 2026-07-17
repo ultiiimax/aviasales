@@ -12,12 +12,18 @@ from hashlib import sha256
 from importlib.resources import files
 from typing import Literal, Protocol, cast
 
+from flight_hunter.application.place_directory import (
+    PlaceDirectory,
+    PlaceUnavailableError,
+    PlaceUnknownError,
+)
 from flight_hunter.domain.agent_search import (
     MAX_ANYWHERE_DISCOVERY_MONTHS,
     LocationScope,
     LocationScopeKind,
     inclusive_month_count,
 )
+from flight_hunter.domain.places import PlaceKind, PlaceRef
 from flight_hunter.geo.airports import Airport, AirportCatalogSnapshot, distance_km_raw
 
 _COUNTRY_CODE_RE = re.compile(r"^[A-Z]{2}$")
@@ -245,6 +251,31 @@ class ScopeResolver:
     ) -> GeographyChoice | GeographyClarification:
         normalized = _normalize_geography_text(text)
         snapshot = await self._repository.catalog_snapshot()
+        directory = PlaceDirectory.from_snapshot(snapshot)
+        canonical_choices: dict[PlaceRef, GeographyChoice] = {}
+        for locale in ("ru", "en"):
+            for option in directory.suggest(normalized, locale=locale):
+                if option.ref.kind is not PlaceKind.CITY:
+                    continue
+                if (
+                    _normalize_geography_text(option.display_name.text) != normalized
+                    and option.ref.code.casefold() != normalized
+                ):
+                    continue
+                canonical_choices.setdefault(
+                    option.ref,
+                    GeographyChoice(
+                        label=(
+                            f"{option.display_name.text} ({option.ref.code}, {option.country_code})"
+                        ),
+                        scope=LocationScope(LocationScopeKind.CITY, option.ref.code),
+                        airport_codes=option.airport_codes,
+                        taxonomy_version=self._countries.version,
+                    ),
+                )
+        if len(canonical_choices) == 1:
+            return next(iter(canonical_choices.values()))
+
         matching = tuple(
             airport
             for airport in snapshot.airports
@@ -295,7 +326,7 @@ class ScopeResolver:
 
         snapshot = await self._repository.catalog_snapshot()
         searchable = tuple(airport for airport in snapshot.airports if airport.is_searchable)
-        selected = self._select_base_airports(scope, searchable)
+        selected = self._select_base_airports(scope, searchable, snapshot=snapshot)
         if isinstance(selected, GeographyClarification):
             return selected
         if not selected:
@@ -401,11 +432,24 @@ class ScopeResolver:
         self,
         scope: LocationScope,
         searchable: tuple[Airport, ...],
+        *,
+        snapshot: AirportCatalogSnapshot,
     ) -> tuple[Airport, ...] | GeographyClarification:
         assert scope.value is not None
         if scope.kind is LocationScopeKind.AIRPORT:
             return tuple(airport for airport in searchable if airport.iata_code == scope.value)
         if scope.kind is LocationScopeKind.CITY:
+            directory = PlaceDirectory.from_snapshot(snapshot)
+            try:
+                city = directory.lookup(PlaceRef(PlaceKind.CITY, scope.value))
+            except PlaceUnavailableError:
+                return ()
+            except PlaceUnknownError:
+                pass
+            else:
+                airports_by_code = {airport.iata_code: airport for airport in searchable}
+                return tuple(airports_by_code[code] for code in city.airport_codes)
+
             anchor = next(
                 (airport for airport in searchable if airport.iata_code == scope.value),
                 None,
