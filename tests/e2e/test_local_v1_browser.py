@@ -84,8 +84,16 @@ def test_fake_exact_search_renders_source_freshness_and_passengers(
     )
     page.goto(local_server.url, wait_until="networkidle")
     page.locator(".exact-search > summary").click()
-    page.locator('input[name="origin"]').fill("MOW")
-    page.locator('input[name="destination"]').fill("LED")
+    page.locator("#origin-place-input").fill("Москва")
+    origin_option = page.locator('#origin-place-listbox [role="option"]').filter(has_text="MOW")
+    expect(origin_option.first).to_be_visible()
+    origin_option.first.click()
+    page.locator("#destination-place-input").fill("Пулково")
+    destination_option = page.locator('#destination-place-listbox [role="option"]').filter(
+        has_text="LED"
+    )
+    expect(destination_option.first).to_be_visible()
+    destination_option.first.click()
     page.locator('input[name="departure_date"]').fill("2026-09-15")
     page.locator('input[name="return_date"]').fill("")
     page.locator('input[name="adults"]').fill("1")
@@ -93,7 +101,8 @@ def test_fake_exact_search_renders_source_freshness_and_passengers(
 
     result = page.locator("#results-list .result-row").first
     expect(result).to_be_visible()
-    expect(result).to_contain_text("MOW → LED")
+    expect(result.locator(".route")).to_contain_text("Москва")
+    expect(result.locator(".route")).to_contain_text("Пулково")
     expect(result).to_contain_text("1 пасс.")
     expect(result).to_contain_text("cached")
     response = page.request.post(

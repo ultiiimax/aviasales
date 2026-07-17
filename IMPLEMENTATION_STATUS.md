@@ -32,8 +32,23 @@ This file is maintained by coding agents. Mark a slice done only after implement
   - [x] Select the hybrid local/provider directory architecture.
   - [x] Review and accept the written design.
   - [x] Write the implementation plan.
-  - [ ] Execute the implementation plan through TDD.
-  - [ ] Verify desktop/mobile, commit to `main` and restart locally.
+  - [x] Execute the implementation plan through focused TDD and independent review.
+  - [x] Verify desktop/mobile, commit to `main` and restart locally.
+- Delivered: immutable typed place directory; `/places/suggest` and batch
+  `/places/lookup`; city expansion preserved through search, agent plans and
+  durable watches; accessible comboboxes; requested-versus-concrete route
+  labels; flags; carrier names, trusted CDN logos and monogram fallback.
+- Release verification on 2026-07-17: migration `0030_typed_watch_places` is
+  current; global Ruff format/check and mypy pass. The single full backend run
+  completed with 1543 passes and three stale-fixture failures; all three
+  corrected nodes pass afterward. Chromium completed six unaffected scenarios,
+  and the corrected real-combobox search scenario passes separately. Live
+  desktop `1440x1000` and mobile `390x844` smoke checks confirm no page-level
+  horizontal overflow, correct `city`/`airport` selections, human requested and
+  concrete routes, and the carrier identity strip without console warnings.
+  `/healthz=ok`, `/readyz=ready` with database `ok`, the `Москва` suggestion is
+  `MOW/city`, and the restarted worker healthcheck is green. No live provider
+  call or security scan was run for this local-only UI slice.
 
 ## Previous Slice: Search-first UI redesign
 

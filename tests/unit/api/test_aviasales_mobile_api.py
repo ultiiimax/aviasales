@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from flight_hunter.api.app import create_app
 from flight_hunter.config import AppSettings
 from flight_hunter.domain.money import Money
 from flight_hunter.domain.offers import FlightOffer, FlightSegmentSummary, Freshness, SearchIntent
 from flight_hunter.domain.policy import ExecutionContext
+from flight_hunter.persistence.models import mapper_registry
 from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchAuthFailed,
     AviasalesSearchBlocked,
@@ -37,6 +40,17 @@ def _settings() -> AppSettings:
         telegram_webhook_secret=None,
         app_secret_key="test-secret",
     )
+
+
+def _initialized_session_factory():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
+    async def create_tables() -> None:
+        async with engine.begin() as connection:
+            await connection.run_sync(mapper_registry.metadata.create_all)
+
+    asyncio.run(create_tables())
+    return async_sessionmaker(engine, expire_on_commit=False)
 
 
 class FakeMobileProvider:
@@ -467,5 +481,6 @@ def test_date_matrix_keeps_http_success_and_stable_provider_error() -> None:
 def _app(provider: FakeMobileProvider):
     return create_app(
         settings=_settings(),
+        watch_session_factory=_initialized_session_factory(),
         provider_instances={"aviasales_search": provider},
     )

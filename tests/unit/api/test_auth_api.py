@@ -113,7 +113,7 @@ async def test_bearer_session_wins_over_conflicting_legacy_headers() -> None:
             "X-Flight-Hunter-Household-Id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
             "X-Flight-Hunter-User-Id": "bbbbbbbb-0000-0000-0000-000000000001",
         },
-        json=_watch_payload(destination="NRT"),
+        json=_watch_payload(destination="CDG"),
     )
 
     assert created.status_code == 201
