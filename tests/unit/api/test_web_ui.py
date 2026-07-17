@@ -28,6 +28,42 @@ def test_web_ui_uses_search_first_russian_hierarchy() -> None:
         assert old_heading not in html
 
 
+def test_exact_search_uses_accessible_typed_place_comboboxes_and_payloads() -> None:
+    html = TestClient(create_app()).get("/").text
+
+    for field in ("origin", "destination"):
+        assert re.search(
+            rf'<input[^>]+id="{field}-place-input"[^>]+'
+            rf'role="combobox"[^>]+aria-autocomplete="list"[^>]+'
+            rf'aria-controls="{field}-place-listbox"',
+            html,
+        )
+        assert f'name="{field}" type="hidden"' in html
+        assert f'name="{field}_kind" type="hidden"' in html
+        assert f'id="{field}-place-listbox" role="listbox"' in html
+        assert f'id="{field}-place-status"' in html
+        assert 'aria-live="polite"' in html
+
+    combobox = _javascript_sync_function(html, "setupPlaceCombobox")
+    payload = _javascript_sync_function(html, "buildSearchPayload")
+    create_watch = _javascript_function(html, "createWatchFromSearch")
+
+    assert "/api/v1/places/suggest?q=" in combobox
+    assert "locale=ru&limit=10" in combobox
+    assert "AbortController" in combobox
+    assert "180" in combobox
+    for key in ("ArrowDown", "ArrowUp", "Enter", "Escape"):
+        assert key in combobox
+    assert "aria-activedescendant" in combobox
+    assert "textContent" in combobox
+    assert "innerHTML" not in combobox
+    assert "origin_kind" in payload
+    assert "destination_kind" in payload
+    assert "payload.origin_kind" in create_watch
+    assert "payload.destination_kind" in create_watch
+    assert "Сначала выберите города или аэропорты из списка" in html
+
+
 def test_web_ui_contains_readable_russian_without_mojibake() -> None:
     response = TestClient(create_app()).get("/")
 

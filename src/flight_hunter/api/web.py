@@ -1277,6 +1277,10 @@ def render_index_html() -> str:
       border-bottom: 1px solid var(--line);
     }
 
+    .exact-search[open] {
+      overflow: visible;
+    }
+
     .search-form {
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 14px;
@@ -1304,6 +1308,101 @@ def render_index_html() -> str:
     input:hover,
     textarea:hover {
       border-color: #9eb2ca;
+    }
+
+    .place-field,
+    .place-combobox {
+      position: relative;
+      min-width: 0;
+    }
+
+    .place-field {
+      display: grid;
+      gap: 7px;
+    }
+
+    .place-field > label {
+      display: block;
+    }
+
+    .place-combobox {
+      display: block;
+    }
+
+    .place-listbox {
+      position: absolute;
+      z-index: 40;
+      inset: calc(100% + 6px) 0 auto;
+      display: grid;
+      width: 100%;
+      max-width: calc(100vw - 40px);
+      max-height: min(320px, calc(100dvh - 160px));
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      border: 1px solid var(--line-strong);
+      border-radius: 12px;
+      background: #ffffff;
+      box-shadow: 0 18px 48px rgba(26, 54, 93, 0.18);
+    }
+
+    .place-listbox[hidden] {
+      display: none;
+    }
+
+    .place-option {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 10px;
+      min-height: 44px;
+      padding: 9px 11px;
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+      color: var(--ink);
+      text-align: left;
+    }
+
+    .place-option:last-child {
+      border-bottom: 0;
+    }
+
+    .place-option:hover,
+    .place-option[aria-selected="true"] {
+      background: var(--accent-soft);
+    }
+
+    .place-option-flag {
+      padding-top: 1px;
+      font-size: 19px;
+      line-height: 1.25;
+    }
+
+    .place-option-copy {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .place-option-name {
+      overflow-wrap: anywhere;
+      font-size: 14px;
+      font-weight: 720;
+      line-height: 1.25;
+    }
+
+    .place-option-meta,
+    .place-status {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 560;
+      line-height: 1.35;
+    }
+
+    .place-status {
+      min-height: 16px;
+    }
+
+    .place-field input[aria-invalid="true"] {
+      border-color: var(--danger);
     }
 
     .search-form .form-actions {
@@ -1830,11 +1929,27 @@ def render_index_html() -> str:
         </span>
       </summary>
         <form class="search-form" id="search-form">
-          <label>Откуда
-            <input name="origin" value="WAW" maxlength="3" autocomplete="off" required>
+          <label class="place-field" data-place-role="origin">Откуда
+            <span class="place-combobox">
+              <input id="origin-place-input" type="text" value="Варшава — Шопен" role="combobox"
+                aria-autocomplete="list" aria-expanded="false" aria-controls="origin-place-listbox"
+                autocomplete="off" spellcheck="false" required>
+              <input name="origin" type="hidden" value="WAW">
+              <input name="origin_kind" type="hidden" value="airport">
+              <span id="origin-place-listbox" role="listbox" class="place-listbox" hidden></span>
+            </span>
+            <span id="origin-place-status" class="place-status" role="status" aria-live="polite"></span>
           </label>
-          <label>Куда
-            <input name="destination" value="BCN" maxlength="3" autocomplete="off" required>
+          <label class="place-field" data-place-role="destination">Куда
+            <span class="place-combobox">
+              <input id="destination-place-input" type="text" value="Барселона — Эль-Прат" role="combobox"
+                aria-autocomplete="list" aria-expanded="false" aria-controls="destination-place-listbox"
+                autocomplete="off" spellcheck="false" required>
+              <input name="destination" type="hidden" value="BCN">
+              <input name="destination_kind" type="hidden" value="airport">
+              <span id="destination-place-listbox" role="listbox" class="place-listbox" hidden></span>
+            </span>
+            <span id="destination-place-status" class="place-status" role="status" aria-live="polite"></span>
           </label>
           <label>Вылет
             <input name="departure_date" type="date" value="2026-10-12" required>
@@ -1994,6 +2109,7 @@ def render_index_html() -> str:
     const sessionTokenKey = "flight_hunter_session_token";
     const agentPlanStorageKey = "flight_hunter_agent_plan_id_v1";
     const agentRunStorageKey = "flight_hunter_agent_run_id_v1";
+    const placeSelectionError = "Сначала выберите города или аэропорты из списка.";
 
     const manualConfirmationActions = [
       {status: "confirmed", label: "Совпала"},
@@ -2321,6 +2437,210 @@ def render_index_html() -> str:
       return `${expired ? "stale" : "candidate"} · до ${formatIsoMinute(candidate.expires_at)}`;
     }
 
+    function isoCountryFlag(countryCode) {
+      const normalized = text(countryCode).toUpperCase();
+      if (!/^[A-Z]{2}$/.test(normalized)) return "";
+      return String.fromCodePoint(
+        ...Array.from(normalized, (letter) => 127397 + letter.codePointAt(0))
+      );
+    }
+
+    function setupPlaceCombobox(field) {
+      const input = document.getElementById(`${field}-place-input`);
+      const canonicalCode = document.querySelector(`[name="${field}"]`);
+      const canonicalKind = document.querySelector(`[name="${field}_kind"]`);
+      const listbox = document.getElementById(`${field}-place-listbox`);
+      const status = document.getElementById(`${field}-place-status`);
+      let options = [];
+      let activeIndex = -1;
+      let debounceTimer = null;
+      let requestController = null;
+      let requestSequence = 0;
+
+      const closeListbox = () => {
+        listbox.hidden = true;
+        input.setAttribute("aria-expanded", "false");
+        input.removeAttribute("aria-activedescendant");
+        activeIndex = -1;
+      };
+
+      const clearCanonical = () => {
+        canonicalCode.value = "";
+        canonicalKind.value = "";
+      };
+
+      const setActiveOption = (nextIndex) => {
+        if (!options.length) return;
+        activeIndex = (nextIndex + options.length) % options.length;
+        Array.from(listbox.children).forEach((node, index) => {
+          node.setAttribute("aria-selected", String(index === activeIndex));
+        });
+        const activeNode = listbox.children[activeIndex];
+        input.setAttribute("aria-activedescendant", activeNode.id);
+        activeNode.scrollIntoView({block: "nearest"});
+      };
+
+      const selectOption = (option) => {
+        const code = text(option?.ref?.code).toUpperCase();
+        const kind = text(option?.ref?.kind);
+        if (!/^[A-Z]{3}$/.test(code) || !["city", "airport"].includes(kind)) return;
+        const displayName = text(option?.display_name?.text) || code;
+        const kindLabel = kind === "city" ? "Все аэропорты" : "Аэропорт";
+        const flag = isoCountryFlag(option?.country_code);
+        canonicalCode.value = code;
+        canonicalKind.value = kind;
+        input.value = `${flag ? `${flag} ` : ""}${displayName} · ${kindLabel} · ${code}`;
+        input.setAttribute("aria-invalid", "false");
+        status.textContent = `Выбрано: ${displayName}, ${kindLabel}, ${code}.`;
+        closeListbox();
+      };
+
+      const renderOptions = (items) => {
+        options = items.filter((option) => {
+          const code = text(option?.ref?.code).toUpperCase();
+          return /^[A-Z]{3}$/.test(code)
+            && ["city", "airport"].includes(text(option?.ref?.kind))
+            && Boolean(text(option?.display_name?.text));
+        });
+        activeIndex = -1;
+        listbox.replaceChildren();
+        options.forEach((option, index) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.id = `${field}-place-option-${index}`;
+          button.className = "place-option";
+          button.setAttribute("role", "option");
+          button.setAttribute("aria-selected", "false");
+
+          const flag = document.createElement("span");
+          flag.className = "place-option-flag";
+          flag.setAttribute("aria-hidden", "true");
+          flag.textContent = isoCountryFlag(option.country_code);
+
+          const copy = document.createElement("span");
+          copy.className = "place-option-copy";
+          const name = document.createElement("span");
+          name.className = "place-option-name";
+          name.textContent = text(option.display_name?.text) || option.ref.code;
+          const meta = document.createElement("span");
+          meta.className = "place-option-meta";
+          const kindLabel = option.ref.kind === "city" ? "Все аэропорты" : "Аэропорт";
+          const cityName = text(option.city_name?.text);
+          meta.textContent = [
+            option.ref.kind === "airport" ? cityName : "",
+            kindLabel,
+            text(option.ref.code).toUpperCase()
+          ].filter(Boolean).join(" · ");
+          copy.append(name, meta);
+          button.append(flag, copy);
+          button.addEventListener("pointerdown", (event) => event.preventDefault());
+          button.addEventListener("click", () => {
+            selectOption(option);
+            input.focus();
+          });
+          listbox.append(button);
+        });
+        listbox.hidden = options.length === 0;
+        input.setAttribute("aria-expanded", String(options.length > 0));
+      };
+
+      const requestOptions = async (query, sequence) => {
+        requestController = new AbortController();
+        try {
+          const response = await fetch(
+            `/api/v1/places/suggest?q=${encodeURIComponent(query)}&locale=ru&limit=10`,
+            {signal: requestController.signal}
+          );
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const body = await response.json();
+          if (sequence !== requestSequence) return;
+          if (body.catalog_status !== "ready") {
+            options = [];
+            listbox.replaceChildren();
+            closeListbox();
+            status.textContent = "Справочник мест сейчас недоступен.";
+            return;
+          }
+          renderOptions(Array.isArray(body.items) ? body.items : []);
+          status.textContent = options.length
+            ? `Найдено вариантов: ${options.length}. Выберите город или аэропорт.`
+            : "Ничего не найдено.";
+        } catch (error) {
+          if (error.name === "AbortError") return;
+          options = [];
+          listbox.replaceChildren();
+          closeListbox();
+          status.textContent = "Не удалось загрузить варианты мест.";
+        }
+      };
+
+      input.addEventListener("input", () => {
+        clearCanonical();
+        input.setAttribute("aria-invalid", "false");
+        window.clearTimeout(debounceTimer);
+        requestSequence += 1;
+        if (requestController) requestController.abort();
+        options = [];
+        listbox.replaceChildren();
+        closeListbox();
+        const query = input.value.trim();
+        if (query.length < 2) {
+          status.textContent = query ? "Введите ещё один символ." : "";
+          return;
+        }
+        status.textContent = "Ищу города и аэропорты...";
+        const sequence = requestSequence;
+        debounceTimer = window.setTimeout(() => {
+          void requestOptions(query, sequence);
+        }, 180);
+      });
+
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowDown") {
+          if (!options.length) return;
+          event.preventDefault();
+          listbox.hidden = false;
+          input.setAttribute("aria-expanded", "true");
+          setActiveOption(activeIndex + 1);
+        } else if (event.key === "ArrowUp") {
+          if (!options.length) return;
+          event.preventDefault();
+          listbox.hidden = false;
+          input.setAttribute("aria-expanded", "true");
+          setActiveOption(activeIndex < 0 ? options.length - 1 : activeIndex - 1);
+        } else if (event.key === "Enter" && !listbox.hidden && activeIndex >= 0) {
+          event.preventDefault();
+          selectOption(options[activeIndex]);
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          closeListbox();
+        }
+      });
+
+      document.addEventListener("pointerdown", (event) => {
+        if (!event.target.closest(`[data-place-role="${field}"]`)) closeListbox();
+      });
+    }
+
+    function validateTypedPlaceSelections() {
+      const form = new FormData(document.querySelector("#search-form"));
+      const missingField = ["origin", "destination"].find((field) => {
+        const code = text(form.get(field)).toUpperCase();
+        const kind = text(form.get(`${field}_kind`));
+        const valid = /^[A-Z]{3}$/.test(code) && ["city", "airport"].includes(kind);
+        document.getElementById(`${field}-place-input`).setAttribute(
+          "aria-invalid",
+          String(!valid)
+        );
+        return !valid;
+      });
+      if (!missingField) return true;
+      statusLine.textContent = placeSelectionError;
+      document.getElementById(`${missingField}-place-status`).textContent = placeSelectionError;
+      document.getElementById(`${missingField}-place-input`).focus();
+      return false;
+    }
+
     function buildSearchPayload() {
       const form = new FormData(document.querySelector("#search-form"));
       const adults = Math.max(1, numberValue(form, "adults", 1));
@@ -2330,6 +2650,8 @@ def render_index_html() -> str:
       return {
         origin: text(form.get("origin")).toUpperCase(),
         destination: text(form.get("destination")).toUpperCase(),
+        origin_kind: text(form.get("origin_kind")),
+        destination_kind: text(form.get("destination_kind")),
         departure_date: text(form.get("departure_date")),
         return_date: returnDate,
         passengers: adults + children + infants,
@@ -2364,6 +2686,12 @@ def render_index_html() -> str:
     }
 
     function setSearchField(name, value) {
+      if (["origin", "destination"].includes(name)) {
+        document.getElementById(`${name}-place-input`).value = value || "";
+        document.querySelector(`[name="${name}"]`).value = "";
+        document.querySelector(`[name="${name}_kind"]`).value = "";
+        return;
+      }
       document.querySelector(`[name="${name}"]`).value = value || "";
     }
 
@@ -2890,6 +3218,7 @@ def render_index_html() -> str:
     }
 
     async function createWatchFromSearch() {
+      if (!validateTypedPlaceSelections()) return;
       const payload = buildSearchPayload();
       createWatchButton.disabled = true;
       statusLine.textContent = "creating watch...";
@@ -2900,6 +3229,8 @@ def render_index_html() -> str:
           body: JSON.stringify({
             origin: payload.origin,
             destination: payload.destination,
+            origin_kind: payload.origin_kind,
+            destination_kind: payload.destination_kind,
             departure_date: payload.departure_date,
             return_date: payload.return_date,
             passengers: payload.passengers,
@@ -4523,6 +4854,7 @@ def render_index_html() -> str:
 
     async function runSearch(event) {
       event.preventDefault();
+      if (!validateTypedPlaceSelections()) return;
       submitButton.disabled = true;
       statusLine.textContent = "поиск...";
       const payload = buildSearchPayload();
@@ -4726,6 +5058,8 @@ def render_index_html() -> str:
     }
 
     document.querySelector("#search-form").addEventListener("submit", runSearch);
+    setupPlaceCombobox("origin");
+    setupPlaceCombobox("destination");
     document.getElementById("agent-plan-execute").addEventListener("click", executeAgentPlan);
     document.getElementById("agent-hidden-city-ack").addEventListener("change", (event) => {
       if (!currentAgentPlan) return;
