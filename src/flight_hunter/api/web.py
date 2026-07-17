@@ -20,6 +20,13 @@ def render_index_html() -> str:
         stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>'>
   <style>
+    @font-face {
+      font-family: "Twemoji Country Flags";
+      src: url("https://cdn.jsdelivr.net/npm/country-flag-emoji-polyfill@0.1.8/dist/TwemojiCountryFlags.woff2") format("woff2");
+      font-display: swap;
+      unicode-range: U+1F1E6-1F1FF;
+    }
+
     :root {
       color-scheme: light;
       --bg: #f3f5f8;
@@ -41,7 +48,8 @@ def render_index_html() -> str:
       --ok-soft: #eaf8ef;
       --shadow: 0 24px 68px rgba(26, 54, 93, 0.10);
       font-family:
-        Aptos, "Segoe UI Variable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+        "Twemoji Country Flags", Aptos, "Segoe UI Variable", "Segoe UI", ui-sans-serif,
+        system-ui, sans-serif;
     }
 
     * { box-sizing: border-box; }

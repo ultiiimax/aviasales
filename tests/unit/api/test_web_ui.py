@@ -89,6 +89,9 @@ def test_routes_use_shared_typed_place_lookup_and_honest_human_labels() -> None:
     search_lookup = _javascript_function(html, "lookupSearchResultPlaces")
     confirmed = _javascript_sync_function(html, "renderAgentConfirmedResults")
 
+    assert 'font-family: "Twemoji Country Flags";' in html
+    assert "country-flag-emoji-polyfill@0.1.8" in html
+    assert "unicode-range: U+1F1E6-1F1FF" in html
     assert "kind|code|locale|directory_version" in html
     assert "`${kind}|${code}|${locale}|${directoryVersion}`" in cache_key
     assert 'fetch("/api/v1/places/lookup"' in lookup
