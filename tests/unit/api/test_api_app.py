@@ -16,10 +16,14 @@ from flight_hunter.domain.money import Money
 from flight_hunter.domain.observation import ObservationStatus
 from flight_hunter.domain.offers import Freshness
 from flight_hunter.domain.search_results import BrowserObservedOffer, Confidence, DealCandidate
+from flight_hunter.geo.airports import Airport, AirportImportBatch, AirportType
+from flight_hunter.geo.demo_repository import DemoAirportRepository
 from flight_hunter.persistence.models import mapper_registry
 from flight_hunter.persistence.repositories import (
+    AirportReferenceRepository,
     BrowserObservationJobRepository,
     BrowserObservedOfferRepository,
+    DealDiscoveryJobRepository,
     SourceHealthEventRepository,
 )
 
@@ -199,7 +203,7 @@ def test_deal_discovery_endpoint_returns_manual_candidates_from_injected_service
         json={
             "search_intent": {
                 "origin": "MOW",
-                "destination": "IST",
+                "destination": "CDG",
                 "departure_date": "2026-09-10",
                 "return_date": "2026-09-20",
                 "passengers": 1,
@@ -288,7 +292,9 @@ async def test_deal_discovery_job_api_enqueues_idempotently_and_scopes_status() 
         "search_id": "sha256:search",
         "search_intent": {
             "origin": "MOW",
-            "destination": "IST",
+            "destination": "CDG",
+            "origin_kind": "city",
+            "destination_kind": "airport",
             "departure_date": "2026-09-10",
             "return_date": "2026-09-20",
             "passengers": 1,
@@ -299,14 +305,16 @@ async def test_deal_discovery_job_api_enqueues_idempotently_and_scopes_status() 
 
     created = client.post("/api/v1/deals/discovery-jobs", headers=headers, json=body)
     replay = client.post("/api/v1/deals/discovery-jobs", headers=headers, json=body)
+    assert created.status_code == 202, created.text
     job_id = created.json()["job_id"]
     status = client.get(f"/api/v1/deals/discovery-jobs/{job_id}", headers=headers)
     other_user = client.get(
         f"/api/v1/deals/discovery-jobs/{job_id}",
         headers={**headers, "X-Flight-Hunter-User-Id": str(UUID(int=2))},
     )
+    async with session_factory() as session:
+        stored = await DealDiscoveryJobRepository(session).get_job(UUID(job_id))
 
-    assert created.status_code == 202
     assert replay.status_code == 202
     assert replay.json()["job_id"] == job_id
     assert replay.json()["idempotent_replay"] is True
@@ -316,6 +324,15 @@ async def test_deal_discovery_job_api_enqueues_idempotently_and_scopes_status() 
     assert status.json()["candidates"] == []
     assert other_user.status_code == 404
     assert other_user.json()["code"] == "deal_discovery_job_not_found"
+    assert stored is not None
+    stored_intent = json.loads(stored.search_intent_json)
+    assert stored_intent["origin_kind"] == "city"
+    assert stored_intent["destination_kind"] == "airport"
+    assert stored_intent["origin_airport_codes"]
+    assert stored_intent["destination_airport_codes"]
+    assert stored_intent["directory_version"]
+    assert stored_intent["origin_membership_version"]
+    assert stored_intent["destination_membership_version"]
 
 
 @pytest.mark.anyio
@@ -333,7 +350,7 @@ async def test_deal_discovery_endpoint_records_source_health_on_success() -> Non
         json={
             "search_intent": {
                 "origin": "MOW",
-                "destination": "IST",
+                "destination": "CDG",
                 "departure_date": "2026-09-10",
                 "return_date": "2026-09-20",
                 "passengers": 1,
@@ -364,7 +381,7 @@ async def test_deal_discovery_endpoint_returns_typed_error_and_health_on_url_rej
         json={
             "search_intent": {
                 "origin": "MOW",
-                "destination": "IST",
+                "destination": "CDG",
                 "departure_date": "2026-09-10",
                 "return_date": "2026-09-20",
                 "passengers": 1,
@@ -607,11 +624,12 @@ def test_search_endpoint_accepts_explicit_passenger_mix() -> None:
     assert body["offers"][0]["total_price"]["minor_units"] == 239700
 
 
-def test_browser_source_parser_endpoint_parses_sanitized_fixture_without_echoing_html(
+@pytest.mark.anyio
+async def test_browser_source_parser_endpoint_parses_sanitized_fixture_without_echoing_html(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SCRAPLING_ENABLED", "false")
-    client = TestClient(create_app())
+    client = TestClient(create_app(watch_session_factory=await _session_factory_with_ist()))
 
     response = client.post(
         "/api/v1/browser-sources/tutu/test-parser",
@@ -641,7 +659,7 @@ def test_browser_source_parser_endpoint_requires_auth_context() -> None:
 
     response = client.post(
         "/api/v1/browser-sources/tutu/test-parser",
-        json={"search_intent": _mow_ist_request(), "html": "<html>18 420 RUB</html>"},
+        json={"search_intent": _mow_cdg_request(), "html": "<html>18 420 RUB</html>"},
     )
 
     assert response.status_code == 401
@@ -651,7 +669,7 @@ def test_browser_source_parser_endpoint_requires_auth_context() -> None:
 def test_browser_source_parser_endpoint_rejects_unsafe_url_and_non_observable_source() -> None:
     client = TestClient(create_app())
     payload = {
-        "search_intent": _mow_ist_request(),
+        "search_intent": _mow_cdg_request(),
         "html": "<html>18 420 RUB</html>",
     }
 
@@ -933,6 +951,38 @@ async def _session_factory():
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
+async def _session_factory_with_ist():
+    session_factory = await _session_factory()
+    airports = (
+        *DemoAirportRepository().all(),
+        Airport(
+            iata_code="IST",
+            name="Istanbul Airport",
+            municipality="Istanbul",
+            country_code="TR",
+            latitude=41.2753,
+            longitude=28.7519,
+            airport_type=AirportType.LARGE_AIRPORT,
+            active=True,
+            scheduled_service=True,
+            commercial_provenance="test.fixture",
+        ),
+    )
+    async with session_factory() as session:
+        await AirportReferenceRepository(session).import_airports(
+            AirportImportBatch(
+                source_path="test-api-app.csv",
+                rows_seen=len(airports),
+                rows_imported=len(airports),
+                airports=airports,
+            ),
+            imported_at=NOW,
+            source="test-api-app",
+        )
+        await session.commit()
+    return session_factory
+
+
 async def _source_health_events(session_factory, source_id: str):
     async with session_factory() as session:
         return await SourceHealthEventRepository(session).list_recent(source_id=source_id)
@@ -945,15 +995,19 @@ def _auth_headers() -> dict[str, str]:
     }
 
 
-def _mow_ist_request() -> dict[str, object]:
+def _mow_cdg_request() -> dict[str, object]:
     return {
         "origin": "MOW",
-        "destination": "IST",
+        "destination": "CDG",
         "departure_date": "2026-09-10",
         "return_date": "2026-09-20",
         "passengers": 1,
         "currency": "RUB",
     }
+
+
+def _mow_ist_request() -> dict[str, object]:
+    return {**_mow_cdg_request(), "destination": "IST"}
 
 
 def _mow_par_search_request() -> dict[str, object]:

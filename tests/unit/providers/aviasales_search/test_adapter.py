@@ -11,6 +11,7 @@ import pytest
 from flight_hunter.domain.offers import Freshness, SearchIntent
 from flight_hunter.domain.places import PlaceKind
 from flight_hunter.domain.policy import ExecutionContext
+from flight_hunter.providers.aviasales_search import adapter as adapter_module
 from flight_hunter.providers.aviasales_search.adapter import AviasalesSearchAdapter
 from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchClient,
@@ -189,6 +190,45 @@ def test_search_keeps_legacy_results_when_frozen_sets_are_empty() -> None:
     )
 
     assert len(offers) == 5
+
+
+def test_search_filters_results_with_wrong_departure_or_missing_return() -> None:
+    wrong_departure = _adapter(
+        _transport_with_fixture_results(), enabled=True, credentials=True
+    ).search(
+        replace(_intent(), departure_date="2026-09-16"),
+        request_fingerprint="sha256:wrong-departure",
+        context=ExecutionContext.WEB_USER_ACTION,
+    )
+    missing_return = _adapter(
+        _transport_with_fixture_results(), enabled=True, credentials=True
+    ).search(
+        replace(_intent(), return_date="2026-09-22", trip_type="round_trip"),
+        request_fingerprint="sha256:missing-return",
+        context=ExecutionContext.WEB_USER_ACTION,
+    )
+
+    assert wrong_departure == ()
+    assert missing_return == ()
+
+
+def test_search_filters_round_trip_result_for_one_way_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_mapper = adapter_module.map_parsed_ticket
+
+    def map_as_round_trip(*args: Any, **kwargs: Any):
+        return replace(original_mapper(*args, **kwargs), return_date="2026-09-22")
+
+    monkeypatch.setattr(adapter_module, "map_parsed_ticket", map_as_round_trip)
+
+    offers = _adapter(_transport_with_fixture_results(), enabled=True, credentials=True).search(
+        _intent(),
+        request_fingerprint="sha256:unexpected-return",
+        context=ExecutionContext.WEB_USER_ACTION,
+    )
+
+    assert offers == ()
 
 
 def test_search_wraps_chunk_parse_failure_as_schema_error() -> None:

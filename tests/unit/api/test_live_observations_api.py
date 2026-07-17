@@ -157,6 +157,30 @@ async def test_live_observation_api_requires_user_context_and_grant(monkeypatch)
 
 
 @pytest.mark.anyio
+async def test_live_observation_grant_honors_explicit_place_kind(monkeypatch) -> None:
+    monkeypatch.setenv("SCRAPING_OBSERVER_ENABLED", "true")
+    client = TestClient(create_app(watch_session_factory=await _session_factory()))
+
+    response = client.post(
+        "/api/v1/live-observation-grants",
+        headers={"X-Flight-Hunter-User-Id": str(USER_ID)},
+        json={
+            "source_id": "demo_browser",
+            "search_intent": {
+                **INTENT,
+                "origin": "DME",
+                "destination": "CDG",
+                "origin_kind": "city",
+                "destination_kind": "airport",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "place_unknown"
+
+
+@pytest.mark.anyio
 async def test_live_observation_api_persists_result_and_idempotency_across_app_instances(
     monkeypatch,
 ) -> None:

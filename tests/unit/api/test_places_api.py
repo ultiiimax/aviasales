@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from flight_hunter.api.app import create_app
@@ -18,9 +19,13 @@ from flight_hunter.persistence.repositories import AirportReferenceRepository
 
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
+    database_path = tmp_path / "places.db"
+    sync_engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    mapper_registry.metadata.create_all(sync_engine)
+    sync_engine.dispose()
     settings = replace(
         AppSettings.from_env(),
-        database_url=f"sqlite+aiosqlite:///{(tmp_path / 'places.db').as_posix()}",
+        database_url=f"sqlite+aiosqlite:///{database_path.as_posix()}",
     )
     with TestClient(create_app(settings=settings)) as test_client:
         yield test_client
@@ -106,6 +111,31 @@ def test_places_lookup_preserves_typed_order_and_reports_unknown(client: TestCli
     assert body["items"][1]["airport_codes"] == ["DME", "SVO", "VKO", "ZIA"]
     assert body["items"][2]["resolved"] is False
     assert body["items"][2]["error"]["code"] == "place_unknown"
+
+
+def test_place_catalog_database_failure_is_not_reported_as_ready(tmp_path: Path) -> None:
+    settings = replace(
+        AppSettings.from_env(),
+        database_url=f"sqlite+aiosqlite:///{(tmp_path / 'broken.db').as_posix()}",
+    )
+    with TestClient(create_app(settings=settings), raise_server_exceptions=False) as broken_client:
+        suggested = broken_client.get("/api/v1/places/suggest", params={"q": "Москва"})
+        looked_up = broken_client.post(
+            "/api/v1/places/lookup",
+            json={"places": [{"kind": "city", "code": "MOW"}]},
+        )
+        searched = broken_client.post("/api/v1/searches", json=_search_json())
+
+    for response in (suggested, looked_up):
+        assert response.status_code == 200
+        assert response.json() == {
+            "catalog_status": "unavailable",
+            "enrichment_status": "disabled",
+            "directory_version": None,
+            "items": [],
+        }
+    assert searched.status_code == 503
+    assert searched.json()["error"]["code"] == "place_unavailable"
 
 
 @pytest.mark.parametrize(

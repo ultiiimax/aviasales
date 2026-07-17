@@ -19,6 +19,7 @@ from flight_hunter.domain.observation import (
     PermissionStatus,
 )
 from flight_hunter.domain.offers import FlightOffer, Freshness, SearchIntent
+from flight_hunter.domain.places import PlaceKind
 from flight_hunter.domain.policy import (
     DataKind,
     ExecutionContext,
@@ -444,7 +445,18 @@ def search_intent_fingerprint(search_intent: SearchIntent) -> str:
         "departure_date": search_intent.departure_date,
         "return_date": search_intent.return_date,
         "passengers": search_intent.passengers,
+        "adults": search_intent.adults,
+        "children": search_intent.children,
+        "infants": search_intent.infants,
+        "trip_type": str(search_intent.trip_type),
         "currency": search_intent.currency,
+        "origin_kind": PlaceKind(search_intent.origin_kind).value,
+        "destination_kind": PlaceKind(search_intent.destination_kind).value,
+        "origin_airport_codes": list(search_intent.origin_airport_codes),
+        "destination_airport_codes": list(search_intent.destination_airport_codes),
+        "directory_version": search_intent.directory_version,
+        "origin_membership_version": search_intent.origin_membership_version,
+        "destination_membership_version": search_intent.destination_membership_version,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"

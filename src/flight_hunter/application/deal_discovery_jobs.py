@@ -273,6 +273,19 @@ def _search_intent_from_json(raw: str) -> SearchIntent:
         children=_int_or_default(payload, "children", 0),
         infants=_int_or_default(payload, "infants", 0),
         trip_type=_optional_trip_type(payload, "trip_type"),
+        origin_kind=_optional_str(payload, "origin_kind") or "city",
+        destination_kind=_optional_str(payload, "destination_kind") or "city",
+        origin_airport_codes=_str_tuple_or_default(payload, "origin_airport_codes"),
+        destination_airport_codes=_str_tuple_or_default(
+            payload,
+            "destination_airport_codes",
+        ),
+        directory_version=_optional_str(payload, "directory_version"),
+        origin_membership_version=_optional_str(payload, "origin_membership_version"),
+        destination_membership_version=_optional_str(
+            payload,
+            "destination_membership_version",
+        ),
     )
 
 
@@ -314,6 +327,13 @@ def _int_or_default(payload: dict[str, Any], field_name: str, default: int) -> i
     if type(value) is not int:
         raise ValueError(f"{field_name} must be an integer")
     return value
+
+
+def _str_tuple_or_default(payload: dict[str, Any], field_name: str) -> tuple[str, ...]:
+    value = payload.get(field_name, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field_name} must be a list of strings")
+    return tuple(value)
 
 
 def _optional_trip_type(payload: dict[str, Any], field_name: str) -> TripType | str | None:

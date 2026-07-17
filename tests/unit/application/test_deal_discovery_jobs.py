@@ -144,6 +144,13 @@ async def test_deal_discovery_job_service_fails_when_disabled() -> None:
 class SuccessfulDiscovery:
     async def discover(self, intent: SearchIntent, *, limit: int = 5) -> tuple[DealCandidate, ...]:
         assert intent.origin == "MOW"
+        assert intent.origin_kind.value == "airport"
+        assert intent.destination_kind.value == "city"
+        assert intent.origin_airport_codes == ("MOW",)
+        assert intent.destination_airport_codes == ("IST",)
+        assert intent.directory_version == "directory-v2"
+        assert intent.origin_membership_version == "origin-v2"
+        assert intent.destination_membership_version == "destination-v2"
         return (
             DealCandidate(
                 source_id="deal_discovery",
@@ -207,7 +214,12 @@ def _job() -> NewDealDiscoveryJob:
         created_at=NOW - timedelta(minutes=1),
         search_intent_json=(
             '{"origin":"MOW","destination":"IST","departure_date":"2026-09-10",'
-            '"return_date":"2026-09-20","passengers":1,"currency":"RUB"}'
+            '"return_date":"2026-09-20","passengers":1,"currency":"RUB",'
+            '"origin_kind":"airport","destination_kind":"city",'
+            '"origin_airport_codes":["MOW"],"destination_airport_codes":["IST"],'
+            '"directory_version":"directory-v2",'
+            '"origin_membership_version":"origin-v2",'
+            '"destination_membership_version":"destination-v2"}'
         ),
         limit=3,
     )

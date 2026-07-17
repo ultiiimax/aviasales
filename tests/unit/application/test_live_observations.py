@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -9,9 +10,11 @@ from flight_hunter.application.live_observations import (
     GrantSource,
     LiveObservationCreateCode,
     LiveObservationService,
+    search_intent_fingerprint,
 )
 from flight_hunter.domain.observation import ObservationStatus
 from flight_hunter.domain.offers import Freshness, SearchIntent
+from flight_hunter.domain.places import PlaceKind
 from flight_hunter.domain.policy import ExecutionContext
 
 NOW = datetime(2026, 6, 23, 12, 0, tzinfo=UTC)
@@ -36,6 +39,21 @@ def service(*, enabled: bool = True) -> LiveObservationService:
         clock=lambda: NOW,
         grant_ttl=timedelta(minutes=5),
     )
+
+
+def test_search_intent_fingerprint_includes_resolved_place_snapshot() -> None:
+    legacy = intent()
+    resolved = replace(
+        legacy,
+        origin_kind=PlaceKind.AIRPORT,
+        origin_airport_codes=("WAW",),
+        destination_airport_codes=("BCN",),
+        directory_version="directory-v2",
+        origin_membership_version="origin-v2",
+        destination_membership_version="destination-v2",
+    )
+
+    assert search_intent_fingerprint(legacy) != search_intent_fingerprint(resolved)
 
 
 def test_issue_grant_requires_enabled_source_with_active_permission() -> None:

@@ -10,7 +10,7 @@ from typing import Literal
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
@@ -76,6 +76,7 @@ from flight_hunter.application.personal_observations import PersonalObservationS
 from flight_hunter.application.place_directory import (
     PlaceDirectory,
     PlaceDirectoryError,
+    PlaceUnavailableError,
     PlaceUnknownError,
 )
 from flight_hunter.application.price_sources import PriceSource, PriceSourceCatalog
@@ -1375,9 +1376,36 @@ def create_app(
                 repository = AirportReferenceRepository(session)
                 if await repository.latest_import_run() is not None:
                     return PlaceDirectory.from_snapshot(await repository.catalog_snapshot())
-        except SQLAlchemyError:
-            return demo_place_directory
+        except (SQLAlchemyError, TypeError, ValueError) as error:
+            raise PlaceUnavailableError("catalog_read_failed", code="catalog") from error
         return demo_place_directory
+
+    async def request_search_places(
+        body: SearchRequestBody,
+    ) -> tuple[PlaceDirectory, PlaceOption, PlaceOption]:
+        directory = await request_place_directory()
+        requested_origin = _resolve_request_place(
+            directory,
+            code=body.origin,
+            kind=body.origin_kind,
+            locale="ru",
+        )
+        requested_destination = _resolve_request_place(
+            directory,
+            code=body.destination,
+            kind=body.destination_kind,
+            locale="ru",
+        )
+        return directory, requested_origin, requested_destination
+
+    async def request_search_intent(body: SearchRequestBody) -> SearchIntent:
+        directory, requested_origin, requested_destination = await request_search_places(body)
+        return _search_intent_from_body(
+            body,
+            directory=directory,
+            requested_origin=requested_origin,
+            requested_destination=requested_destination,
+        )
 
     def agent_lifecycle_service(session: AsyncSession) -> AgentLifecycleService:
         resolver = ScopeResolver(repository=AirportReferenceRepository(session))
@@ -1400,6 +1428,7 @@ def create_app(
 
     app.add_exception_handler(AgentRouteError, agent_route_error_handler)
     app.add_exception_handler(RequestValidationError, agent_validation_error_handler)
+    app.add_exception_handler(PlaceDirectoryError, place_directory_error_handler)
     app.include_router(
         create_agent_router(
             session_factory=session_factory,
@@ -1960,7 +1989,7 @@ def create_app(
             )
         try:
             candidates = await service.discover(
-                _search_intent_from_body(body.search_intent),
+                await request_search_intent(body.search_intent),
                 limit=body.limit,
             )
         except DealUrlPolicyError as exc:
@@ -2058,7 +2087,6 @@ def create_app(
                 code="idempotency_key_required",
                 message="Idempotency-Key header is required",
             )
-        intent = _search_intent_from_body(body.search_intent)
         async with session_factory() as session:
             auth_context = await _auth_context_from_headers(
                 session,
@@ -2077,6 +2105,7 @@ def create_app(
                     code="deal_discovery_disabled",
                     message="deal discovery requires enabled SearXNG and Crawl4AI settings",
                 )
+            intent = await request_search_intent(body.search_intent)
             household_id, user_id = auth_context
             repository = DealDiscoveryJobRepository(session)
             scoped_idempotency_key = _scoped_idempotency_key(
@@ -2330,7 +2359,7 @@ def create_app(
                 message="source does not allow browser observation",
             )
 
-        intent = _search_intent_from_body(body.search_intent)
+        intent = await request_search_intent(body.search_intent)
         final_url = body.final_url or RuClickoutLinkBuilder((spec,)).build(spec, intent).url
         url_denial = _browser_parser_test_url_denial(final_url, settings=settings)
         if url_denial is not None:
@@ -2489,7 +2518,10 @@ def create_app(
         locale: str = Query(default="ru", min_length=2, max_length=16),
         limit: int = Query(default=10, ge=1, le=20),
     ) -> PlaceEnvelopeResponse:
-        directory = await request_place_directory()
+        try:
+            directory = await request_place_directory()
+        except PlaceUnavailableError:
+            return _place_unavailable_envelope()
         options = directory.suggest(q, locale=locale, limit=limit) if len(q.strip()) >= 2 else ()
         return PlaceEnvelopeResponse(
             catalog_status="ready",
@@ -2500,7 +2532,10 @@ def create_app(
 
     @app.post("/api/v1/places/lookup", response_model=PlaceEnvelopeResponse)
     async def places_lookup(body: PlaceLookupRequestBody) -> PlaceEnvelopeResponse:
-        directory = await request_place_directory()
+        try:
+            directory = await request_place_directory()
+        except PlaceUnavailableError:
+            return _place_unavailable_envelope()
         items: list[PlaceLookupItemResponse] = []
         for requested in body.places:
             ref = PlaceRef(requested.kind, requested.code)
@@ -2532,22 +2567,7 @@ def create_app(
     ) -> SearchResponse | JSONResponse:
         started_at = perf_counter()
         household_id_for_log: UUID | None = None
-        directory = await request_place_directory()
-        try:
-            requested_origin = _resolve_request_place(
-                directory,
-                code=body.origin,
-                kind=body.origin_kind,
-                locale="ru",
-            )
-            requested_destination = _resolve_request_place(
-                directory,
-                code=body.destination,
-                kind=body.destination_kind,
-                locale="ru",
-            )
-        except PlaceDirectoryError as error:
-            return _place_search_error_response(error)
+        directory, requested_origin, requested_destination = await request_search_places(body)
         result = search_service.search(
             SearchRequest(
                 origin=requested_origin.ref.code,
@@ -2649,7 +2669,7 @@ def create_app(
             decision = await service.issue_grant(
                 user_id=user_id,
                 source_id=body.source_id,
-                search_intent=_search_intent_from_body(body.search_intent),
+                search_intent=await request_search_intent(body.search_intent),
                 source=GrantSource.WEB_CLICK,
             )
             await session.commit()
@@ -2702,7 +2722,7 @@ def create_app(
             decision = await service.create_observation(
                 user_id=user_id,
                 source_id=body.source_id,
-                search_intent=_search_intent_from_body(body.search_intent),
+                search_intent=await request_search_intent(body.search_intent),
                 grant_token=body.grant_token,
                 idempotency_key=idempotency_key,
                 context=ExecutionContext.WEB_USER_ACTION,
@@ -2787,7 +2807,7 @@ def create_app(
             decision = await service.issue_grant(
                 user_id=user_id,
                 source_id=body.source_id,
-                search_intent=_search_intent_from_body(body.search_intent),
+                search_intent=await request_search_intent(body.search_intent),
                 source=GrantSource.WEB_CLICK,
             )
             await session.commit()
@@ -2848,7 +2868,7 @@ def create_app(
                 user_id=user_id,
                 source_id=body.source_id,
                 search_id=body.search_id,
-                search_intent=_search_intent_from_body(body.search_intent),
+                search_intent=await request_search_intent(body.search_intent),
                 grant_token=body.grant_token,
                 idempotency_key=idempotency_key,
             )
@@ -4632,13 +4652,31 @@ def _resolve_request_place(
 
 def _place_search_error_response(error: PlaceDirectoryError) -> JSONResponse:
     return JSONResponse(
-        status_code=422,
+        status_code=503 if isinstance(error, PlaceUnavailableError) else 422,
         content={
             "error": {
                 "code": error.code,
                 "message": "place could not be resolved",
             }
         },
+    )
+
+
+async def place_directory_error_handler(
+    _request: Request,
+    error: Exception,
+) -> JSONResponse:
+    if not isinstance(error, PlaceDirectoryError):
+        raise error
+    return _place_search_error_response(error)
+
+
+def _place_unavailable_envelope() -> PlaceEnvelopeResponse:
+    return PlaceEnvelopeResponse(
+        catalog_status="unavailable",
+        enrichment_status="disabled",
+        directory_version=None,
+        items=[],
     )
 
 
@@ -4751,10 +4789,16 @@ def _search_response(result: SearchResult, *, booking_secret: str | None = None)
     )
 
 
-def _search_intent_from_body(body: SearchRequestBody) -> SearchIntent:
+def _search_intent_from_body(
+    body: SearchRequestBody,
+    *,
+    directory: PlaceDirectory,
+    requested_origin: PlaceOption,
+    requested_destination: PlaceOption,
+) -> SearchIntent:
     return SearchIntent(
-        origin=body.origin,
-        destination=body.destination,
+        origin=requested_origin.ref.code,
+        destination=requested_destination.ref.code,
         departure_date=body.departure_date,
         return_date=body.return_date,
         passengers=body.passengers,
@@ -4763,6 +4807,13 @@ def _search_intent_from_body(body: SearchRequestBody) -> SearchIntent:
         children=body.children,
         infants=body.infants,
         trip_type=body.trip_type,
+        origin_kind=requested_origin.ref.kind,
+        destination_kind=requested_destination.ref.kind,
+        origin_airport_codes=requested_origin.airport_codes,
+        destination_airport_codes=requested_destination.airport_codes,
+        directory_version=directory.directory_version,
+        origin_membership_version=requested_origin.membership_version,
+        destination_membership_version=requested_destination.membership_version,
     )
 
 
@@ -4778,6 +4829,13 @@ def _deal_search_intent_json(intent: SearchIntent) -> str:
         "infants": intent.infants,
         "trip_type": str(intent.trip_type),
         "currency": intent.currency,
+        "origin_kind": PlaceKind(intent.origin_kind).value,
+        "destination_kind": PlaceKind(intent.destination_kind).value,
+        "origin_airport_codes": list(intent.origin_airport_codes),
+        "destination_airport_codes": list(intent.destination_airport_codes),
+        "directory_version": intent.directory_version,
+        "origin_membership_version": intent.origin_membership_version,
+        "destination_membership_version": intent.destination_membership_version,
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 

@@ -134,9 +134,7 @@ class AviasalesSearchAdapter:
             )
             for ticket in parsed
         )
-        return tuple(
-            offer for offer in offers if _matches_frozen_airport_endpoints(offer, intent=intent)
-        )
+        return tuple(offer for offer in offers if _matches_frozen_request(offer, intent=intent))
 
     def resolve_purchase_url(
         self,
@@ -232,11 +230,18 @@ def _provider_location_kind(kind: PlaceKind | str) -> LocationScopeKind:
     return LocationScopeKind.AIRPORT if normalized is PlaceKind.AIRPORT else LocationScopeKind.CITY
 
 
-def _matches_frozen_airport_endpoints(
+def _matches_frozen_request(
     offer: FlightOffer,
     *,
     intent: SearchIntent,
 ) -> bool:
+    if offer.departure_date != intent.departure_date:
+        return False
+    if intent.return_date is None:
+        if offer.return_date is not None:
+            return False
+    elif offer.return_date != intent.return_date:
+        return False
     if intent.origin_airport_codes and offer.origin not in intent.origin_airport_codes:
         return False
     return not intent.destination_airport_codes or (
