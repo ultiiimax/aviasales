@@ -239,12 +239,12 @@ async def test_city_text_groups_catalog_matches_and_asks_when_name_is_ambiguous(
     )
     resolver = ScopeResolver(repository=MutableAirportCatalog(catalog))
 
-    paris = await resolver.resolve_city_text("Paris")
+    lyon = await resolver.resolve_city_text("Lyon")
     springfield = await resolver.resolve_city_text("Springfield")
 
-    assert isinstance(paris, GeographyChoice)
-    assert paris.scope == LocationScope(LocationScopeKind.CITY, "CDG")
-    assert paris.airport_codes == ("CDG", "ORY")
+    assert isinstance(lyon, GeographyChoice)
+    assert lyon.scope == LocationScope(LocationScopeKind.CITY, "LYS")
+    assert lyon.airport_codes == ("LYS",)
     assert isinstance(springfield, GeographyClarification)
     assert springfield.reason == "ambiguous_geography"
     assert tuple(choice.scope.value for choice in springfield.choices) == ("ZSF", "PAR")
@@ -267,7 +267,9 @@ async def test_city_text_moscow_resolves_complete_group() -> None:
 
 @pytest.mark.anyio
 async def test_finite_mow_scope_freezes_all_group_airports() -> None:
-    resolver = ScopeResolver(repository=MutableAirportCatalog(_moscow_catalog()))
+    repository = MutableAirportCatalog(_moscow_catalog())
+    snapshot = await repository.catalog_snapshot()
+    resolver = ScopeResolver(repository=repository)
 
     frozen = await resolver.resolve_finite(
         LocationScope(LocationScopeKind.CITY, "MOW"),
@@ -276,31 +278,46 @@ async def test_finite_mow_scope_freezes_all_group_airports() -> None:
 
     assert isinstance(frozen, FrozenAirportScope)
     assert frozen.airport_codes == ("DME", "SVO", "VKO", "ZIA")
+    assert frozen.catalog_checksum == snapshot.checksum
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("text", ("Paris", "PAR"))
+async def test_unavailable_bundled_city_text_never_falls_back_to_partial_group(
+    text: str,
+) -> None:
+    resolver = ScopeResolver(repository=MutableAirportCatalog(_french_catalog()))
+
+    resolved = await resolver.resolve_city_text(text)
+
+    assert isinstance(resolved, GeographyClarification)
+    assert resolved.reason == "no_searchable_airports"
+    assert resolved.choices == ()
 
 
 @pytest.mark.anyio
 async def test_normalized_duplicate_city_aliases_collapse_to_one_unique_scope() -> None:
     catalog = (
         _airport(
-            "CDG",
-            "Paris",
+            "AAA",
+            "Example City",
             "FR",
-            keywords=("Paris", "PARIS", " paris "),
+            keywords=("Example City", "EXAMPLE CITY", " example city "),
         ),
         _airport(
-            "ORY",
-            "Paris",
+            "AAB",
+            "Example City",
             "FR",
-            keywords=("Paris", "PARIS", " paris "),
+            keywords=("Example City", "EXAMPLE CITY", " example city "),
         ),
     )
     resolver = ScopeResolver(repository=MutableAirportCatalog(catalog))
 
-    resolved = await resolver.resolve_city_text("  PARIS!!!  ")
+    resolved = await resolver.resolve_city_text("  EXAMPLE CITY!!!  ")
 
     assert isinstance(resolved, GeographyChoice)
-    assert resolved.scope == LocationScope(LocationScopeKind.CITY, "CDG")
-    assert resolved.airport_codes == ("CDG", "ORY")
+    assert resolved.scope == LocationScope(LocationScopeKind.CITY, "AAA")
+    assert resolved.airport_codes == ("AAA", "AAB")
     assert len(resolved.airport_codes) == len(set(resolved.airport_codes))
 
 

@@ -197,6 +197,32 @@ def test_suggest_is_unicode_casefolded_deterministic_and_omits_unavailable() -> 
     assert directory.suggest("", locale="ru") == ()
 
 
+def test_exact_city_refs_use_names_aliases_and_codes_without_prefix_matches(
+    tmp_path: Path,
+) -> None:
+    snapshot = freeze_airport_catalog(DemoAirportRepository().all())
+    groups_payload = json.loads(
+        files("flight_hunter.geo").joinpath("city_groups.v1.json").read_text(encoding="utf-8")
+    )
+    groups_payload["groups"][0]["aliases"].extend(["capital", "shared hub"])
+    groups_payload["groups"][1]["aliases"].extend(["capital region", "shared hub"])
+    groups = tmp_path / "exact-city-groups.json"
+    groups.write_text(
+        json.dumps(groups_payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    directory = PlaceDirectory.from_snapshot(snapshot, city_groups_path=groups)
+
+    assert directory.exact_city_refs("Москва") == (PlaceRef(PlaceKind.CITY, "MOW"),)
+    assert directory.exact_city_refs("MOW") == (PlaceRef(PlaceKind.CITY, "MOW"),)
+    assert directory.exact_city_refs("CAPITAL") == (PlaceRef(PlaceKind.CITY, "MOW"),)
+    assert directory.exact_city_refs("cap") == ()
+    assert directory.exact_city_refs("shared hub") == (
+        PlaceRef(PlaceKind.CITY, "MOW"),
+        PlaceRef(PlaceKind.CITY, "PAR"),
+    )
+
+
 def test_labels_report_field_level_locale_provenance_and_fallback() -> None:
     directory = directory_from_demo()
 

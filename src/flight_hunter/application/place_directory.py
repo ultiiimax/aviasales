@@ -200,6 +200,24 @@ class PlaceDirectory:
             return self.lookup(PlaceRef(PlaceKind.CITY, normalized_code), locale)
         raise PlaceUnknownError("bare_code_not_found", code=normalized_code)
 
+    def exact_city_refs(self, query: str) -> tuple[PlaceRef, ...]:
+        if not isinstance(query, str):
+            raise TypeError("query must be a string")
+        normalized_query = _search_text(query)
+        if not normalized_query:
+            return ()
+        matches = tuple(
+            group.ref
+            for group in self._groups_by_code.values()
+            if normalized_query
+            in {
+                _search_text(group.ref.code),
+                *(_search_text(value) for _, value in group.names),
+                *(_search_text(alias) for alias in group.aliases),
+            }
+        )
+        return tuple(sorted(matches, key=lambda ref: ref.code))
+
     def suggest(
         self,
         query: str,

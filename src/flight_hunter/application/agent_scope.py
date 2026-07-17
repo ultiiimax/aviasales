@@ -252,29 +252,39 @@ class ScopeResolver:
         normalized = _normalize_geography_text(text)
         snapshot = await self._repository.catalog_snapshot()
         directory = PlaceDirectory.from_snapshot(snapshot)
-        canonical_choices: dict[PlaceRef, GeographyChoice] = {}
-        for locale in ("ru", "en"):
-            for option in directory.suggest(normalized, locale=locale):
-                if option.ref.kind is not PlaceKind.CITY:
+        exact_city_refs = directory.exact_city_refs(normalized)
+        if exact_city_refs:
+            canonical_choices: list[GeographyChoice] = []
+            for ref in exact_city_refs:
+                try:
+                    option = directory.lookup(ref)
+                except PlaceUnavailableError:
                     continue
-                if (
-                    _normalize_geography_text(option.display_name.text) != normalized
-                    and option.ref.code.casefold() != normalized
-                ):
-                    continue
-                canonical_choices.setdefault(
-                    option.ref,
+                canonical_choices.append(
                     GeographyChoice(
-                        label=(
-                            f"{option.display_name.text} ({option.ref.code}, {option.country_code})"
-                        ),
-                        scope=LocationScope(LocationScopeKind.CITY, option.ref.code),
+                        label=f"{option.display_name.text} ({ref.code}, {option.country_code})",
+                        scope=LocationScope(LocationScopeKind.CITY, ref.code),
                         airport_codes=option.airport_codes,
                         taxonomy_version=self._countries.version,
-                    ),
+                    )
                 )
-        if len(canonical_choices) == 1:
-            return next(iter(canonical_choices.values()))
+            if len(exact_city_refs) > 1:
+                return GeographyClarification(
+                    query=text,
+                    kind=LocationScopeKind.CITY,
+                    reason="ambiguous_geography",
+                    choices=tuple(canonical_choices),
+                    taxonomy_version=self._countries.version,
+                )
+            if canonical_choices:
+                return canonical_choices[0]
+            return GeographyClarification(
+                query=text,
+                kind=LocationScopeKind.CITY,
+                reason="no_searchable_airports",
+                choices=(),
+                taxonomy_version=self._countries.version,
+            )
 
         matching = tuple(
             airport
