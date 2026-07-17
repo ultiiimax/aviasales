@@ -32,12 +32,16 @@ def test_exact_search_uses_accessible_typed_place_comboboxes_and_payloads() -> N
     html = TestClient(create_app()).get("/").text
 
     for field in ("origin", "destination"):
-        assert re.search(
+        place_input = re.search(
             rf'<input[^>]+id="{field}-place-input"[^>]+'
             rf'role="combobox"[^>]+aria-autocomplete="list"[^>]+'
-            rf'aria-controls="{field}-place-listbox"',
+            rf'aria-controls="{field}-place-listbox"[^>]*>',
             html,
         )
+        assert place_input is not None
+        assert " required" not in place_input.group(0)
+        assert f'<div class="place-field" data-place-role="{field}">' in html
+        assert f'<label for="{field}-place-input">' in html
         assert f'name="{field}" type="hidden"' in html
         assert f'name="{field}_kind" type="hidden"' in html
         assert f'id="{field}-place-listbox" role="listbox"' in html
@@ -55,6 +59,11 @@ def test_exact_search_uses_accessible_typed_place_comboboxes_and_payloads() -> N
     for key in ("ArrowDown", "ArrowUp", "Enter", "Escape"):
         assert key in combobox
     assert "aria-activedescendant" in combobox
+    assert "getBoundingClientRect" in combobox
+    assert "window.visualViewport?.height" in combobox
+    assert "window.innerHeight" in combobox
+    assert 'listbox.dataset.placement = "above"' in combobox
+    assert '.place-listbox[data-placement="above"]' in html
     assert "textContent" in combobox
     assert "innerHTML" not in combobox
     assert "origin_kind" in payload

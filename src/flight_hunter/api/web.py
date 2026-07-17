@@ -1349,6 +1349,10 @@ def render_index_html() -> str:
       display: none;
     }
 
+    .place-listbox[data-placement="above"] {
+      inset: auto 0 calc(100% + 6px);
+    }
+
     .place-option {
       display: grid;
       grid-template-columns: auto minmax(0, 1fr);
@@ -1929,28 +1933,30 @@ def render_index_html() -> str:
         </span>
       </summary>
         <form class="search-form" id="search-form">
-          <label class="place-field" data-place-role="origin">Откуда
+          <div class="place-field" data-place-role="origin">
+            <label for="origin-place-input">Откуда</label>
             <span class="place-combobox">
               <input id="origin-place-input" type="text" value="Варшава — Шопен" role="combobox"
                 aria-autocomplete="list" aria-expanded="false" aria-controls="origin-place-listbox"
-                autocomplete="off" spellcheck="false" required>
+                autocomplete="off" spellcheck="false">
               <input name="origin" type="hidden" value="WAW">
               <input name="origin_kind" type="hidden" value="airport">
               <span id="origin-place-listbox" role="listbox" class="place-listbox" hidden></span>
             </span>
             <span id="origin-place-status" class="place-status" role="status" aria-live="polite"></span>
-          </label>
-          <label class="place-field" data-place-role="destination">Куда
+          </div>
+          <div class="place-field" data-place-role="destination">
+            <label for="destination-place-input">Куда</label>
             <span class="place-combobox">
               <input id="destination-place-input" type="text" value="Барселона — Эль-Прат" role="combobox"
                 aria-autocomplete="list" aria-expanded="false" aria-controls="destination-place-listbox"
-                autocomplete="off" spellcheck="false" required>
+                autocomplete="off" spellcheck="false">
               <input name="destination" type="hidden" value="BCN">
               <input name="destination_kind" type="hidden" value="airport">
               <span id="destination-place-listbox" role="listbox" class="place-listbox" hidden></span>
             </span>
             <span id="destination-place-status" class="place-status" role="status" aria-live="polite"></span>
-          </label>
+          </div>
           <label>Вылет
             <input name="departure_date" type="date" value="2026-10-12" required>
           </label>
@@ -2464,6 +2470,33 @@ def render_index_html() -> str:
         activeIndex = -1;
       };
 
+      const positionListbox = () => {
+        if (listbox.hidden) return;
+        listbox.dataset.placement = "below";
+        listbox.style.maxHeight = "";
+        const inputRect = input.getBoundingClientRect();
+        const listboxRect = listbox.getBoundingClientRect();
+        const viewportTop = window.visualViewport?.offsetTop ?? 0;
+        const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+        const viewportBottom = viewportTop + viewportHeight;
+        const viewportPadding = 8;
+        const popupGap = 6;
+        const spaceBelow = Math.max(
+          0,
+          viewportBottom - inputRect.bottom - viewportPadding - popupGap
+        );
+        const spaceAbove = Math.max(
+          0,
+          inputRect.top - viewportTop - viewportPadding - popupGap
+        );
+        const placeAbove = listboxRect.height > spaceBelow && spaceAbove > spaceBelow;
+        if (placeAbove) {
+          listbox.dataset.placement = "above";
+        }
+        const availableHeight = placeAbove ? spaceAbove : spaceBelow;
+        listbox.style.maxHeight = `${Math.max(0, Math.min(320, availableHeight))}px`;
+      };
+
       const clearCanonical = () => {
         canonicalCode.value = "";
         canonicalKind.value = "";
@@ -2542,6 +2575,7 @@ def render_index_html() -> str:
         });
         listbox.hidden = options.length === 0;
         input.setAttribute("aria-expanded", String(options.length > 0));
+        positionListbox();
       };
 
       const requestOptions = async (query, sequence) => {
@@ -2602,12 +2636,14 @@ def render_index_html() -> str:
           listbox.hidden = false;
           input.setAttribute("aria-expanded", "true");
           setActiveOption(activeIndex + 1);
+          positionListbox();
         } else if (event.key === "ArrowUp") {
           if (!options.length) return;
           event.preventDefault();
           listbox.hidden = false;
           input.setAttribute("aria-expanded", "true");
           setActiveOption(activeIndex < 0 ? options.length - 1 : activeIndex - 1);
+          positionListbox();
         } else if (event.key === "Enter" && !listbox.hidden && activeIndex >= 0) {
           event.preventDefault();
           selectOption(options[activeIndex]);
