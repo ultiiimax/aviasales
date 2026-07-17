@@ -77,6 +77,14 @@ def test_search_endpoint_returns_demo_cached_result_and_provider_denials() -> No
 
     assert response.status_code == 201
     body = response.json()
+    assert body["requested_route"]["origin"]["ref"] == {
+        "kind": "airport",
+        "code": "WAW",
+    }
+    assert body["requested_route"]["destination"]["ref"] == {
+        "kind": "airport",
+        "code": "BCN",
+    }
     assert body["priced_offers"] == body["offers"]
     assert body["browser_observed_offers"] == []
     assert body["deal_candidates"] == []
@@ -139,7 +147,9 @@ async def test_search_endpoint_logs_safe_structured_started_event(
         headers=headers,
         json={
             "origin": "MOW",
-            "destination": "IST",
+            "destination": "PAR",
+            "origin_kind": "city",
+            "destination_kind": "city",
             "departure_date": "2026-09-10",
             "return_date": "2026-09-20",
             "passengers": 1,
@@ -155,7 +165,7 @@ async def test_search_endpoint_logs_safe_structured_started_event(
     assert isinstance(payload["duration_ms"], int)
     log_text = "\n".join(record.getMessage() for record in caplog.records)
     assert "MOW" not in log_text
-    assert "IST" not in log_text
+    assert "PAR" not in log_text
     assert "authorization" not in log_text.lower()
     assert not clean_database_path.exists()
 
@@ -377,7 +387,9 @@ async def test_search_endpoint_returns_user_scoped_browser_observed_offers() -> 
     client = TestClient(create_app(watch_session_factory=session_factory))
     request = {
         "origin": "MOW",
-        "destination": "IST",
+        "destination": "PAR",
+        "origin_kind": "city",
+        "destination_kind": "city",
         "departure_date": "2026-09-10",
         "return_date": "2026-09-20",
         "passengers": 1,
@@ -433,7 +445,9 @@ async def test_deal_discovery_persists_user_scoped_candidates_for_search() -> No
     )
     request = {
         "origin": "MOW",
-        "destination": "IST",
+        "destination": "PAR",
+        "origin_kind": "city",
+        "destination_kind": "city",
         "departure_date": "2026-09-10",
         "return_date": "2026-09-20",
         "passengers": 1,
@@ -668,7 +682,9 @@ async def test_personal_observation_api_queues_user_scoped_job(
     client = TestClient(create_app(watch_session_factory=session_factory))
     request = {
         "origin": "MOW",
-        "destination": "IST",
+        "destination": "PAR",
+        "origin_kind": "city",
+        "destination_kind": "city",
         "departure_date": "2026-09-10",
         "return_date": "2026-09-20",
         "passengers": 1,
@@ -737,7 +753,7 @@ async def test_personal_observation_api_controls_waiting_checkpoint(
     monkeypatch.setenv("PERSONAL_OBSERVER_ALLOWED_HOSTS", "www.tutu.ru,tutu.ru,avia.tutu.ru")
     session_factory = await _session_factory()
     client = TestClient(create_app(watch_session_factory=session_factory))
-    request = _mow_ist_request()
+    request = _mow_par_search_request()
     headers = _auth_headers()
     search_id = client.post("/api/v1/searches", headers=headers, json=request).json()["search_id"]
 
@@ -787,7 +803,7 @@ async def test_personal_observation_confirm_and_mark_stale_append_manual_ledger(
     monkeypatch.setenv("PERSONAL_OBSERVER_ALLOWED_HOSTS", "www.tutu.ru,tutu.ru,avia.tutu.ru")
     session_factory = await _session_factory()
     client = TestClient(create_app(watch_session_factory=session_factory))
-    request = _mow_ist_request()
+    request = _mow_par_search_request()
     headers = _auth_headers()
     search_id = client.post("/api/v1/searches", headers=headers, json=request).json()["search_id"]
     grant = client.post(
@@ -940,6 +956,19 @@ def _mow_ist_request() -> dict[str, object]:
     }
 
 
+def _mow_par_search_request() -> dict[str, object]:
+    return {
+        "origin": "MOW",
+        "destination": "PAR",
+        "origin_kind": "city",
+        "destination_kind": "city",
+        "departure_date": "2026-09-10",
+        "return_date": "2026-09-20",
+        "passengers": 1,
+        "currency": "RUB",
+    }
+
+
 def _queue_personal_observation_job(
     client: TestClient,
     headers: dict[str, str],
@@ -982,7 +1011,7 @@ class FakeDealDiscoveryService:
             DealCandidate(
                 source_id="deal_discovery",
                 url="https://example.com/deal",
-                title="Распродажа MOW IST",
+                title=f"Распродажа {intent.origin} {intent.destination}",
                 summary_ru="Возможная акция, требуется ручная проверка.",
                 extracted_price=Money(1_842_000, "RUB"),
                 extracted_origin=intent.origin,
@@ -1007,7 +1036,7 @@ def _browser_offer() -> BrowserObservedOffer:
         source_name="Туту",
         provider_offer_id="tutu-card-1",
         origin="MOW",
-        destination="IST",
+        destination="CDG",
         departure_date="2026-09-10",
         return_date="2026-09-20",
         total_price=Money(1_842_000, "RUB"),

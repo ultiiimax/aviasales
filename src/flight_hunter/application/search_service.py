@@ -9,6 +9,7 @@ from typing import Protocol
 from flight_hunter.application.provider_registry import ProviderRegistry
 from flight_hunter.application.search_planner import SearchPlanner
 from flight_hunter.domain.offers import FlightOffer, SearchIntent
+from flight_hunter.domain.places import PlaceKind, PlaceOption, PlaceRef
 from flight_hunter.domain.policy import ExecutionContext, MergeScope
 from flight_hunter.domain.provider_errors import ProviderOperationError
 from flight_hunter.domain.ranking import OfferRanker, offer_ranking_key
@@ -45,6 +46,21 @@ class SearchRequest:
     children: int = 0
     infants: int = 0
     trip_type: str | None = None
+    origin_kind: PlaceKind | str = PlaceKind.CITY
+    destination_kind: PlaceKind | str = PlaceKind.CITY
+    origin_airport_codes: tuple[str, ...] = ()
+    destination_airport_codes: tuple[str, ...] = ()
+    directory_version: str | None = None
+    origin_membership_version: str | None = None
+    destination_membership_version: str | None = None
+    requested_origin: PlaceOption | None = None
+    requested_destination: PlaceOption | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RequestedRoute:
+    origin: PlaceOption
+    destination: PlaceOption
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +83,7 @@ class SearchResult:
     denied_providers: dict[str, ProviderDenial]
     warnings: tuple[str, ...]
     freshness_summary: FreshnessSummary
+    requested_route: RequestedRoute | None
 
 
 class DemoSearchService:
@@ -102,6 +119,13 @@ class DemoSearchService:
             children=request.children,
             infants=request.infants,
             trip_type=request.trip_type,
+            origin_kind=request.origin_kind,
+            destination_kind=request.destination_kind,
+            origin_airport_codes=request.origin_airport_codes,
+            destination_airport_codes=request.destination_airport_codes,
+            directory_version=request.directory_version,
+            origin_membership_version=request.origin_membership_version,
+            destination_membership_version=request.destination_membership_version,
         )
         request_fingerprint = self._fingerprint(request)
         plan = self._planner.plan(
@@ -167,6 +191,7 @@ class DemoSearchService:
                 browser_observed_offers=(),
                 external_links=external_links,
             ),
+            requested_route=_requested_route(request),
         )
 
     @staticmethod
@@ -175,7 +200,11 @@ class DemoSearchService:
         raw = "|".join(
             (
                 request.origin.upper(),
+                PlaceKind(request.origin_kind).value,
+                ",".join(request.origin_airport_codes),
                 request.destination.upper(),
+                PlaceKind(request.destination_kind).value,
+                ",".join(request.destination_airport_codes),
                 request.departure_date,
                 request.return_date or "",
                 str(request.passengers),
@@ -185,9 +214,40 @@ class DemoSearchService:
                 request.trip_type or "",
                 request.currency.upper(),
                 provider_part,
+                request.directory_version or "",
+                request.origin_membership_version or "",
+                request.destination_membership_version or "",
             )
         )
         return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _requested_route(request: SearchRequest) -> RequestedRoute | None:
+    origin = request.requested_origin
+    destination = request.requested_destination
+    if origin is None and destination is None:
+        return None
+    if origin is None or destination is None:
+        raise ValueError("requested route requires both place options")
+    if origin.ref != (expected_origin := _request_place_ref(request, origin=True)):
+        raise ValueError(
+            "requested origin does not match search request: "
+            f"{origin.ref.kind.value}:{origin.ref.code} != "
+            f"{expected_origin.kind.value}:{expected_origin.code}"
+        )
+    if destination.ref != (expected_destination := _request_place_ref(request, origin=False)):
+        raise ValueError(
+            "requested destination does not match search request: "
+            f"{destination.ref.kind.value}:{destination.ref.code} != "
+            f"{expected_destination.kind.value}:{expected_destination.code}"
+        )
+    return RequestedRoute(origin=origin, destination=destination)
+
+
+def _request_place_ref(request: SearchRequest, *, origin: bool) -> PlaceRef:
+    if origin:
+        return PlaceRef(PlaceKind(request.origin_kind), request.origin)
+    return PlaceRef(PlaceKind(request.destination_kind), request.destination)
 
 
 def _warnings_for_result(external_links: tuple[ExternalSearchLink, ...]) -> tuple[str, ...]:

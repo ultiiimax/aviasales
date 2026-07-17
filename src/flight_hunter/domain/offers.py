@@ -6,6 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from flight_hunter.domain.money import Money
+from flight_hunter.domain.places import PlaceKind
 from flight_hunter.domain.policy import require_aware_datetime
 
 _IATA_RE = re.compile(r"^[A-Z]{3}$")
@@ -65,6 +66,13 @@ class SearchIntent:
     children: int = 0
     infants: int = 0
     trip_type: TripType | str | None = None
+    origin_kind: PlaceKind | str = PlaceKind.CITY
+    destination_kind: PlaceKind | str = PlaceKind.CITY
+    origin_airport_codes: tuple[str, ...] = ()
+    destination_airport_codes: tuple[str, ...] = ()
+    directory_version: str | None = None
+    origin_membership_version: str | None = None
+    destination_membership_version: str | None = None
 
     def __post_init__(self) -> None:
         origin = self.origin.upper()
@@ -86,10 +94,30 @@ class SearchIntent:
         if passenger_mix.total != self.passengers:
             raise ValueError("passengers must match passenger mix total")
         trip_type = _trip_type(self.trip_type, return_date=self.return_date)
+        origin_kind = PlaceKind(self.origin_kind)
+        destination_kind = PlaceKind(self.destination_kind)
+        origin_airport_codes = _frozen_airport_codes(
+            self.origin_airport_codes,
+            field_name="origin_airport_codes",
+        )
+        destination_airport_codes = _frozen_airport_codes(
+            self.destination_airport_codes,
+            field_name="destination_airport_codes",
+        )
         if trip_type == TripType.ROUND_TRIP and self.return_date is None:
             raise ValueError("round trip requires return_date")
         if trip_type == TripType.ONE_WAY and self.return_date is not None:
             raise ValueError("one-way trip cannot have return_date")
+        if origin_kind is PlaceKind.AIRPORT and origin_airport_codes not in {
+            (),
+            (origin,),
+        }:
+            raise ValueError("origin airport snapshot must contain only the selected airport")
+        if destination_kind is PlaceKind.AIRPORT and destination_airport_codes not in {
+            (),
+            (destination,),
+        }:
+            raise ValueError("destination airport snapshot must contain only the selected airport")
         object.__setattr__(self, "origin", origin)
         object.__setattr__(self, "destination", destination)
         object.__setattr__(self, "currency", currency)
@@ -97,6 +125,20 @@ class SearchIntent:
         object.__setattr__(self, "children", passenger_mix.children)
         object.__setattr__(self, "infants", passenger_mix.infants)
         object.__setattr__(self, "trip_type", trip_type)
+        object.__setattr__(self, "origin_kind", origin_kind)
+        object.__setattr__(self, "destination_kind", destination_kind)
+        object.__setattr__(self, "origin_airport_codes", origin_airport_codes)
+        object.__setattr__(self, "destination_airport_codes", destination_airport_codes)
+        for field_name in (
+            "directory_version",
+            "origin_membership_version",
+            "destination_membership_version",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _optional_snapshot_version(getattr(self, field_name), field_name=field_name),
+            )
 
     @property
     def passenger_mix(self) -> PassengerMix:
@@ -111,6 +153,37 @@ def _trip_type(value: TripType | str | None, *, return_date: str | None) -> Trip
     if value is None:
         return TripType.ROUND_TRIP if return_date is not None else TripType.ONE_WAY
     return TripType(value)
+
+
+def _frozen_airport_codes(
+    value: tuple[str, ...],
+    *,
+    field_name: str,
+) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise TypeError(f"{field_name} must be a tuple")
+    codes: list[str] = []
+    for code in value:
+        if not isinstance(code, str):
+            raise TypeError(f"{field_name} must contain strings")
+        normalized = code.strip().upper()
+        if not _IATA_RE.fullmatch(normalized):
+            raise ValueError(f"{field_name} must contain IATA codes")
+        codes.append(normalized)
+    if len(set(codes)) != len(codes):
+        raise ValueError(f"{field_name} cannot contain duplicates")
+    return tuple(codes)
+
+
+def _optional_snapshot_version(value: str | None, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string or None")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field_name} cannot be empty")
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)

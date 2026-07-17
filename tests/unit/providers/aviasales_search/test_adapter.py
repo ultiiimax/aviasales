@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from flight_hunter.domain.offers import Freshness, SearchIntent
+from flight_hunter.domain.places import PlaceKind
 from flight_hunter.domain.policy import ExecutionContext
 from flight_hunter.providers.aviasales_search.adapter import AviasalesSearchAdapter
 from flight_hunter.providers.aviasales_search.client import (
@@ -42,11 +44,13 @@ class _FakeTransport:
         self._gets = list(gets or [])
         self.post_calls = 0
         self.get_calls = 0
+        self.post_payloads: list[Mapping[str, Any]] = []
 
     def post(
         self, url: str, *, json: Any, headers: Mapping[str, str], timeout: float
     ) -> _FakeResponse:
         self.post_calls += 1
+        self.post_payloads.append(json)
         return self._posts.pop(0) if self._posts else _FakeResponse(status_code=500)
 
     def get(
@@ -122,6 +126,69 @@ def test_search_returns_live_offers_from_fixture_when_enabled() -> None:
     assert all(o.destination == "LED" for o in offers)
     assert offers[0].total_price.minor_units <= offers[-1].total_price.minor_units
     assert transport.post_calls == 2
+
+
+def test_search_marks_selected_airport_and_city_with_exact_provider_flags() -> None:
+    transport = _transport_with_fixture_results()
+    adapter = _adapter(transport, enabled=True, credentials=True)
+    intent = replace(
+        _intent(),
+        origin="DME",
+        destination="PAR",
+        return_date="2026-09-22",
+        trip_type="round_trip",
+        origin_kind=PlaceKind.AIRPORT,
+        destination_kind=PlaceKind.CITY,
+    )
+
+    adapter.search(
+        intent,
+        request_fingerprint="sha256:typed",
+        context=ExecutionContext.WEB_USER_ACTION,
+    )
+
+    directions = transport.post_payloads[0]["search_params"]["directions"]
+    assert directions[0]["is_origin_airport"] is True
+    assert directions[0]["is_destination_airport"] is False
+    assert directions[1]["is_origin_airport"] is False
+    assert directions[1]["is_destination_airport"] is True
+
+
+def test_search_filters_concrete_endpoints_against_nonempty_frozen_sets() -> None:
+    transport = _transport_with_fixture_results()
+    adapter = _adapter(transport, enabled=True, credentials=True)
+    intent = replace(
+        _intent(),
+        origin_kind=PlaceKind.CITY,
+        destination_kind=PlaceKind.AIRPORT,
+        origin_airport_codes=("DME",),
+        destination_airport_codes=("LED",),
+    )
+
+    offers = adapter.search(
+        intent,
+        request_fingerprint="sha256:frozen",
+        context=ExecutionContext.WEB_USER_ACTION,
+    )
+
+    assert offers == ()
+
+
+def test_search_keeps_legacy_results_when_frozen_sets_are_empty() -> None:
+    transport = _transport_with_fixture_results()
+    adapter = _adapter(transport, enabled=True, credentials=True)
+
+    offers = adapter.search(
+        replace(
+            _intent(),
+            origin_kind=PlaceKind.CITY,
+            destination_kind=PlaceKind.AIRPORT,
+        ),
+        request_fingerprint="sha256:legacy-empty",
+        context=ExecutionContext.WEB_USER_ACTION,
+    )
+
+    assert len(offers) == 5
 
 
 def test_search_wraps_chunk_parse_failure_as_schema_error() -> None:

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from flight_hunter.domain.agent_search import LocationScopeKind
 from flight_hunter.domain.offers import FlightOffer, SearchIntent
+from flight_hunter.domain.places import PlaceKind
 from flight_hunter.domain.policy import (
     ExecutionContext,
     ProviderOperation,
@@ -93,8 +94,14 @@ class AviasalesSearchAdapter:
             return ()
 
         params = SearchStartParams(
-            origin=ProviderLocation(kind=LocationScopeKind.CITY, code=intent.origin),
-            destination=ProviderLocation(kind=LocationScopeKind.CITY, code=intent.destination),
+            origin=ProviderLocation(
+                kind=_provider_location_kind(intent.origin_kind),
+                code=intent.origin,
+            ),
+            destination=ProviderLocation(
+                kind=_provider_location_kind(intent.destination_kind),
+                code=intent.destination,
+            ),
             departure_date=intent.departure_date,
             return_date=intent.return_date,
             adults=intent.passenger_mix.adults,
@@ -117,7 +124,7 @@ class AviasalesSearchAdapter:
         except AviasalesSearchParseError as exc:
             raise AviasalesSearchSchemaError() from exc
         observed_at = self._clock()
-        return tuple(
+        offers = tuple(
             map_parsed_ticket(
                 ticket,
                 observed_at=observed_at,
@@ -126,6 +133,9 @@ class AviasalesSearchAdapter:
                 results_url=start.results_url,
             )
             for ticket in parsed
+        )
+        return tuple(
+            offer for offer in offers if _matches_frozen_airport_endpoints(offer, intent=intent)
         )
 
     def resolve_purchase_url(
@@ -215,3 +225,20 @@ class AviasalesSearchAdapter:
             language=language,
             one_way=one_way,
         )
+
+
+def _provider_location_kind(kind: PlaceKind | str) -> LocationScopeKind:
+    normalized = PlaceKind(kind)
+    return LocationScopeKind.AIRPORT if normalized is PlaceKind.AIRPORT else LocationScopeKind.CITY
+
+
+def _matches_frozen_airport_endpoints(
+    offer: FlightOffer,
+    *,
+    intent: SearchIntent,
+) -> bool:
+    if intent.origin_airport_codes and offer.origin not in intent.origin_airport_codes:
+        return False
+    return not intent.destination_airport_codes or (
+        offer.destination in intent.destination_airport_codes
+    )

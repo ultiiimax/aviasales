@@ -73,6 +73,11 @@ from flight_hunter.application.date_matrix import (
 from flight_hunter.application.durable_live_observations import DurableLiveObservationService
 from flight_hunter.application.live_observations import BrowserSourceCatalog, GrantSource
 from flight_hunter.application.personal_observations import PersonalObservationService
+from flight_hunter.application.place_directory import (
+    PlaceDirectory,
+    PlaceDirectoryError,
+    PlaceUnknownError,
+)
 from flight_hunter.application.price_sources import PriceSource, PriceSourceCatalog
 from flight_hunter.application.provider_registry import ProviderRegistry, ProviderStatus
 from flight_hunter.application.search_service import (
@@ -137,6 +142,7 @@ from flight_hunter.domain.offers import (
     PriceBasis,
     SearchIntent,
 )
+from flight_hunter.domain.places import PlaceKind, PlaceLabel, PlaceOption, PlaceRef
 from flight_hunter.domain.policy import ExecutionContext
 from flight_hunter.domain.ranking import offer_ranking_key
 from flight_hunter.domain.search_results import (
@@ -147,6 +153,7 @@ from flight_hunter.domain.search_results import (
     FreshnessSummary,
     ResultKind,
 )
+from flight_hunter.geo.airports import freeze_airport_catalog
 from flight_hunter.geo.demo_repository import DemoAirportRepository
 from flight_hunter.itinerary_engine.risk import OfferRiskAssessment, assess_offer_risk
 from flight_hunter.notifications.telegram import (
@@ -518,9 +525,78 @@ class BrowserSourcesResponse(BaseModel):
     sources: list[BrowserSourceResponse]
 
 
+class PlaceRefRequest(BaseModel):
+    kind: PlaceKind
+    code: str = Field(min_length=3, max_length=3)
+
+
+class PlaceLookupRequestBody(BaseModel):
+    locale: str = Field(default="ru", min_length=2, max_length=16)
+    places: list[PlaceRefRequest] = Field(default_factory=list, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_unique_refs(self) -> PlaceLookupRequestBody:
+        refs = tuple(PlaceRef(place.kind, place.code) for place in self.places)
+        if len(set(refs)) != len(refs):
+            raise ValueError("places must contain unique typed refs")
+        return self
+
+
+class PlaceRefResponse(BaseModel):
+    kind: PlaceKind
+    code: str
+
+
+class PlaceLabelResponse(BaseModel):
+    text: str
+    resolved_locale: str
+    provenance: str
+    fallback_reason: str | None
+
+
+class PlaceOptionResponse(BaseModel):
+    ref: PlaceRefResponse
+    display_name: PlaceLabelResponse
+    city_name: PlaceLabelResponse | None
+    country_code: str | None
+    country_name: PlaceLabelResponse | None
+    airport_codes: list[str]
+    directory_version: str
+    membership_version: str
+    membership_observed_at: str
+
+
+class PlaceLookupErrorResponse(BaseModel):
+    code: str
+    reason: str
+
+
+class PlaceLookupItemResponse(BaseModel):
+    ref: PlaceRefResponse
+    resolved: bool
+    display_name: PlaceLabelResponse | None
+    city_name: PlaceLabelResponse | None
+    country_code: str | None
+    country_name: PlaceLabelResponse | None
+    airport_codes: list[str]
+    directory_version: str | None
+    membership_version: str | None
+    membership_observed_at: str | None
+    error: PlaceLookupErrorResponse | None
+
+
+class PlaceEnvelopeResponse(BaseModel):
+    catalog_status: Literal["ready", "unavailable"]
+    enrichment_status: Literal["disabled", "ready", "partial", "unavailable"]
+    directory_version: str | None
+    items: list[PlaceLookupItemResponse]
+
+
 class SearchRequestBody(BaseModel):
     origin: str = Field(min_length=3, max_length=3)
     destination: str = Field(min_length=3, max_length=3)
+    origin_kind: PlaceKind | None = None
+    destination_kind: PlaceKind | None = None
     departure_date: str
     return_date: str | None = None
     passengers: int = Field(ge=1)
@@ -957,8 +1033,14 @@ class ProviderDenialResponse(BaseModel):
     message: str
 
 
+class RequestedRouteResponse(BaseModel):
+    origin: PlaceOptionResponse
+    destination: PlaceOptionResponse
+
+
 class SearchResponse(BaseModel):
     search_id: str
+    requested_route: RequestedRouteResponse
     offers: list[OfferResponse]
     priced_offers: list[OfferResponse]
     provider_isolated_offers: list[OfferResponse]
@@ -1283,6 +1365,19 @@ def create_app(
         secret_token=settings.telegram_webhook_secret,
     )
     session_factory = watch_session_factory or _watch_session_factory(settings.database_url)
+    demo_place_directory = PlaceDirectory.from_snapshot(
+        freeze_airport_catalog(DemoAirportRepository().all())
+    )
+
+    async def request_place_directory() -> PlaceDirectory:
+        try:
+            async with session_factory() as session:
+                repository = AirportReferenceRepository(session)
+                if await repository.latest_import_run() is not None:
+                    return PlaceDirectory.from_snapshot(await repository.catalog_snapshot())
+        except SQLAlchemyError:
+            return demo_place_directory
+        return demo_place_directory
 
     def agent_lifecycle_service(session: AsyncSession) -> AgentLifecycleService:
         resolver = ScopeResolver(repository=AirportReferenceRepository(session))
@@ -2388,6 +2483,40 @@ def create_app(
             await session.commit()
         return _agent_chat_turn_response(response)
 
+    @app.get("/api/v1/places/suggest", response_model=PlaceEnvelopeResponse)
+    async def places_suggest(
+        q: str = Query(default="", max_length=80),
+        locale: str = Query(default="ru", min_length=2, max_length=16),
+        limit: int = Query(default=10, ge=1, le=20),
+    ) -> PlaceEnvelopeResponse:
+        directory = await request_place_directory()
+        options = directory.suggest(q, locale=locale, limit=limit) if len(q.strip()) >= 2 else ()
+        return PlaceEnvelopeResponse(
+            catalog_status="ready",
+            enrichment_status="disabled",
+            directory_version=directory.directory_version,
+            items=[_place_lookup_item_response(option=option) for option in options],
+        )
+
+    @app.post("/api/v1/places/lookup", response_model=PlaceEnvelopeResponse)
+    async def places_lookup(body: PlaceLookupRequestBody) -> PlaceEnvelopeResponse:
+        directory = await request_place_directory()
+        items: list[PlaceLookupItemResponse] = []
+        for requested in body.places:
+            ref = PlaceRef(requested.kind, requested.code)
+            try:
+                option = directory.lookup(ref, locale=body.locale)
+            except PlaceDirectoryError as error:
+                items.append(_place_lookup_item_response(ref=ref, error=error))
+            else:
+                items.append(_place_lookup_item_response(option=option))
+        return PlaceEnvelopeResponse(
+            catalog_status="ready",
+            enrichment_status="disabled",
+            directory_version=directory.directory_version,
+            items=items,
+        )
+
     @app.post("/api/v1/searches", response_model=SearchResponse, status_code=201)
     async def searches(
         body: SearchRequestBody,
@@ -2400,13 +2529,29 @@ def create_app(
             default=None,
             alias="X-Flight-Hunter-User-Id",
         ),
-    ) -> SearchResponse:
+    ) -> SearchResponse | JSONResponse:
         started_at = perf_counter()
         household_id_for_log: UUID | None = None
+        directory = await request_place_directory()
+        try:
+            requested_origin = _resolve_request_place(
+                directory,
+                code=body.origin,
+                kind=body.origin_kind,
+                locale="ru",
+            )
+            requested_destination = _resolve_request_place(
+                directory,
+                code=body.destination,
+                kind=body.destination_kind,
+                locale="ru",
+            )
+        except PlaceDirectoryError as error:
+            return _place_search_error_response(error)
         result = search_service.search(
             SearchRequest(
-                origin=body.origin,
-                destination=body.destination,
+                origin=requested_origin.ref.code,
+                destination=requested_destination.ref.code,
                 departure_date=body.departure_date,
                 return_date=body.return_date,
                 passengers=body.passengers,
@@ -2416,6 +2561,15 @@ def create_app(
                 children=body.children,
                 infants=body.infants,
                 trip_type=body.trip_type,
+                origin_kind=requested_origin.ref.kind,
+                destination_kind=requested_destination.ref.kind,
+                origin_airport_codes=requested_origin.airport_codes,
+                destination_airport_codes=requested_destination.airport_codes,
+                directory_version=directory.directory_version,
+                origin_membership_version=requested_origin.membership_version,
+                destination_membership_version=requested_destination.membership_version,
+                requested_origin=requested_origin,
+                requested_destination=requested_destination,
             )
         )
         if _auth_headers_present(
@@ -4461,7 +4615,106 @@ def _agent_audit_event_response(event: AgentAuditEvent) -> AgentAuditEventRespon
     )
 
 
+def _resolve_request_place(
+    directory: PlaceDirectory,
+    *,
+    code: str,
+    kind: PlaceKind | None,
+    locale: str,
+) -> PlaceOption:
+    try:
+        if kind is None:
+            return directory.resolve_legacy(code, locale=locale)
+        return directory.lookup(PlaceRef(kind, code), locale=locale)
+    except (TypeError, ValueError):
+        raise PlaceUnknownError("invalid_place_code", code=code) from None
+
+
+def _place_search_error_response(error: PlaceDirectoryError) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "code": error.code,
+                "message": "place could not be resolved",
+            }
+        },
+    )
+
+
+def _place_lookup_item_response(
+    *,
+    option: PlaceOption | None = None,
+    ref: PlaceRef | None = None,
+    error: PlaceDirectoryError | None = None,
+) -> PlaceLookupItemResponse:
+    if option is not None:
+        if ref is not None or error is not None:
+            raise ValueError("resolved place item cannot include ref or error overrides")
+        return PlaceLookupItemResponse(
+            ref=_place_ref_response(option.ref),
+            resolved=True,
+            display_name=_place_label_response(option.display_name),
+            city_name=_optional_place_label_response(option.city_name),
+            country_code=option.country_code,
+            country_name=_optional_place_label_response(option.country_name),
+            airport_codes=list(option.airport_codes),
+            directory_version=option.directory_version,
+            membership_version=option.membership_version,
+            membership_observed_at=option.membership_observed_at,
+            error=None,
+        )
+    if ref is None or error is None:
+        raise ValueError("unresolved place item requires ref and error")
+    return PlaceLookupItemResponse(
+        ref=_place_ref_response(ref),
+        resolved=False,
+        display_name=None,
+        city_name=None,
+        country_code=None,
+        country_name=None,
+        airport_codes=[],
+        directory_version=None,
+        membership_version=None,
+        membership_observed_at=None,
+        error=PlaceLookupErrorResponse(code=error.code, reason=error.reason),
+    )
+
+
+def _place_option_response(option: PlaceOption) -> PlaceOptionResponse:
+    return PlaceOptionResponse(
+        ref=_place_ref_response(option.ref),
+        display_name=_place_label_response(option.display_name),
+        city_name=_optional_place_label_response(option.city_name),
+        country_code=option.country_code,
+        country_name=_optional_place_label_response(option.country_name),
+        airport_codes=list(option.airport_codes),
+        directory_version=option.directory_version,
+        membership_version=option.membership_version,
+        membership_observed_at=option.membership_observed_at,
+    )
+
+
+def _place_ref_response(ref: PlaceRef) -> PlaceRefResponse:
+    return PlaceRefResponse(kind=ref.kind, code=ref.code)
+
+
+def _place_label_response(label: PlaceLabel) -> PlaceLabelResponse:
+    return PlaceLabelResponse(
+        text=label.text,
+        resolved_locale=label.resolved_locale,
+        provenance=label.provenance,
+        fallback_reason=label.fallback_reason,
+    )
+
+
+def _optional_place_label_response(label: PlaceLabel | None) -> PlaceLabelResponse | None:
+    return _place_label_response(label) if label is not None else None
+
+
 def _search_response(result: SearchResult, *, booking_secret: str | None = None) -> SearchResponse:
+    if result.requested_route is None:
+        raise ValueError("search response requires a requested route")
     priced_offers = [
         _offer_response(
             offer,
@@ -4472,6 +4725,10 @@ def _search_response(result: SearchResult, *, booking_secret: str | None = None)
     ]
     return SearchResponse(
         search_id=result.search_id,
+        requested_route=RequestedRouteResponse(
+            origin=_place_option_response(result.requested_route.origin),
+            destination=_place_option_response(result.requested_route.destination),
+        ),
         offers=priced_offers,
         priced_offers=priced_offers,
         provider_isolated_offers=[

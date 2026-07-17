@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
+from flight_hunter.application.place_directory import PlaceDirectory
 from flight_hunter.application.provider_registry import ProviderRegistry
 from flight_hunter.application.search_service import (
     DemoSearchService,
@@ -11,8 +13,11 @@ from flight_hunter.application.search_service import (
 from flight_hunter.config import AppSettings
 from flight_hunter.domain.money import Money
 from flight_hunter.domain.offers import FlightOffer, Freshness
+from flight_hunter.domain.places import PlaceKind, PlaceRef
 from flight_hunter.domain.policy import DataKind, ExecutionContext, ProviderPolicy
 from flight_hunter.domain.search_results import Confidence, DealCandidate
+from flight_hunter.geo.airports import freeze_airport_catalog
+from flight_hunter.geo.demo_repository import DemoAirportRepository
 
 NOW = datetime(2026, 6, 23, 12, 0, tzinfo=UTC)
 
@@ -183,6 +188,89 @@ def test_search_service_passes_passenger_mix_to_provider_intent() -> None:
     assert provider.last_passenger_mix == (2, 1, 0)
 
 
+def test_search_service_carries_typed_place_snapshot_and_requested_route() -> None:
+    directory = PlaceDirectory.from_snapshot(freeze_airport_catalog(DemoAirportRepository().all()))
+    origin = directory.lookup(PlaceRef(PlaceKind.CITY, "MOW"), locale="ru")
+    destination = directory.lookup(PlaceRef(PlaceKind.AIRPORT, "CDG"), locale="ru")
+    registry = ProviderRegistry((_policy("provider_a"),))
+    provider = RecordingOfferProvider()
+    service = DemoSearchService(
+        registry=registry,
+        clock=lambda: NOW,
+        providers={"provider_a": provider},
+    )
+
+    result = service.search(
+        SearchRequest(
+            origin=origin.ref.code,
+            destination=destination.ref.code,
+            departure_date="2026-10-12",
+            return_date=None,
+            passengers=1,
+            currency="RUB",
+            provider_ids=("provider_a",),
+            origin_kind=origin.ref.kind,
+            destination_kind=destination.ref.kind,
+            origin_airport_codes=origin.airport_codes,
+            destination_airport_codes=destination.airport_codes,
+            directory_version=origin.directory_version,
+            origin_membership_version=origin.membership_version,
+            destination_membership_version=destination.membership_version,
+            requested_origin=origin,
+            requested_destination=destination,
+        )
+    )
+
+    assert provider.last_place_snapshot == (
+        PlaceKind.CITY,
+        PlaceKind.AIRPORT,
+        ("DME", "SVO", "VKO", "ZIA"),
+        ("CDG",),
+        origin.directory_version,
+        "mow-2026-07-17",
+        "airport-self-v1",
+    )
+    assert result.requested_route is not None
+    assert result.requested_route.origin == origin
+    assert result.requested_route.destination == destination
+
+
+def test_search_fingerprint_includes_typed_frozen_place_snapshot() -> None:
+    baseline = SearchRequest(
+        origin="MOW",
+        destination="PAR",
+        departure_date="2026-10-12",
+        return_date=None,
+        passengers=1,
+        currency="RUB",
+        provider_ids=None,
+        origin_kind=PlaceKind.CITY,
+        destination_kind=PlaceKind.CITY,
+        origin_airport_codes=("DME", "SVO", "VKO", "ZIA"),
+        destination_airport_codes=("BVA", "CDG", "ORY"),
+        directory_version="directory-v1",
+        origin_membership_version="mow-v1",
+        destination_membership_version="par-v1",
+    )
+
+    changed_kind = replace(baseline, origin_kind=PlaceKind.AIRPORT)
+    changed_members = replace(baseline, origin_airport_codes=("DME",))
+    changed_directory = replace(baseline, directory_version="directory-v2")
+    changed_membership = replace(baseline, origin_membership_version="mow-v2")
+
+    fingerprints = {
+        DemoSearchService._fingerprint(request)
+        for request in (
+            baseline,
+            changed_kind,
+            changed_members,
+            changed_directory,
+            changed_membership,
+        )
+    }
+    assert len(fingerprints) == 5
+
+
 def test_search_service_ranks_mergeable_offers_with_freshness_caveats() -> None:
     registry = ProviderRegistry(
         (
@@ -303,6 +391,7 @@ class StaticOfferProvider:
 class RecordingOfferProvider:
     def __init__(self) -> None:
         self.last_passenger_mix: tuple[int, int, int] | None = None
+        self.last_place_snapshot: tuple[object, ...] | None = None
 
     def search(
         self,
@@ -313,6 +402,15 @@ class RecordingOfferProvider:
     ) -> tuple[FlightOffer, ...]:
         mix = intent.passenger_mix
         self.last_passenger_mix = (mix.adults, mix.children, mix.infants)
+        self.last_place_snapshot = (
+            intent.origin_kind,
+            intent.destination_kind,
+            intent.origin_airport_codes,
+            intent.destination_airport_codes,
+            intent.directory_version,
+            intent.origin_membership_version,
+            intent.destination_membership_version,
+        )
         return (
             FlightOffer(
                 provider_id="provider_a",
