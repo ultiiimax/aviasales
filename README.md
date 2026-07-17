@@ -44,6 +44,18 @@ Initializer создаёт `.env`, генерирует `APP_SECRET_KEY` и
 `AUTH_BOOTSTRAP_TOKEN`, выбирает локальную SQLite и оставляет внешние провайдеры
 выключенными. Существующий `.env` он не перезаписывает без `--force`.
 
+Если есть локальный API kit с Aviasales, импортируй его отдельной командой. Она
+читает только `aviasales/keys.json` и строковые константы `client.py`, не
+запускает код из kit и не печатает ключи:
+
+```powershell
+uv run flight-hunter-import-api-kit --path "C:\path\to\api_kit" --env .env
+```
+
+Успешный вывод содержит только `configured=true` и имя провайдера. В runtime
+копируется конфигурация в игнорируемый `.env`; директория API kit после этого
+приложению не нужна.
+
 Запусти API:
 
 ```powershell
