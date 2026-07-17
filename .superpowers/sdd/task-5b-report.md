@@ -41,3 +41,27 @@ exit 0
 
 Browser QA is intentionally deferred to Task 7 as required by the Task 5B
 brief. Full suite, lint and security commands were not run.
+
+## Review follow-up
+
+- Explicit `directory_version` lookups and formatting are now exact-key only;
+  a different current/global directory version cannot label an older route.
+- Watches are looked up and rendered in groups keyed by their persisted
+  `directory_version`.
+- External endpoint codes outside `requested_route` enter the shared batch as
+  both typed airport and city refs. A human label is used only when exactly one
+  typed ref resolves; collisions and misses retain the raw-code fallback.
+
+Strengthened-test RED:
+
+```text
+uv run --no-sync pytest tests/unit/api/test_web_ui.py::test_routes_use_shared_typed_place_lookup_and_honest_human_labels -q
+1 failed: lookupPlaceRefs still contained `|| cachedPlaceOption(ref)`
+```
+
+Strengthened-test GREEN:
+
+```text
+uv run --no-sync pytest tests/unit/api/test_web_ui.py::test_routes_use_shared_typed_place_lookup_and_honest_human_labels -q
+1 passed in 0.15s
+```

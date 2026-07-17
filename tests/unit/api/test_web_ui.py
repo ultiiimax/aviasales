@@ -79,9 +79,14 @@ def test_routes_use_shared_typed_place_lookup_and_honest_human_labels() -> None:
     cache_key = _javascript_sync_function(html, "placeCacheKey")
     lookup = _javascript_function(html, "lookupPlaceRefs")
     label = _javascript_sync_function(html, "formatPlaceLabel")
+    cached_route = _javascript_sync_function(html, "formatPlaceRouteFromCache")
     combobox = _javascript_sync_function(html, "setupPlaceCombobox")
+    watch_lookup = _javascript_function(html, "lookupWatchPlaces")
     results = _javascript_sync_function(html, "renderResults")
     watches = _javascript_sync_function(html, "renderWatches")
+    watch_history = _javascript_sync_function(html, "renderWatchHistory")
+    external_route = _javascript_sync_function(html, "formatExternalRoute")
+    search_lookup = _javascript_function(html, "lookupSearchResultPlaces")
     confirmed = _javascript_sync_function(html, "renderAgentConfirmedResults")
 
     assert "kind|code|locale|directory_version" in html
@@ -89,12 +94,26 @@ def test_routes_use_shared_typed_place_lookup_and_honest_human_labels() -> None:
     assert 'fetch("/api/v1/places/lookup"' in lookup
     assert "placeLookupBatchLimit = 64" in html
     assert "slice(offset, offset + placeLookupBatchLimit)" in lookup
+    assert "!cachedPlaceOption(ref, directoryVersion)" in lookup
+    assert "|| cachedPlaceOption(ref)" not in lookup
+    assert "cachedPlaceOption(originRef, directoryVersion)" in cached_route
+    assert "cachedPlaceOption(destinationRef, directoryVersion)" in cached_route
     assert "cachePlaceOption(option)" in combobox
     assert "Название не найдено" in label
+    assert "watch.directory_version" in watch_lookup
+    assert "lookupPlaceRefs(refs, directoryVersion)" in watch_lookup
     assert "body.requested_route" in results
     assert "offer.segments" in results
     assert "watch.origin_kind" in watches
     assert "watch.destination_kind" in watches
+    assert "watch.directory_version" in watches
+    assert "watch.directory_version" in watch_history
+    assert "body?.external_links" in search_lookup
+    assert '{kind: "airport", code}' in search_lookup
+    assert '{kind: "city", code}' in search_lookup
+    assert "lookupPlaceRefs(lookupRefs, directoryVersion)" in search_lookup
+    assert "cachedPlaceOption" in external_route
+    assert "resolved.length === 1" in external_route
     assert "candidate.ordered_legs" in confirmed
     for renderer in (results, watches, confirmed):
         assert "formatPlace" in renderer

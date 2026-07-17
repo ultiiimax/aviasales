@@ -2476,7 +2476,9 @@ def render_index_html() -> str:
 
     function cachedPlaceOption(ref, directoryVersion = null, locale = placeLocale) {
       const normalized = normalizePlaceRef(ref);
-      const version = text(directoryVersion || placeDirectoryVersion);
+      const version = directoryVersion === null
+        ? text(placeDirectoryVersion)
+        : text(directoryVersion);
       if (!normalized || !version) return null;
       return placeCache.get(placeCacheKey(normalized, locale, version)) || null;
     }
@@ -2499,9 +2501,14 @@ def render_index_html() -> str:
       return `${formatPlaceLabel(origin, includeCode)} → ${formatPlaceLabel(destination, includeCode)}`;
     }
 
-    function formatPlaceRouteFromCache(originRef, destinationRef, includeCode = false) {
-      const origin = cachedPlaceOption(originRef) || originRef;
-      const destination = cachedPlaceOption(destinationRef) || destinationRef;
+    function formatPlaceRouteFromCache(
+      originRef,
+      destinationRef,
+      includeCode = false,
+      directoryVersion = null
+    ) {
+      const origin = cachedPlaceOption(originRef, directoryVersion) || originRef;
+      const destination = cachedPlaceOption(destinationRef, directoryVersion) || destinationRef;
       return formatPlaceRoute(origin, destination, includeCode);
     }
 
@@ -2512,9 +2519,7 @@ def render_index_html() -> str:
         if (normalized) unique.set(`${normalized.kind}|${normalized.code}`, normalized);
       });
       const requested = Array.from(unique.values());
-      const missing = requested.filter((ref) => (
-        !cachedPlaceOption(ref, directoryVersion) && !cachedPlaceOption(ref)
-      ));
+      const missing = requested.filter((ref) => !cachedPlaceOption(ref, directoryVersion));
       for (let offset = 0; offset < missing.length; offset += placeLookupBatchLimit) {
         const batch = missing.slice(offset, offset + placeLookupBatchLimit);
         try {
@@ -2535,7 +2540,6 @@ def render_index_html() -> str:
         }
       }
       return requested.map((ref) => cachedPlaceOption(ref, directoryVersion)
-        || cachedPlaceOption(ref)
         || {ref, resolved: false});
     }
 
@@ -3264,11 +3268,19 @@ def render_index_html() -> str:
     }
 
     async function lookupWatchPlaces(watches) {
-      const refs = (watches || []).flatMap((watch) => [
-        {kind: watch.origin_kind, code: watch.origin},
-        {kind: watch.destination_kind, code: watch.destination}
-      ]);
-      await lookupPlaceRefs(refs);
+      const refsByVersion = new Map();
+      (watches || []).forEach((watch) => {
+        const directoryVersion = text(watch.directory_version);
+        const refs = refsByVersion.get(directoryVersion) || [];
+        refs.push(
+          {kind: watch.origin_kind, code: watch.origin},
+          {kind: watch.destination_kind, code: watch.destination}
+        );
+        refsByVersion.set(directoryVersion, refs);
+      });
+      for (const [directoryVersion, refs] of refsByVersion) {
+        await lookupPlaceRefs(refs, directoryVersion);
+      }
     }
 
     function renderWatches(watches) {
@@ -3297,7 +3309,9 @@ def render_index_html() -> str:
         `;
         row.querySelector(".provider-name").textContent = formatPlaceRouteFromCache(
           originRef,
-          destinationRef
+          destinationRef,
+          false,
+          watch.directory_version
         );
         row.querySelector(".badge").classList.add(state.tone);
         row.querySelector(".badge").textContent = state.label;
@@ -3338,7 +3352,9 @@ def render_index_html() -> str:
         "История watch",
         `${formatPlaceRouteFromCache(
           {kind: watch.origin_kind, code: watch.origin},
-          {kind: watch.destination_kind, code: watch.destination}
+          {kind: watch.destination_kind, code: watch.destination},
+          false,
+          watch.directory_version
         )}. Snapshots не являются live-гарантией.`
       );
       if (!snapshots || snapshots.length === 0) {
@@ -3722,33 +3738,60 @@ def render_index_html() -> str:
     }
 
     function formatExternalRoute(link, requestedRoute) {
-      const origin = requestedRouteOptionForCode(requestedRoute, link?.origin)
-        || {code: link?.origin};
-      const destination = requestedRouteOptionForCode(requestedRoute, link?.destination)
-        || {code: link?.destination};
+      const directoryVersion = text(
+        requestedRoute?.origin?.directory_version
+        || requestedRoute?.destination?.directory_version
+      );
+      const resolvedExternalPlace = (code) => {
+        const requested = requestedRouteOptionForCode(requestedRoute, code);
+        if (requested) return requested;
+        const resolved = [
+          cachedPlaceOption({kind: "airport", code}, directoryVersion),
+          cachedPlaceOption({kind: "city", code}, directoryVersion)
+        ].filter((option) => Boolean(option) && option.resolved !== false);
+        return resolved.length === 1 ? resolved[0] : {code};
+      };
+      const origin = resolvedExternalPlace(link?.origin);
+      const destination = resolvedExternalPlace(link?.destination);
       return formatPlaceRoute(origin, destination);
     }
 
     async function lookupSearchResultPlaces(body) {
       seedRequestedRoutePlaceCache(body?.requested_route);
       const offers = body?.priced_offers || body?.offers || [];
-      const airportCodes = [];
+      const requestedRoute = body?.requested_route;
+      const directoryVersion = text(
+        requestedRoute?.origin?.directory_version
+        || requestedRoute?.destination?.directory_version
+      );
+      const lookupRefs = [];
+      const addAirport = (code) => lookupRefs.push({kind: "airport", code});
       offers.forEach((offer) => {
         if ((offer.segments || []).length > 0) {
           offer.segments.forEach((segment) => {
-            airportCodes.push(segment.origin, segment.destination);
+            addAirport(segment.origin);
+            addAirport(segment.destination);
           });
         } else {
-          airportCodes.push(offer.origin, offer.destination);
+          addAirport(offer.origin);
+          addAirport(offer.destination);
         }
       });
       (body?.browser_observed_offers || []).forEach((offer) => {
-        airportCodes.push(offer.origin, offer.destination);
+        addAirport(offer.origin);
+        addAirport(offer.destination);
       });
       (body?.deal_candidates || []).forEach((candidate) => {
-        airportCodes.push(candidate.extracted_origin, candidate.extracted_destination);
+        addAirport(candidate.extracted_origin);
+        addAirport(candidate.extracted_destination);
       });
-      await lookupAirportPlaces(airportCodes);
+      (body?.external_links || []).forEach((link) => {
+        [link.origin, link.destination].forEach((code) => {
+          if (requestedRouteOptionForCode(requestedRoute, code)) return;
+          lookupRefs.push({kind: "airport", code}, {kind: "city", code});
+        });
+      });
+      await lookupPlaceRefs(lookupRefs, directoryVersion);
     }
 
     function appendOfferBadges(container, offer) {
