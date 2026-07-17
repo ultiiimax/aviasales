@@ -15,6 +15,7 @@ def test_env_example_exists_with_safe_placeholders() -> None:
     assert "AUTH_BOOTSTRAP_TOKEN=" in content
     assert "AUTH_SESSION_TTL_SECONDS=2592000" in content
     assert "AUTH_ALLOW_LEGACY_HEADERS=false" in content
+    assert "AUTH_LOCAL_AUTO_LOGIN=true" in content
     assert "APP_SECRET_KEY=\n" in content
     assert "AVIASALES_SEARCH_ENABLED=false" in content
     assert "AVIASALES_SEARCH_SIGNATURE=\n" in content

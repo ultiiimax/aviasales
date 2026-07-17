@@ -1,21 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from ipaddress import IPv6Address, ip_address
 from time import perf_counter
 from typing import Literal
 from urllib.parse import urlparse
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from flight_hunter import __version__
@@ -212,6 +214,7 @@ from flight_hunter.persistence.repositories import (
     WorkerHeartbeatRepository,
     WorkerQueueHealthRepository,
 )
+
 from flight_hunter.providers.aviasales_search.adapter import AviasalesSearchAdapter
 from flight_hunter.providers.aviasales_search.client import (
     AviasalesSearchAuthFailed,
@@ -231,6 +234,15 @@ from flight_hunter.providers.personal_observer import (
 )
 from flight_hunter.providers.ru_clickout import RuClickoutLinkBuilder, default_ru_aggregator_specs
 from flight_hunter.providers.ru_clickout.source_specs import RuAggregatorSpec
+
+LOCAL_OWNER_HOUSEHOLD_ID_V1 = uuid5(
+    NAMESPACE_URL,
+    "flight-hunter:local-owner:household:v1",
+)
+LOCAL_OWNER_USER_ID_V1 = uuid5(
+    NAMESPACE_URL,
+    "flight-hunter:local-owner:user:v1",
+)
 
 _RESULT_KIND_PATTERN = "^(" + "|".join(kind.value for kind in ResultKind) + ")$"
 _MANUAL_CONFIRMATION_STATUS_PATTERN = (
@@ -1404,6 +1416,7 @@ def create_app(
         secret_token=settings.telegram_webhook_secret,
     )
     session_factory = watch_session_factory or _watch_session_factory(settings.database_url)
+    local_session_lock = asyncio.Lock()
     demo_place_directory = PlaceDirectory.from_snapshot(
         freeze_airport_catalog(DemoAirportRepository().all())
     )
@@ -1552,6 +1565,105 @@ def create_app(
         return PlainTextResponse(
             render_application_metrics() + render_worker_health_prometheus(durable_snapshot),
             media_type="text/plain; version=0.0.4",
+        )
+
+    @app.post(
+        "/api/v1/auth/local-session",
+        response_model=AuthSessionResponse,
+        status_code=201,
+    )
+    async def local_session(
+        request: Request,
+        response: Response,
+    ) -> AuthSessionResponse | JSONResponse:
+        response.headers["Cache-Control"] = "no-store"
+        if not settings.auth_local_auto_login:
+            return _local_auth_error_response(
+                status_code=403,
+                code="local_auto_login_disabled",
+                message="local auto-login is disabled",
+            )
+        if not _request_has_loopback_peer(request):
+            return _local_auth_error_response(
+                status_code=403,
+                code="local_auto_login_loopback_required",
+                message="local auto-login requires a loopback peer",
+            )
+
+        async with local_session_lock:
+            now = datetime.now(UTC)
+            session_id = uuid4()
+            session_token = new_secret_token()
+            session_expires_at = now + timedelta(
+                seconds=max(settings.auth_session_ttl_seconds, 60),
+            )
+            async with session_factory() as session:
+                repository = IdentityRepository(session)
+                owners = await repository.active_owner_identities(limit=2)
+                if len(owners) > 1:
+                    return _local_auth_error_response(
+                        status_code=409,
+                        code="local_auto_login_ambiguous",
+                        message="multiple active owner profiles exist",
+                    )
+                if owners:
+                    household_id = owners[0].household_id
+                    user_id = owners[0].user_id
+                else:
+                    household_id = LOCAL_OWNER_HOUSEHOLD_ID_V1
+                    user_id = LOCAL_OWNER_USER_ID_V1
+                    try:
+                        await repository.add_household(
+                            household_id=household_id,
+                            name="Личный профиль",
+                            created_at=now,
+                        )
+                        await repository.add_user(
+                            user_id=user_id,
+                            display_name="Владелец",
+                            created_at=now,
+                        )
+                        await repository.add_membership(
+                            household_id=household_id,
+                            user_id=user_id,
+                            role=HouseholdRole.OWNER,
+                            created_at=now,
+                        )
+                        await session.flush()
+                    except IntegrityError:
+                        await session.rollback()
+                        owners = await repository.active_owner_identities(limit=2)
+                        if len(owners) > 1:
+                            return _local_auth_error_response(
+                                status_code=409,
+                                code="local_auto_login_ambiguous",
+                                message="multiple active owner profiles exist",
+                            )
+                        if not owners:
+                            return _local_auth_error_response(
+                                status_code=409,
+                                code="local_auto_profile_disabled",
+                                message="the deterministic local profile is disabled",
+                            )
+                        household_id = owners[0].household_id
+                        user_id = owners[0].user_id
+
+                await repository.add_session(
+                    session_id=session_id,
+                    household_id=household_id,
+                    user_id=user_id,
+                    token_hash=token_hash(session_token),
+                    created_at=now,
+                    expires_at=session_expires_at,
+                )
+                await session.commit()
+
+        return AuthSessionResponse(
+            session_token=session_token,
+            household_id=str(household_id),
+            user_id=str(user_id),
+            role=HouseholdRole.OWNER.value,
+            expires_at=session_expires_at.isoformat(),
         )
 
     @app.post(
@@ -4279,6 +4391,28 @@ def _auth_context_missing_response() -> JSONResponse:
             "code": "auth_context_missing",
             "message": "household context is required",
         },
+    )
+
+
+def _request_has_loopback_peer(request: Request) -> bool:
+    if request.client is None:
+        return False
+    try:
+        address = ip_address(request.client.host)
+    except ValueError:
+        return False
+    if address.is_loopback:
+        return True
+    if isinstance(address, IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped.is_loopback
+    return False
+
+
+def _local_auth_error_response(*, status_code: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        headers={"Cache-Control": "no-store"},
+        content={"code": code, "message": message},
     )
 
 
