@@ -73,6 +73,34 @@ def test_exact_search_uses_accessible_typed_place_comboboxes_and_payloads() -> N
     assert "Сначала выберите города или аэропорты из списка" in html
 
 
+def test_routes_use_shared_typed_place_lookup_and_honest_human_labels() -> None:
+    html = TestClient(create_app()).get("/").text
+
+    cache_key = _javascript_sync_function(html, "placeCacheKey")
+    lookup = _javascript_function(html, "lookupPlaceRefs")
+    label = _javascript_sync_function(html, "formatPlaceLabel")
+    combobox = _javascript_sync_function(html, "setupPlaceCombobox")
+    results = _javascript_sync_function(html, "renderResults")
+    watches = _javascript_sync_function(html, "renderWatches")
+    confirmed = _javascript_sync_function(html, "renderAgentConfirmedResults")
+
+    assert "kind|code|locale|directory_version" in html
+    assert "`${kind}|${code}|${locale}|${directoryVersion}`" in cache_key
+    assert 'fetch("/api/v1/places/lookup"' in lookup
+    assert "placeLookupBatchLimit = 64" in html
+    assert "slice(offset, offset + placeLookupBatchLimit)" in lookup
+    assert "cachePlaceOption(option)" in combobox
+    assert "Название не найдено" in label
+    assert "body.requested_route" in results
+    assert "offer.segments" in results
+    assert "watch.origin_kind" in watches
+    assert "watch.destination_kind" in watches
+    assert "candidate.ordered_legs" in confirmed
+    for renderer in (results, watches, confirmed):
+        assert "formatPlace" in renderer
+        assert "textContent" in renderer
+
+
 def test_web_ui_contains_readable_russian_without_mojibake() -> None:
     response = TestClient(create_app()).get("/")
 

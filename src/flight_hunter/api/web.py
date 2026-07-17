@@ -2104,6 +2104,7 @@ def render_index_html() -> str:
     let lastSearchPayload = null;
     let lastSearchId = null;
     let lastExternalLinks = [];
+    let lastRequestedRoute = null;
     let watchRecords = [];
     let currentAgentPlan = null;
     let currentAgentRun = null;
@@ -2116,6 +2117,10 @@ def render_index_html() -> str:
     const agentPlanStorageKey = "flight_hunter_agent_plan_id_v1";
     const agentRunStorageKey = "flight_hunter_agent_run_id_v1";
     const placeSelectionError = "Сначала выберите города или аэропорты из списка.";
+    const placeLocale = "ru";
+    const placeLookupBatchLimit = 64;
+    const placeCache = new Map();
+    let placeDirectoryVersion = null;
 
     const manualConfirmationActions = [
       {status: "confirmed", label: "Совпала"},
@@ -2359,17 +2364,6 @@ def render_index_html() -> str:
       return `risk: ${risk.level || "unknown"}`;
     }
 
-    function riskBadges(offer) {
-      const risk = offer.risk || {};
-      const level = risk.level || "unknown";
-      const flags = risk.flags || [];
-      const badges = [`<span class="badge ${riskTone(level)}">${riskLevelLabel(offer)}</span>`];
-      flags.forEach((flag) => {
-        badges.push(`<span class="badge warn">${reasonLabel(flag)}</span>`);
-      });
-      return badges.join("");
-    }
-
     function riskExplanationText(offer) {
       const risk = offer.risk || {};
       return (risk.explanations || []).join(" ");
@@ -2451,6 +2445,116 @@ def render_index_html() -> str:
       );
     }
 
+    function normalizePlaceRef(ref) {
+      const kind = text(ref?.kind);
+      const code = text(ref?.code).toUpperCase();
+      if (!["city", "airport"].includes(kind) || !/^[A-Z]{3}$/.test(code)) return null;
+      return {kind, code};
+    }
+
+    function placeCacheKey(ref, locale, directoryVersion) {
+      // Cache identity: kind|code|locale|directory_version.
+      const kind = text(ref?.kind);
+      const code = text(ref?.code).toUpperCase();
+      return `${kind}|${code}|${locale}|${directoryVersion}`;
+    }
+
+    function cachePlaceOption(option, locale = placeLocale, directoryVersion = null) {
+      const ref = normalizePlaceRef(option?.ref);
+      const version = text(directoryVersion || option?.directory_version);
+      if (!ref || !version) return null;
+      const cached = {
+        ...option,
+        ref,
+        resolved: option?.resolved !== false,
+        directory_version: version
+      };
+      placeCache.set(placeCacheKey(ref, locale, version), cached);
+      placeDirectoryVersion = version;
+      return cached;
+    }
+
+    function cachedPlaceOption(ref, directoryVersion = null, locale = placeLocale) {
+      const normalized = normalizePlaceRef(ref);
+      const version = text(directoryVersion || placeDirectoryVersion);
+      if (!normalized || !version) return null;
+      return placeCache.get(placeCacheKey(normalized, locale, version)) || null;
+    }
+
+    function formatPlaceLabel(place, includeCode = false) {
+      const ref = normalizePlaceRef(place?.ref || place);
+      const rawCode = ref?.code || text(place?.ref?.code || place?.code).toUpperCase() || "???";
+      const displayName = text(place?.display_name?.text);
+      const codeOnly = place?.display_name?.fallback_reason === "code_only"
+        || displayName.toUpperCase() === rawCode;
+      if (place?.resolved === false || !displayName || codeOnly) {
+        return `${rawCode} · Название не найдено`;
+      }
+      const flag = isoCountryFlag(place?.country_code);
+      const humanName = `${flag ? `${flag} ` : ""}${displayName}`;
+      return includeCode ? `${humanName} (${rawCode})` : humanName;
+    }
+
+    function formatPlaceRoute(origin, destination, includeCode = false) {
+      return `${formatPlaceLabel(origin, includeCode)} → ${formatPlaceLabel(destination, includeCode)}`;
+    }
+
+    function formatPlaceRouteFromCache(originRef, destinationRef, includeCode = false) {
+      const origin = cachedPlaceOption(originRef) || originRef;
+      const destination = cachedPlaceOption(destinationRef) || destinationRef;
+      return formatPlaceRoute(origin, destination, includeCode);
+    }
+
+    async function lookupPlaceRefs(refs, directoryVersion = null) {
+      const unique = new Map();
+      (refs || []).forEach((ref) => {
+        const normalized = normalizePlaceRef(ref);
+        if (normalized) unique.set(`${normalized.kind}|${normalized.code}`, normalized);
+      });
+      const requested = Array.from(unique.values());
+      const missing = requested.filter((ref) => (
+        !cachedPlaceOption(ref, directoryVersion) && !cachedPlaceOption(ref)
+      ));
+      for (let offset = 0; offset < missing.length; offset += placeLookupBatchLimit) {
+        const batch = missing.slice(offset, offset + placeLookupBatchLimit);
+        try {
+          const response = await fetch("/api/v1/places/lookup", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({locale: placeLocale, places: batch})
+          });
+          if (!response.ok) continue;
+          const body = await response.json();
+          const responseVersion = text(body.directory_version);
+          if (body.catalog_status !== "ready" || !responseVersion) continue;
+          (body.items || []).forEach((item) => {
+            cachePlaceOption(item, placeLocale, responseVersion);
+          });
+        } catch (error) {
+          // Rendering keeps the raw typed code when lookup is unavailable.
+        }
+      }
+      return requested.map((ref) => cachedPlaceOption(ref, directoryVersion)
+        || cachedPlaceOption(ref)
+        || {ref, resolved: false});
+    }
+
+    async function lookupAirportPlaces(codes, directoryVersion = null) {
+      return lookupPlaceRefs(
+        (codes || []).map((code) => (
+          typeof code === "string" ? {kind: "airport", code} : code
+        )),
+        directoryVersion
+      );
+    }
+
+    function seedRequestedRoutePlaceCache(requestedRoute) {
+      lastRequestedRoute = requestedRoute || null;
+      [requestedRoute?.origin, requestedRoute?.destination].forEach((option) => {
+        if (option) cachePlaceOption(option);
+      });
+    }
+
     function setupPlaceCombobox(field) {
       const input = document.getElementById(`${field}-place-input`);
       const canonicalCode = document.querySelector(`[name="${field}"]`);
@@ -2522,6 +2626,7 @@ def render_index_html() -> str:
         const flag = isoCountryFlag(option?.country_code);
         canonicalCode.value = code;
         canonicalKind.value = kind;
+        cachePlaceOption(option);
         input.value = `${flag ? `${flag} ` : ""}${displayName} · ${kindLabel} · ${code}`;
         input.setAttribute("aria-invalid", "false");
         status.textContent = `Выбрано: ${displayName}, ${kindLabel}, ${code}.`;
@@ -3158,6 +3263,14 @@ def render_index_html() -> str:
       return `${trip} · ${watch.passengers} пасс. · ${watch.currency} · v${watch.version} · ${scan}${paused}`;
     }
 
+    async function lookupWatchPlaces(watches) {
+      const refs = (watches || []).flatMap((watch) => [
+        {kind: watch.origin_kind, code: watch.origin},
+        {kind: watch.destination_kind, code: watch.destination}
+      ]);
+      await lookupPlaceRefs(refs);
+    }
+
     function renderWatches(watches) {
       watchRecords = watches || [];
       watchList.replaceChildren();
@@ -3169,20 +3282,27 @@ def render_index_html() -> str:
         return;
       }
       watchRecords.forEach((watch) => {
+        const originRef = {kind: watch.origin_kind, code: watch.origin};
+        const destinationRef = {kind: watch.destination_kind, code: watch.destination};
         const state = watchStatus(watch);
         const row = document.createElement("div");
         row.className = "provider-row";
         row.innerHTML = `
           <div class="row-main">
             <div class="provider-name"></div>
-            <span class="badge ${state.tone}"></span>
+            <span class="badge"></span>
           </div>
           <div class="small"></div>
           <div class="watch-actions"></div>
         `;
-        row.querySelector(".provider-name").textContent = `${watch.origin} → ${watch.destination}`;
+        row.querySelector(".provider-name").textContent = formatPlaceRouteFromCache(
+          originRef,
+          destinationRef
+        );
+        row.querySelector(".badge").classList.add(state.tone);
         row.querySelector(".badge").textContent = state.label;
-        row.querySelector(".small").textContent = watchMeta(watch);
+        row.querySelector(".small").textContent =
+          `${watch.origin} → ${watch.destination} · ${watchMeta(watch)}`;
         const actions = row.querySelector(".watch-actions");
         const pauseButton = document.createElement("button");
         pauseButton.className = "chip";
@@ -3216,7 +3336,10 @@ def render_index_html() -> str:
       appendSectionHeader(
         watchHistoryList,
         "История watch",
-        `${watch.origin} → ${watch.destination}. Snapshots не являются live-гарантией.`
+        `${formatPlaceRouteFromCache(
+          {kind: watch.origin_kind, code: watch.origin},
+          {kind: watch.destination_kind, code: watch.destination}
+        )}. Snapshots не являются live-гарантией.`
       );
       if (!snapshots || snapshots.length === 0) {
         const empty = document.createElement("div");
@@ -3243,7 +3366,9 @@ def render_index_html() -> str:
         const response = await fetch("/api/v1/watches", {headers: authHeaders()});
         if (!response.ok) throw new Error(await codedMessage(response));
         const body = await response.json();
-        renderWatches(body.watches || []);
+        const watches = body.watches || [];
+        await lookupWatchPlaces(watches);
+        renderWatches(watches);
       } catch (error) {
         watchList.replaceChildren();
         const row = document.createElement("div");
@@ -3564,12 +3689,98 @@ def render_index_html() -> str:
       }
     }
 
+    function requestedRouteOptionForCode(requestedRoute, code) {
+      const normalizedCode = text(code).toUpperCase();
+      return [requestedRoute?.origin, requestedRoute?.destination].find(
+        (option) => text(option?.ref?.code).toUpperCase() === normalizedCode
+      ) || null;
+    }
+
+    function formatRequestedRoute(requestedRoute, fallbackOrigin = null, fallbackDestination = null) {
+      const origin = requestedRoute?.origin || fallbackOrigin || {code: "???"};
+      const destination = requestedRoute?.destination || fallbackDestination || {code: "???"};
+      return formatPlaceRoute(origin, destination);
+    }
+
+    function formatConcreteSegments(segments, fallbackOrigin = null, fallbackDestination = null) {
+      const concrete = (segments || []).filter((segment) => (
+        /^[A-Z]{3}$/.test(text(segment?.origin).toUpperCase())
+        && /^[A-Z]{3}$/.test(text(segment?.destination).toUpperCase())
+      ));
+      if (concrete.length > 0) {
+        return concrete.map((segment) => formatPlaceRouteFromCache(
+          {kind: "airport", code: segment.origin},
+          {kind: "airport", code: segment.destination},
+          true
+        )).join(" · ");
+      }
+      return formatPlaceRouteFromCache(
+        {kind: "airport", code: fallbackOrigin},
+        {kind: "airport", code: fallbackDestination},
+        true
+      );
+    }
+
+    function formatExternalRoute(link, requestedRoute) {
+      const origin = requestedRouteOptionForCode(requestedRoute, link?.origin)
+        || {code: link?.origin};
+      const destination = requestedRouteOptionForCode(requestedRoute, link?.destination)
+        || {code: link?.destination};
+      return formatPlaceRoute(origin, destination);
+    }
+
+    async function lookupSearchResultPlaces(body) {
+      seedRequestedRoutePlaceCache(body?.requested_route);
+      const offers = body?.priced_offers || body?.offers || [];
+      const airportCodes = [];
+      offers.forEach((offer) => {
+        if ((offer.segments || []).length > 0) {
+          offer.segments.forEach((segment) => {
+            airportCodes.push(segment.origin, segment.destination);
+          });
+        } else {
+          airportCodes.push(offer.origin, offer.destination);
+        }
+      });
+      (body?.browser_observed_offers || []).forEach((offer) => {
+        airportCodes.push(offer.origin, offer.destination);
+      });
+      (body?.deal_candidates || []).forEach((candidate) => {
+        airportCodes.push(candidate.extracted_origin, candidate.extracted_destination);
+      });
+      await lookupAirportPlaces(airportCodes);
+    }
+
+    function appendOfferBadges(container, offer) {
+      (offer.ranking_reasons || []).forEach((reason) => {
+        const badge = document.createElement("span");
+        const tone = reason === "cached_price" || reason === "recent_price" ? "ok" : "warn";
+        badge.className = `badge ${tone}`;
+        badge.textContent = reasonLabel(reason);
+        container.append(badge);
+      });
+      const risk = offer.risk || {};
+      const level = risk.level || "unknown";
+      const levelBadge = document.createElement("span");
+      levelBadge.className = `badge ${riskTone(level)}`;
+      levelBadge.textContent = riskLevelLabel(offer);
+      container.append(levelBadge);
+      (risk.flags || []).forEach((flag) => {
+        const badge = document.createElement("span");
+        badge.className = "badge warn";
+        badge.textContent = reasonLabel(flag);
+        container.append(badge);
+      });
+    }
+
     function renderResults(body) {
       const offers = body.priced_offers || body.offers || [];
       const externalLinks = body.external_links || [];
       const observedOffers = body.browser_observed_offers || [];
       const dealCandidates = body.deal_candidates || [];
       const freshnessSummary = body.freshness_summary || {};
+      const requestedRoute = body.requested_route || lastRequestedRoute;
+      seedRequestedRoutePlaceCache(requestedRoute);
       lastSearchId = body.search_id || null;
       lastExternalLinks = externalLinks;
       resultsList.replaceChildren();
@@ -3598,31 +3809,38 @@ def render_index_html() -> str:
       offers.forEach((offer) => {
         const row = document.createElement("div");
         row.className = "result-row";
-        const caveats = (offer.ranking_reasons || []).map((reason) => {
-          const label = reasonLabel(reason);
-          const tone = reason === "cached_price" || reason === "recent_price" ? "ok" : "warn";
-          return `<span class="badge ${tone}">${label}</span>`;
-        }).join("") + riskBadges(offer);
         row.innerHTML = `
           <div>
             <div class="route"></div>
-            <div class="small"></div>
+            <div class="segment-route small"></div>
+            <div class="result-meta small"></div>
           </div>
           <div class="price"></div>
           <div>
-            <div class="caveats">${caveats}</div>
+            <div class="caveats"></div>
             <div class="risk-detail small"></div>
             <div class="result-actions">
               <button class="secondary live-check-button" type="button">Проверить live</button>
             </div>
           </div>
         `;
-        row.querySelector(".route").textContent = `${offer.origin} → ${offer.destination}`;
-        row.querySelector(".small").textContent =
+        row.querySelector(".route").textContent = formatRequestedRoute(
+          body.requested_route,
+          {kind: lastSearchPayload?.origin_kind, code: offer.origin},
+          {kind: lastSearchPayload?.destination_kind, code: offer.destination}
+        );
+        row.querySelector(".segment-route").textContent =
+          `Фактически: ${formatConcreteSegments(
+            offer.segments,
+            offer.origin,
+            offer.destination
+          )}`;
+        row.querySelector(".result-meta").textContent =
           `${offer.departure_date}${offer.return_date ? " — " + offer.return_date : ""}`
           + ` · ${offer.passengers} пасс. · ${providerLabel(offer.provider_id)}`
           + `${priceBasisLabel(offer)} · ${offer.freshness}`;
         row.querySelector(".price").textContent = offer.total_price.formatted;
+        appendOfferBadges(row.querySelector(".caveats"), offer);
         row.querySelector(".risk-detail").textContent = riskExplanationText(offer);
         row.querySelector(".live-check-button").addEventListener("click", () => runLiveCheck());
         appendManualConfirmationActions(row.querySelector(".result-actions"), pricedOfferTarget(offer));
@@ -3656,10 +3874,10 @@ def render_index_html() -> str:
             </div>
           </div>
         `;
-        row.querySelector(".route").textContent =
-          `${link.source_name}: ${link.origin} -> ${link.destination}`;
+        row.querySelector(".route").textContent = formatExternalRoute(link, requestedRoute);
         row.querySelector(".small").textContent =
-          `${link.departure_date}${link.return_date ? " — " + link.return_date : ""}`
+          `${link.source_name} · ${link.origin} → ${link.destination} · `
+          + `${link.departure_date}${link.return_date ? " — " + link.return_date : ""}`
           + ` · ${link.passengers} пасс. · ${link.notes_ru || "Проверить на внешнем сайте."}`;
         row.querySelector("a").href = link.url;
         appendManualConfirmationActions(row.querySelector(".result-actions"), externalLinkTarget(link));
@@ -3680,12 +3898,26 @@ def render_index_html() -> str:
       observedOffers.forEach((offer) => {
         const row = document.createElement("div");
         row.className = "denial-row";
+        const title = document.createElement("div");
+        title.className = "route";
+        title.textContent = formatRequestedRoute(
+          requestedRoute,
+          {kind: "airport", code: offer.origin},
+          {kind: "airport", code: offer.destination}
+        );
+        const concreteRoute = document.createElement("div");
+        concreteRoute.className = "small";
+        concreteRoute.textContent = `Фактически: ${formatPlaceRouteFromCache(
+          {kind: "airport", code: offer.origin},
+          {kind: "airport", code: offer.destination},
+          true
+        )}`;
         const details = document.createElement("div");
         details.className = "small";
         details.textContent =
           `${offer.source_name}: ${offer.total_price ? offer.total_price.formatted : "цена не найдена"}`
           + ` · confidence=${offer.confidence} · ${offer.parser_warnings.join(", ") || "без предупреждений"}`;
-        row.append(details);
+        row.append(title, concreteRoute, details);
         appendManualConfirmationActions(row, browserObservationTarget(offer));
         liveList.append(row);
       });
@@ -3707,19 +3939,43 @@ def render_index_html() -> str:
       }
     }
 
+    async function lookupLiveObservationPlaces(observation) {
+      const codes = (observation?.offers || []).flatMap((offer) => [
+        offer.origin,
+        offer.destination
+      ]);
+      await lookupAirportPlaces(codes);
+    }
+
     function renderLiveObservation(observation) {
       liveList.replaceChildren();
       const row = document.createElement("div");
-      row.className = "denial-row small";
+      row.className = "denial-row";
       const offer = (observation.offers || [])[0];
       if (!offer) {
         row.textContent = `Live: ${observation.status}`;
         liveList.append(row);
         return;
       }
-      row.textContent =
-        `Live observed · ${offer.total_price.formatted} · ${offer.origin} → ${offer.destination}`
+      const title = document.createElement("div");
+      title.className = "route";
+      title.textContent = formatRequestedRoute(
+        lastRequestedRoute,
+        {kind: "airport", code: offer.origin},
+        {kind: "airport", code: offer.destination}
+      );
+      const concreteRoute = document.createElement("div");
+      concreteRoute.className = "small";
+      concreteRoute.textContent = `Фактически: ${formatPlaceRouteFromCache(
+        {kind: "airport", code: offer.origin},
+        {kind: "airport", code: offer.destination},
+        true
+      )}`;
+      const details = document.createElement("div");
+      details.className = "small";
+      details.textContent = `Live observed · ${offer.total_price.formatted}`
         + ` · наблюдалось ${observation.observed_at}`;
+      row.append(title, concreteRoute, details);
       liveList.append(row);
     }
 
@@ -3782,11 +4038,19 @@ def render_index_html() -> str:
         const details = document.createElement("div");
         details.className = "small";
         details.textContent = `${candidate.title}: ${candidate.summary_ru}`;
+        const route = document.createElement("div");
+        route.className = "small";
+        route.textContent = candidate.extracted_origin || candidate.extracted_destination
+          ? `Маршрут: ${formatPlaceRouteFromCache(
+            {kind: "airport", code: candidate.extracted_origin},
+            {kind: "airport", code: candidate.extracted_destination},
+            true
+          )}`
+          : "Маршрут в источнике не указан.";
         const expiry = document.createElement("div");
         expiry.className = "small";
         expiry.textContent = dealCandidateExpiryLabel(candidate);
-        row.append(details);
-        row.append(expiry);
+        row.append(details, route, expiry);
         appendManualConfirmationActions(row, dealCandidateTarget(candidate));
         denialsList.append(row);
       });
@@ -4297,6 +4561,24 @@ def render_index_html() -> str:
       }
     }
 
+    async function lookupAgentResultPlaces(results) {
+      const codes = [];
+      (results?.candidates || []).forEach((candidate) => {
+        (candidate.ordered_legs || []).forEach((leg) => {
+          codes.push(leg.origin, leg.destination);
+        });
+        (candidate.segments || []).forEach((segment) => {
+          codes.push(segment.origin, segment.destination);
+        });
+      });
+      (results?.hidden_city_candidates || []).forEach((candidate) => {
+        codes.push(candidate.desired_airport, candidate.ticketed_destination);
+        [...(candidate.flown_segments || []), ...(candidate.skipped_segments || [])]
+          .forEach((segment) => codes.push(segment.origin, segment.destination));
+      });
+      await lookupAirportPlaces(codes);
+    }
+
     function renderAgentConfirmedResults(results) {
       const region = document.getElementById("agent-confirmed-results");
       const list = document.getElementById("agent-confirmed-results-list");
@@ -4314,20 +4596,33 @@ def render_index_html() -> str:
         card.className = "agent-hidden-city-result";
         const title = document.createElement("strong");
         const amount = candidate.total_amount || {};
-        title.textContent =
-          `${index + 1}. ${formatMinorAmount(amount.minor_units, amount.currency)}`;
+        const orderedRoute = (candidate.ordered_legs || []).map((leg) => (
+          formatPlaceRouteFromCache(
+            {kind: "airport", code: leg.origin},
+            {kind: "airport", code: leg.destination},
+            true
+          )
+        )).join(" · ");
+        title.textContent = `${index + 1}. ${orderedRoute || "Маршрут не указан"}`;
         const facts = document.createElement("div");
         facts.className = "small";
         const sources = (candidate.sources || []).join(", ") || "источник неизвестен";
         facts.textContent =
-          `${candidate.passengers} пасс. · CONFIRMED`
+          `${formatMinorAmount(amount.minor_units, amount.currency)}`
+          + ` · ${candidate.passengers} пасс. · CONFIRMED`
           + ` · ${sources}`
           + ` · наблюдалось ${candidate.observed_at || "неизвестно"}`;
         const route = document.createElement("div");
         route.className = "small";
-        route.textContent = (candidate.ordered_legs || [])
-          .map((leg) => `${leg.origin}→${leg.destination}`)
-          .join(" · ") || "Маршрут подтверждён evidence.";
+        route.textContent = (candidate.segments || []).length > 0
+          ? `Сегменты: ${(candidate.segments || []).map((segment) => (
+            formatPlaceRouteFromCache(
+              {kind: "airport", code: segment.origin},
+              {kind: "airport", code: segment.destination},
+              true
+            )
+          )).join(" · ")}`
+          : "Сегменты отдельно не указаны.";
         const boundaries = document.createElement("div");
         boundaries.className = "small";
         boundaries.textContent = (candidate.ticket_boundaries || []).length > 1
@@ -4369,9 +4664,15 @@ def render_index_html() -> str:
         const card = document.createElement("article");
         card.className = "agent-hidden-city-result";
         const title = document.createElement("strong");
+        const desiredPlace = cachedPlaceOption({kind: "airport", code: candidate.desired_airport})
+          || {kind: "airport", code: candidate.desired_airport};
+        const ticketedPlace = cachedPlaceOption({
+          kind: "airport",
+          code: candidate.ticketed_destination
+        }) || {kind: "airport", code: candidate.ticketed_destination};
         title.textContent =
-          `Выйти в ${candidate.desired_airport}; билет оформлен до `
-          + `${candidate.ticketed_destination}`;
+          `Выйти в ${formatPlaceLabel(desiredPlace, true)}; билет оформлен до `
+          + `${formatPlaceLabel(ticketedPlace, true)}`;
         const facts = document.createElement("div");
         facts.className = "small";
         const amount = candidate.total_amount || {};
@@ -4385,10 +4686,18 @@ def render_index_html() -> str:
         const route = document.createElement("div");
         route.className = "small";
         const flown = (candidate.flown_segments || [])
-          .map((segment) => `${segment.origin}→${segment.destination}`)
+          .map((segment) => formatPlaceRouteFromCache(
+            {kind: "airport", code: segment.origin},
+            {kind: "airport", code: segment.destination},
+            true
+          ))
           .join(" · ");
         const skipped = (candidate.skipped_segments || [])
-          .map((segment) => `${segment.origin}→${segment.destination}`)
+          .map((segment) => formatPlaceRouteFromCache(
+            {kind: "airport", code: segment.origin},
+            {kind: "airport", code: segment.destination},
+            true
+          ))
           .join(" · ");
         route.textContent = `Летим: ${flown || "неизвестно"} · пропускаем: ${skipped || "неизвестно"}`;
         const warnings = document.createElement("ul");
@@ -4426,6 +4735,8 @@ def render_index_html() -> str:
         throw new Error(message);
       }
       const results = await response.json();
+      if (!agentSessionIsCurrent(sessionGeneration)) return;
+      await lookupAgentResultPlaces(results);
       if (!agentSessionIsCurrent(sessionGeneration)) return;
       renderAgentRunResults(results);
     }
@@ -4903,7 +5214,9 @@ def render_index_html() -> str:
           body: JSON.stringify(payload)
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        renderResults(await response.json());
+        const body = await response.json();
+        await lookupSearchResultPlaces(body);
+        renderResults(body);
         statusLine.textContent = "готово";
       } catch (error) {
         resultsList.replaceChildren();
@@ -4959,7 +5272,9 @@ def render_index_html() -> str:
           {headers: authHeaders()}
         );
         if (!observationResponse.ok) throw new Error(`result HTTP ${observationResponse.status}`);
-        renderLiveObservation(await observationResponse.json());
+        const observation = await observationResponse.json();
+        await lookupLiveObservationPlaces(observation);
+        renderLiveObservation(observation);
         statusLine.textContent = "live observed";
       } catch (error) {
         liveList.replaceChildren();
@@ -5070,7 +5385,12 @@ def render_index_html() -> str:
         if (!response.ok) throw new Error(await codedMessage(response));
         const body = await response.json();
         denialsList.replaceChildren();
-        renderDealCandidates(body.candidates || []);
+        const candidates = body.candidates || [];
+        await lookupAirportPlaces(candidates.flatMap((candidate) => [
+          candidate.extracted_origin,
+          candidate.extracted_destination
+        ]));
+        renderDealCandidates(candidates);
         statusLine.textContent = "deal candidates ready";
       } catch (error) {
         denialsList.replaceChildren();
