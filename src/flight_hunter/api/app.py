@@ -296,6 +296,19 @@ class BootstrapInvitationResponse(BaseModel):
     expires_at: str
 
 
+class CreateInvitationRequestBody(BaseModel):
+    recipient_label: str | None = Field(default=None, max_length=160)
+    ttl_hours: int = Field(default=168, ge=1, le=720)
+
+
+class CreateInvitationResponse(BaseModel):
+    invitation_id: str
+    household_id: str
+    invitation_code: str
+    role: str
+    expires_at: str
+
+
 class AcceptInvitationRequestBody(BaseModel):
     invitation_code: str = Field(min_length=16, max_length=200)
     display_name: str = Field(min_length=1, max_length=160)
@@ -1803,6 +1816,51 @@ def create_app(
         if auth_session is None:
             return _auth_context_missing_response()
         return _auth_me_response(auth_session)
+
+    @app.post(
+        "/api/v1/auth/invitations",
+        response_model=CreateInvitationResponse,
+        status_code=201,
+    )
+    async def create_household_invitation(
+        body: CreateInvitationRequestBody,
+        authorization_header: str | None = Header(default=None, alias="Authorization"),
+    ) -> CreateInvitationResponse | JSONResponse:
+        """Create a single-use member invitation for the authenticated owner's household."""
+        now = datetime.now(UTC)
+        async with session_factory() as session:
+            auth_session = await _auth_session_from_authorization(session, authorization_header)
+            if auth_session is None:
+                return _auth_context_missing_response()
+            identity = IdentityRepository(session)
+            if HouseholdRole(auth_session.role) is not HouseholdRole.OWNER:
+                return _coded_error_response(
+                    status_code=403,
+                    code="invitation_owner_required",
+                    message="only the household owner can create invitations",
+                )
+            invitation_id = uuid4()
+            invitation_code = new_secret_token()
+            expires_at = now + timedelta(hours=body.ttl_hours)
+            await identity.add_invitation(
+                invitation_id=invitation_id,
+                household_id=auth_session.household_id,
+                role=HouseholdRole.MEMBER,
+                code_hash=token_hash(invitation_code),
+                recipient_label=body.recipient_label.strip()
+                if body.recipient_label and body.recipient_label.strip()
+                else None,
+                created_at=now,
+                expires_at=expires_at,
+            )
+            await session.commit()
+        return CreateInvitationResponse(
+            invitation_id=str(invitation_id),
+            household_id=str(auth_session.household_id),
+            invitation_code=invitation_code,
+            role=HouseholdRole.MEMBER.value,
+            expires_at=expires_at.isoformat(),
+        )
 
     @app.delete("/api/v1/account", response_model=AccountDeactivationResponse)
     async def delete_account(
