@@ -997,6 +997,15 @@ def render_index_html() -> str:
       width: 100%;
     }
 
+    #invitation-login-form {
+      display: grid;
+      gap: 10px;
+    }
+
+    #invitation-login-form[hidden] {
+      display: none;
+    }
+
     .auth-state {
       grid-column: 1 / -1;
       min-height: 20px;
@@ -2179,7 +2188,7 @@ def render_index_html() -> str:
         <a href="#watches-heading">Отслеживания</a>
       </nav>
       <div class="topbar-actions">
-        <div class="status-line" id="status-line">локально · цены с отметкой свежести</div>
+        <div class="status-line" id="status-line">цены с отметкой свежести</div>
         <details class="account-menu">
           <summary aria-controls="account-popover">
             <span class="account-icon" aria-hidden="true">
@@ -2189,17 +2198,33 @@ def render_index_html() -> str:
                   stroke-width="1.8" stroke-linecap="round"/>
               </svg>
             </span>
-            <span id="account-label">Локальный профиль</span>
+            <span id="account-label">Войти</span>
             <span class="account-chevron" aria-hidden="true">⌄</span>
           </summary>
           <div class="account-popover" id="account-popover">
             <div class="account-copy">
-              <h2 id="auth-heading">Локальный профиль</h2>
-              <p>Планы, история и отслеживания сохраняются автоматически на этом компьютере.</p>
+              <h2 id="auth-heading">Вход в семейный профиль</h2>
+              <p>Введите имя и одноразовый код приглашения. Ваши данные сохраняются в семейном профиле на сервере.</p>
             </div>
             <div class="auth-controls">
-              <div class="auth-state" id="auth-state" role="status" aria-live="polite">Подключаем профиль…</div>
-              <button class="secondary" type="button" id="auth-reconnect-button">Переподключить профиль</button>
+              <div class="auth-state" id="auth-state" role="status" aria-live="polite">Требуется вход.</div>
+              <form id="invitation-login-form" hidden>
+                <label for="invitation-name">Ваше имя</label>
+                <input id="invitation-name" type="text" maxlength="160" autocomplete="name" required>
+                <label for="invitation-code">Код приглашения</label>
+                <input id="invitation-code" type="password" maxlength="200" autocomplete="one-time-code" required>
+                <button class="primary" type="submit" id="invitation-login-submit">Войти</button>
+              </form>
+              <section id="invitation-admin-panel" hidden>
+                <h3>Пригласить члена семьи</h3>
+                <form id="invitation-create-form">
+                  <label for="invitation-recipient">Nom du membre (facultatif)</label>
+                  <input id="invitation-recipient" type="text" maxlength="160" autocomplete="off">
+                  <button class="secondary" type="submit" id="invitation-create-submit">Créer un code d’invitation</button>
+                </form>
+                <div id="invitation-created-result" class="auth-state" role="status" aria-live="polite"></div>
+              </section>
+              <button class="secondary" type="button" id="auth-reconnect-button" hidden>Выйти / сменить профиль</button>
             </div>
           </div>
         </details>
@@ -2510,6 +2535,13 @@ def render_index_html() -> str:
     const agentActionList = document.querySelector("#agent-action-list");
     const authState = document.querySelector("#auth-state");
     const authReconnectButton = document.querySelector("#auth-reconnect-button");
+    const invitationLoginForm = document.querySelector("#invitation-login-form");
+    const invitationNameInput = document.querySelector("#invitation-name");
+    const invitationCodeInput = document.querySelector("#invitation-code");
+    const invitationAdminPanel = document.querySelector("#invitation-admin-panel");
+    const invitationCreateForm = document.querySelector("#invitation-create-form");
+    const invitationRecipientInput = document.querySelector("#invitation-recipient");
+    const invitationCreatedResult = document.querySelector("#invitation-created-result");
     const accountMenu = document.querySelector(".account-menu");
     const accountLabel = document.querySelector("#account-label");
     let browserSources = [];
@@ -2527,7 +2559,6 @@ def render_index_html() -> str:
     let agentEditMode = false;
     let agentSessionGeneration = 0;
     let pendingAgentChat = null;
-    let localSessionPromise = null;
     let agentVisibleResultCount = agentResultPageSize;
     let agentVisibleResultRunId = null;
     const sessionTokenKey = "flight_hunter_session_token";
@@ -2601,12 +2632,20 @@ def render_index_html() -> str:
         || "Профиль";
     }
 
+    function updateInvitationAdminPanel(role) {
+      invitationAdminPanel.hidden = role !== "owner";
+      if (role !== "owner") invitationCreatedResult.textContent = "";
+    }
+
     function storeSession(session) {
       clearAgentSessionState();
       window.localStorage.setItem(sessionTokenKey, session.session_token);
-      accountLabel.textContent = "Локальный профиль";
-      authState.textContent = `Готово · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
+      accountLabel.textContent = "Семейный профиль";
+      authState.textContent = `Вход выполнен · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
+      invitationLoginForm.hidden = true;
+      authReconnectButton.hidden = false;
       authReconnectButton.disabled = false;
+      updateInvitationAdminPanel(session.role);
       accountMenu.open = false;
     }
 
@@ -2680,38 +2719,13 @@ def render_index_html() -> str:
 
     async function ensureLocalSession() {
       if (sessionToken()) return true;
-      if (localSessionPromise) return localSessionPromise;
-      const requestGeneration = agentSessionGeneration;
-      authState.textContent = "Подключаем профиль…";
-      authReconnectButton.disabled = true;
-      const pending = (async () => {
-        try {
-          const response = await fetch("/api/v1/auth/local-session", {method: "POST"});
-          if (!response.ok) throw new Error(await codedMessage(response));
-          const session = await response.json();
-          if (requestGeneration !== agentSessionGeneration || sessionToken()) {
-            return Boolean(sessionToken());
-          }
-          storeSession(session);
-          statusLine.textContent = "локальный профиль готов";
-          return true;
-        } catch (error) {
-          if (requestGeneration === agentSessionGeneration && !sessionToken()) {
-            authState.textContent = `Профиль временно недоступен: ${error.message}`;
-            statusLine.textContent = "локальный профиль недоступен";
-          }
-          return false;
-        }
-      })();
-      localSessionPromise = pending;
-      try {
-        return await pending;
-      } finally {
-        if (localSessionPromise === pending) {
-          localSessionPromise = null;
-          authReconnectButton.disabled = false;
-        }
-      }
+
+      accountMenu.open = true;
+      invitationLoginForm.hidden = false;
+      authReconnectButton.hidden = true;
+      authState.textContent = "Введите имя и одноразовый код приглашения.";
+      statusLine.textContent = "требуется вход";
+      return false;
     }
 
     async function refreshSessionState() {
@@ -2731,9 +2745,12 @@ def render_index_html() -> str:
         if (!response.ok) throw new Error(await codedMessage(response));
         const session = await response.json();
         if (!sessionIdentityIsCurrent(token, sessionGeneration)) return false;
-        accountLabel.textContent = "Локальный профиль";
-        authState.textContent = `Готово · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
+        accountLabel.textContent = "Семейный профиль";
+        authState.textContent = `Вход выполнен · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
+        invitationLoginForm.hidden = true;
+        authReconnectButton.hidden = false;
         authReconnectButton.disabled = false;
+        updateInvitationAdminPanel(session.role);
         return true;
       } catch (error) {
         if (!sessionIdentityIsCurrent(token, sessionGeneration)) return false;
@@ -2745,17 +2762,18 @@ def render_index_html() -> str:
 
     async function reconnectLocalSession() {
       authReconnectButton.disabled = true;
-      localSessionPromise = null;
       window.localStorage.removeItem(sessionTokenKey);
       clearAgentSessionState();
-      authState.textContent = "Переподключаем профиль…";
-      try {
-        const ready = await ensureLocalSession();
-        if (ready) await loadSessionBoundData();
-        return ready;
-      } finally {
-        authReconnectButton.disabled = false;
-      }
+      invitationLoginForm.reset();
+      invitationLoginForm.hidden = false;
+      authReconnectButton.hidden = true;
+      invitationAdminPanel.hidden = true;
+      invitationCreatedResult.textContent = "";
+      accountMenu.open = true;
+      authState.textContent = "Введите одноразовый код приглашения для входа.";
+      statusLine.textContent = "требуется вход";
+      authReconnectButton.disabled = false;
+      return false;
     }
 
     function text(value) {
@@ -6289,6 +6307,72 @@ def render_index_html() -> str:
     document.getElementById("agent-run-cancel").addEventListener("click", cancelAgentRun);
     document.getElementById("agent-plan-edit").addEventListener("click", beginAgentPlanEdit);
     authReconnectButton.addEventListener("click", reconnectLocalSession);
+    invitationLoginForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const submitButton = document.getElementById("invitation-login-submit");
+      const displayName = invitationNameInput.value.trim();
+      const invitationCode = invitationCodeInput.value.trim();
+      if (!displayName || !invitationCode) return;
+
+      submitButton.disabled = true;
+      authState.textContent = "Проверяем код приглашения…";
+      try {
+        const response = await fetch("/api/v1/auth/accept-invitation", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            display_name: displayName,
+            invitation_code: invitationCode
+          })
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+
+        const session = await response.json();
+        if (!session.session_token || !session.household_id || !session.role) {
+          throw new Error("Ответ сервера авторизации некорректен");
+        }
+        storeSession(session);
+        invitationLoginForm.reset();
+        statusLine.textContent = "профиль подключен";
+        try {
+          await loadSessionBoundData();
+        } catch (loadError) {
+          authState.textContent = `Вход выполнен, но часть данных не загрузилась: ${loadError.message}`;
+        }
+      } catch (error) {
+        invitationLoginForm.hidden = false;
+        authReconnectButton.hidden = true;
+        authState.textContent = `Не удалось войти: ${error.message}`;
+      } finally {
+        submitButton.disabled = false;
+      }
+    });
+    invitationCreateForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const submitButton = document.getElementById("invitation-create-submit");
+      submitButton.disabled = true;
+      invitationCreatedResult.textContent = "Création de l’invitation…";
+      try {
+        const response = await fetch("/api/v1/auth/invitations", {
+          method: "POST",
+          headers: authHeaders({"Content-Type": "application/json"}),
+          body: JSON.stringify({
+            recipient_label: invitationRecipientInput.value.trim() || null,
+            ttl_hours: 168
+          })
+        });
+        if (!response.ok) throw new Error(await codedMessage(response));
+        const invitation = await response.json();
+        invitationCreatedResult.textContent =
+          `Code à usage unique (valable jusqu’au ${new Date(invitation.expires_at).toLocaleString()}): ${invitation.invitation_code}. Copiez-le et transmettez-le en privé.`;
+        invitationRecipientInput.value = "";
+      } catch (error) {
+        invitationCreatedResult.textContent = `Impossible de créer l’invitation : ${error.message}`;
+      } finally {
+        submitButton.disabled = false;
+      }
+    });
+
     personalObserveButton.addEventListener("click", runPersonalObservation);
     dealDiscoveryButton.addEventListener("click", runDealDiscovery);
     createWatchButton.addEventListener("click", createWatchFromSearch);
