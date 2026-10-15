@@ -1,6 +1,8 @@
+
 from __future__ import annotations
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -18,8 +20,16 @@ if config.config_file_name is not None:
 target_metadata = metadata
 
 
+def get_database_url() -> str:
+    """Use the database URL configured by Docker, falling back to alembic.ini."""
+    return os.environ.get(
+        "DATABASE_URL",
+        config.get_main_option("sqlalchemy.url"),
+    )
+
+
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
+    url = get_database_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -45,8 +55,7 @@ async def run_async_migrations(connectable: AsyncEngine) -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = create_database_engine(config.get_main_option("sqlalchemy.url"))
-
+    connectable = create_database_engine(get_database_url())
     asyncio.run(run_async_migrations(connectable))
 
 
