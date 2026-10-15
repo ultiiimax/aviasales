@@ -7,7 +7,7 @@ services:
     stop_grace_period: 30s
     command: >
       sh -c "uv run alembic upgrade head &&
-      uv run uvicorn flight_hunter.api.app:app --host 0.0.0.0 --port 8000"
+      uv run uvicorn flight_hunter.api.app:app --host 127.0.0.1 --port 8000"
     environment:
       DATABASE_URL: sqlite+aiosqlite:////data/flight_hunter.db
       APP_SECRET_KEY: "${APP_SECRET_KEY:?run 'uv run flight-hunter-init-local' first}"
@@ -26,8 +26,7 @@ services:
       CRAWL4AI_BASE_URL: "${CRAWL4AI_BASE_URL:-http://crawl4ai:11235}"
       CRAWL4AI_API_TOKEN: "${CRAWL4AI_API_TOKEN:-}"
       CRAWL4AI_TIMEOUT_SECONDS: "${CRAWL4AI_TIMEOUT_SECONDS:-30}"
-    ports:
-      - "127.0.0.1:8000:8000"
+      AUTH_LOCAL_AUTO_LOGIN: "true"
     volumes:
       - flight_hunter_data:/data
     healthcheck:
@@ -46,6 +45,7 @@ services:
   worker:
     build:
       context: .
+    network_mode: host
     init: true
     restart: unless-stopped
     stop_grace_period: 45s
