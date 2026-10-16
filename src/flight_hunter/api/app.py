@@ -570,7 +570,7 @@ class PlaceRefRequest(BaseModel):
 
 
 class PlaceLookupRequestBody(BaseModel):
-    locale: str = Field(default="ru", min_length=2, max_length=16)
+    locale: str = Field(default="fr", min_length=2, max_length=16)
     places: list[PlaceRefRequest] = Field(default_factory=list, max_length=64)
 
     @model_validator(mode="after")
@@ -1627,12 +1627,12 @@ def create_app(
                     try:
                         await repository.add_household(
                             household_id=household_id,
-                            name="Личный профиль",
+                            name="Profil personnel",
                             created_at=now,
                         )
                         await repository.add_user(
                             user_id=user_id,
-                            display_name="Владелец",
+                            display_name="Propriétaire",
                             created_at=now,
                         )
                         await repository.add_membership(
