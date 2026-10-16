@@ -5,14 +5,14 @@ from __future__ import annotations
 
 def render_index_html() -> str:
     return """<!doctype html>
-<html lang="ru">
+<html lang="fr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Flight Hunter</title>
   <meta name="theme-color" content="#155eef">
   <link rel="manifest" href="/manifest.webmanifest">
-  <meta name="description" content="Flight Hunter: семейный поиск авиабилетов с честной свежестью цен.">
+  <meta name="description" content="Flight Hunter: recherche familiale de billets d’avion avec des prix dont la fraîcheur est indiquée.">
   <link rel="icon" href='data:image/svg+xml,
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
       <rect width="64" height="64" rx="12" fill="%230b1f3a"/>
@@ -2167,7 +2167,7 @@ def render_index_html() -> str:
   </style>
 </head>
 <body>
-  <a class="skip-link" href="#main-search">Перейти к поиску</a>
+  <a class="skip-link" href="#main-search">Aller à la recherche</a>
   <main class="shell">
     <header class="topbar">
       <div class="brand">
@@ -2179,16 +2179,16 @@ def render_index_html() -> str:
         </span>
         <div class="brand-title">
           <strong>Flight Hunter</strong>
-          <span>личный помощник по дешёвым маршрутам</span>
+          <span>Votre assistant pour trouver des itinéraires à petit prix</span>
         </div>
       </div>
-      <nav class="topnav" aria-label="Основные разделы">
-        <a href="#main-search">Поиск</a>
-        <a href="#results-heading">Результаты</a>
-        <a href="#watches-heading">Отслеживания</a>
+      <nav class="topnav" aria-label="Sections principales">
+        <a href="#main-search">Recherche</a>
+        <a href="#results-heading">Résultats</a>
+        <a href="#watches-heading">Suivi des prix</a>
       </nav>
       <div class="topbar-actions">
-        <div class="status-line" id="status-line">цены с отметкой свежести</div>
+        <div class="status-line" id="status-line">Prix avec indication de fraîcheur</div>
         <details class="account-menu">
           <summary aria-controls="account-popover">
             <span class="account-icon" aria-hidden="true">
@@ -2198,25 +2198,25 @@ def render_index_html() -> str:
                   stroke-width="1.8" stroke-linecap="round"/>
               </svg>
             </span>
-            <span id="account-label">Войти</span>
+            <span id="account-label">Se connecter</span>
             <span class="account-chevron" aria-hidden="true">⌄</span>
           </summary>
           <div class="account-popover" id="account-popover">
             <div class="account-copy">
-              <h2 id="auth-heading">Вход в семейный профиль</h2>
-              <p>Введите имя и одноразовый код приглашения. Ваши данные сохраняются в семейном профиле на сервере.</p>
+              <h2 id="auth-heading">Connexion au profil familial</h2>
+              <p>Saisissez votre nom et le code d’invitation à usage unique. Vos données sont enregistrées sur le serveur dans le profil familial.</p>
             </div>
             <div class="auth-controls">
-              <div class="auth-state" id="auth-state" role="status" aria-live="polite">Требуется вход.</div>
+              <div class="auth-state" id="auth-state" role="status" aria-live="polite">Connexion requise.</div>
               <form id="invitation-login-form" hidden>
-                <label for="invitation-name">Ваше имя</label>
+                <label for="invitation-name">Votre nom</label>
                 <input id="invitation-name" type="text" maxlength="160" autocomplete="name" required>
-                <label for="invitation-code">Код приглашения</label>
+                <label for="invitation-code">Code d’invitation</label>
                 <input id="invitation-code" type="password" maxlength="200" autocomplete="one-time-code" required>
-                <button class="primary" type="submit" id="invitation-login-submit">Войти</button>
+                <button class="primary" type="submit" id="invitation-login-submit">Se connecter</button>
               </form>
               <section id="invitation-admin-panel" hidden>
-                <h3>Пригласить члена семьи</h3>
+                <h3>Inviter un membre de la famille</h3>
                 <form id="invitation-create-form">
                   <label for="invitation-recipient">Nom du membre (facultatif)</label>
                   <input id="invitation-recipient" type="text" maxlength="160" autocomplete="off">
@@ -2224,7 +2224,7 @@ def render_index_html() -> str:
                 </form>
                 <div id="invitation-created-result" class="auth-state" role="status" aria-live="polite"></div>
               </section>
-              <button class="secondary" type="button" id="auth-reconnect-button" hidden>Выйти / сменить профиль</button>
+              <button class="secondary" type="button" id="auth-reconnect-button" hidden>Déconnecter / changer de profil</button>
             </div>
           </div>
         </details>
@@ -2233,125 +2233,125 @@ def render_index_html() -> str:
 
     <section class="agent-cockpit hero-search" id="main-search" aria-labelledby="assistant-heading">
       <div class="hero-copy">
-        <p class="eyebrow">Умный поиск маршрута</p>
-        <h1 id="assistant-heading">Куда летим?</h1>
-        <p>Опишите поездку обычными словами. Если маршрута и дат достаточно, агент сразу проверит живые варианты — без второго подтверждения.</p>
+        <p class="eyebrow">Recherche intelligente d’itinéraire</p>
+        <h1 id="assistant-heading">Où souhaitez-vous partir ?</h1>
+        <p>Décrivez votre voyage en langage naturel. Si l’itinéraire et les dates sont suffisamment précis, l’agent vérifiera immédiatement les offres en temps réel, sans seconde confirmation.</p>
       </div>
       <div class="hero-card">
         <div class="assistant-body">
-          <div class="quick-actions" id="preset-list" aria-label="Сценарии ИИ">
-            <button class="chip" type="button" data-preset="flexible_dates">Даты ±3 дня</button>
-            <button class="chip" type="button" data-preset="nearby_airports">Аэропорты рядом</button>
-            <button class="chip" type="button" data-preset="buy_timing">Когда покупать</button>
+          <div class="quick-actions" id="preset-list" aria-label="Scénarios de l’IA">
+            <button class="chip" type="button" data-preset="flexible_dates">Dates ±3 jours</button>
+            <button class="chip" type="button" data-preset="nearby_airports">Aéroports à proximité</button>
+            <button class="chip" type="button" data-preset="buy_timing">Quand acheter ?</button>
           </div>
           <details class="technical-details">
             <summary>
-              <span>Как работает поиск</span>
-              <span class="badge ok" id="agent-mode">локальный агент</span>
+              <span>Comment fonctionne la recherche</span>
+              <span class="badge ok" id="agent-mode">Agent local</span>
             </summary>
-            <div class="runtime-strip" id="runtime-strip" aria-label="Технические параметры агента">
+            <div class="runtime-strip" id="runtime-strip" aria-label="Paramètres techniques de l’agent">
               <div class="runtime-node">
-                <span>Режим</span>
-                <strong id="agent-runtime">локальный</strong>
+                <span>Mode</span>
+                <strong id="agent-runtime">Local</strong>
               </div>
               <div class="runtime-node">
-                <span>План</span>
-                <strong id="agent-loop">запускается из полного запроса</strong>
+                <span>Plan</span>
+                <strong id="agent-loop">Démarré à partir d’une demande complète</strong>
               </div>
               <div class="runtime-node">
-                <span>Актуальные цены</span>
-                <strong id="agent-live-policy">сразу после отправки запроса</strong>
+                <span>Prix en temps réel</span>
+                <strong id="agent-live-policy">Dès l’envoi de la demande</strong>
               </div>
               <div class="runtime-node">
-                <span>Данные</span>
-                <strong id="agent-edge-ready">хранятся локально</strong>
+                <span>Données</span>
+                <strong id="agent-edge-ready">Stockées localement</strong>
               </div>
             </div>
           </details>
           <div class="chat-log" id="chat-log" aria-live="polite">
-            <div class="message bot">Напишите откуда, куда и когда. Если чего-то критичного не хватает, я задам один короткий вопрос.</div>
+            <div class="message bot">Indiquez d’où vous partez, où vous allez et quand. S’il manque une information essentielle, je vous poserai une courte question.</div>
           </div>
           <div class="agent-sidecars" id="decision-rail">
             <div>
-              <div class="fineprint">Варианты аэропортов</div>
+              <div class="fineprint">Options d’aéroports</div>
               <div class="choice-list" id="airport-choice-list"></div>
             </div>
             <div>
-              <div class="fineprint">Действия агента</div>
+              <div class="fineprint">Actions de l’agent</div>
               <div class="action-list" id="agent-action-list"></div>
             </div>
           </div>
           <section class="agent-plan-card" id="agent-plan-card" aria-labelledby="agent-plan-heading" hidden>
             <div class="agent-plan-head">
               <div>
-              <h3 id="agent-plan-heading">План поиска</h3>
-              <div id="agent-plan-status" role="status" aria-live="polite">План не создан</div>
+              <h3 id="agent-plan-heading">Plan de recherche</h3>
+              <div id="agent-plan-status" role="status" aria-live="polite">Aucun plan créé</div>
               </div>
             </div>
             <div class="agent-progress-shell">
               <div class="agent-stage-scroll">
-                <ol class="agent-stage-track" id="agent-stage-track" aria-label="Ход поиска">
-                  <li class="agent-stage" data-agent-stage="0"><span class="agent-stage-dot">1</span><span>Понимаю маршрут</span></li>
-                  <li class="agent-stage" data-agent-stage="1"><span class="agent-stage-dot">2</span><span>Проверяю даты и аэропорты</span></li>
-                  <li class="agent-stage" data-agent-stage="2"><span class="agent-stage-dot">3</span><span>Ищу живые варианты</span></li>
-                  <li class="agent-stage" data-agent-stage="3"><span class="agent-stage-dot">4</span><span>Сравниваю маршруты</span></li>
-                  <li class="agent-stage" data-agent-stage="4"><span class="agent-stage-dot">5</span><span>Готово</span></li>
+                <ol class="agent-stage-track" id="agent-stage-track" aria-label="Étapes de recherche">
+                  <li class="agent-stage" data-agent-stage="0"><span class="agent-stage-dot">1</span><span>Analyse de l’itinéraire</span></li>
+                  <li class="agent-stage" data-agent-stage="1"><span class="agent-stage-dot">2</span><span>Vérification des dates et des aéroports</span></li>
+                  <li class="agent-stage" data-agent-stage="2"><span class="agent-stage-dot">3</span><span>Recherche des offres en temps réel</span></li>
+                  <li class="agent-stage" data-agent-stage="3"><span class="agent-stage-dot">4</span><span>Comparaison des itinéraires</span></li>
+                  <li class="agent-stage" data-agent-stage="4"><span class="agent-stage-dot">5</span><span>Terminé</span></li>
                 </ol>
               </div>
-              <div id="agent-run-progress" role="status" aria-live="polite">Готов принять маршрут.</div>
+              <div id="agent-run-progress" role="status" aria-live="polite">Prêt à recevoir votre itinéraire.</div>
             </div>
-            <button class="secondary" type="button" id="agent-run-cancel" disabled hidden>Остановить поиск</button>
+            <button class="secondary" type="button" id="agent-run-cancel" disabled hidden>Arrêter la recherche</button>
             <details class="agent-plan-details">
-              <summary>Детали и ручное управление</summary>
+              <summary>Détails et commandes manuelles</summary>
               <div class="agent-plan-details-body">
-                <div class="agent-run-meta" id="agent-run-meta">Запуск ещё не создан.</div>
+                <div class="agent-run-meta" id="agent-run-meta">Aucune recherche n’a encore été lancée.</div>
                 <dl class="agent-plan-grid">
-                  <div><dt>Ревизия</dt><dd id="agent-plan-revision">Неизвестно</dd></div>
-                  <div><dt>Замороженная область</dt><dd id="agent-plan-scope">Неизвестно</dd></div>
-                  <div><dt>Даты</dt><dd id="agent-plan-date-mode">Неизвестно</dd></div>
-                  <div><dt>Пассажиры</dt><dd id="agent-plan-passengers">Неизвестно</dd></div>
-                  <div><dt>Покрытие</dt><dd id="agent-plan-coverage">Неизвестно</dd></div>
-                  <div><dt>Стратегии</dt><dd id="agent-plan-strategies">Неизвестно</dd></div>
-                  <div><dt>Hidden-city</dt><dd id="agent-plan-hidden-city">Неизвестно</dd></div>
-                  <div><dt>Оценка</dt><dd id="agent-plan-estimate">Неизвестно</dd></div>
-                  <div><dt>Лимит провайдера</dt><dd id="agent-plan-rpm">Неизвестно</dd></div>
-                  <div><dt>Дедлайн</dt><dd id="agent-plan-deadline">Неизвестно</dd></div>
-                  <div><dt>Источник</dt><dd id="agent-plan-source">Неизвестно</dd></div>
-                  <div><dt>Истекает</dt><dd id="agent-plan-expiry">Неизвестно</dd></div>
+                  <div><dt>Version</dt><dd id="agent-plan-revision">Inconnu</dd></div>
+                  <div><dt>Périmètre figé</dt><dd id="agent-plan-scope">Inconnu</dd></div>
+                  <div><dt>Dates</dt><dd id="agent-plan-date-mode">Inconnu</dd></div>
+                  <div><dt>Passagers</dt><dd id="agent-plan-passengers">Inconnu</dd></div>
+                  <div><dt>Couverture</dt><dd id="agent-plan-coverage">Inconnu</dd></div>
+                  <div><dt>Stratégies</dt><dd id="agent-plan-strategies">Inconnu</dd></div>
+                  <div><dt>Hidden-city</dt><dd id="agent-plan-hidden-city">Inconnu</dd></div>
+                  <div><dt>Estimation</dt><dd id="agent-plan-estimate">Inconnu</dd></div>
+                  <div><dt>Limite du fournisseur</dt><dd id="agent-plan-rpm">Inconnu</dd></div>
+                  <div><dt>Échéance</dt><dd id="agent-plan-deadline">Inconnu</dd></div>
+                  <div><dt>Source</dt><dd id="agent-plan-source">Inconnu</dd></div>
+                  <div><dt>Expire le</dt><dd id="agent-plan-expiry">Inconnu</dd></div>
                 </dl>
                 <section class="agent-hidden-city-warning" id="agent-hidden-city-warning" hidden>
-                  <strong>Отдельное подтверждение hidden-city</strong>
+                  <strong>Confirmation distincte pour le hidden-city</strong>
                   <ul id="agent-hidden-city-warning-list"></ul>
                   <label>
                     <input type="checkbox" id="agent-hidden-city-ack">
-                    Я прочитал риски багажа, отмены следующих сегментов и правил перевозчика.
+                    J’ai pris connaissance des risques liés aux bagages, à l’annulation des segments suivants et aux règles de la compagnie.
                   </label>
                 </section>
-                <div class="quick-actions" aria-label="Действия с планом">
-                  <button class="secondary" type="button" id="agent-plan-edit">Изменить план</button>
-                  <button class="secondary" type="button" id="agent-plan-full">Проверить всю область</button>
-                  <button class="primary" type="button" id="agent-plan-execute" disabled>Запустить вручную</button>
+                <div class="quick-actions" aria-label="Actions sur le plan">
+                  <button class="secondary" type="button" id="agent-plan-edit">Modifier le plan</button>
+                  <button class="secondary" type="button" id="agent-plan-full">Vérifier tout le périmètre</button>
+                  <button class="primary" type="button" id="agent-plan-execute" disabled>Lancer manuellement</button>
                 </div>
               </div>
             </details>
             <section class="agent-plan-region" id="agent-fare-analysis" aria-labelledby="agent-fare-analysis-heading" hidden>
-              <h4 id="agent-fare-analysis-heading">Анализ цены</h4>
-              <div id="agent-fare-analysis-list">Анализ ещё не рассчитан.</div>
+              <h4 id="agent-fare-analysis-heading">Analyse des prix</h4>
+              <div id="agent-fare-analysis-list">L’analyse n’a pas encore été calculée.</div>
             </section>
             <section class="agent-plan-region" id="agent-confirmed-results" aria-labelledby="agent-confirmed-results-heading" hidden>
-              <h4 id="agent-confirmed-results-heading">Подтверждённые варианты</h4>
-              <div class="agent-result-list" id="agent-confirmed-results-list">Подтверждённых вариантов ещё нет.</div>
+              <h4 id="agent-confirmed-results-heading">Offres confirmées</h4>
+              <div class="agent-result-list" id="agent-confirmed-results-list">Aucune offre confirmée pour le moment.</div>
             </section>
             <section class="agent-plan-region" id="agent-risky-results" aria-labelledby="agent-risky-results-heading" hidden>
-              <h4 id="agent-risky-results-heading">Hidden-city исследования</h4>
-              <div id="agent-risky-results-list">Нет подтверждённых рискованных вариантов.</div>
+              <h4 id="agent-risky-results-heading">Études hidden-city</h4>
+              <div id="agent-risky-results-list">Aucune offre à risque confirmée.</div>
             </section>
             <div class="agent-plan-region" id="agent-partial-errors" role="alert" hidden></div>
           </section>
           <form class="assistant-input" id="assistant-form">
-            <textarea name="agent_prompt" aria-label="Опишите поездку"
-              placeholder="Например: самый дешёвый путь из Санкт-Петербурга во Францию в сентябре на неделю"></textarea>
-            <button class="primary" type="submit">Найти варианты</button>
+            <textarea name="agent_prompt" aria-label="Décrivez votre voyage"
+              placeholder="Exemple : l’itinéraire le moins cher de Paris vers la France en septembre pour une semaine"></textarea>
+            <button class="primary" type="submit">Trouver des offres</button>
           </form>
         </div>
       </div>
@@ -2360,20 +2360,20 @@ def render_index_html() -> str:
     <details class="panel exact-search" aria-labelledby="search-heading">
       <summary>
         <span class="exact-summary-copy">
-          <span class="fineprint">Если уже знаете аэропорты и даты</span>
-          <span class="panel-title" id="search-heading">Задать точный маршрут</span>
-          <span class="panel-kicker">Быстрый поиск по конкретным параметрам без диалога с агентом.</span>
+          <span class="fineprint">Si vous connaissez déjà les aéroports et les dates</span>
+          <span class="panel-title" id="search-heading">Définir un itinéraire précis</span>
+          <span class="panel-kicker">Recherche rapide à partir de paramètres précis, sans dialogue avec l’agent.</span>
         </span>
         <span class="summary-action">
-          <span class="summary-label-closed">Открыть форму</span>
-          <span class="summary-label-open">Скрыть форму</span>
+          <span class="summary-label-closed">Ouvrir le formulaire</span>
+          <span class="summary-label-open">Masquer le formulaire</span>
         </span>
       </summary>
         <form class="search-form" id="search-form">
           <div class="place-field" data-place-role="origin">
-            <label for="origin-place-input">Откуда</label>
+            <label for="origin-place-input">Départ</label>
             <span class="place-combobox">
-              <input id="origin-place-input" type="text" value="Варшава — Шопен" role="combobox"
+              <input id="origin-place-input" type="text" value="Varsovie — Chopin" role="combobox"
                 aria-autocomplete="list" aria-expanded="false" aria-controls="origin-place-listbox"
                 autocomplete="off" spellcheck="false">
               <input name="origin" type="hidden" value="WAW">
@@ -2383,9 +2383,9 @@ def render_index_html() -> str:
             <span id="origin-place-status" class="place-status" role="status" aria-live="polite"></span>
           </div>
           <div class="place-field" data-place-role="destination">
-            <label for="destination-place-input">Куда</label>
+            <label for="destination-place-input">Destination</label>
             <span class="place-combobox">
-              <input id="destination-place-input" type="text" value="Барселона — Эль-Прат" role="combobox"
+              <input id="destination-place-input" type="text" value="Barcelone — El Prat" role="combobox"
                 aria-autocomplete="list" aria-expanded="false" aria-controls="destination-place-listbox"
                 autocomplete="off" spellcheck="false">
               <input name="destination" type="hidden" value="BCN">
@@ -2394,30 +2394,30 @@ def render_index_html() -> str:
             </span>
             <span id="destination-place-status" class="place-status" role="status" aria-live="polite"></span>
           </div>
-          <label>Вылет
+          <label>Aller
             <input name="departure_date" type="date" value="2026-10-12" required>
           </label>
-          <label>Обратно
+          <label>Retour
             <input name="return_date" type="date" value="2026-10-19">
           </label>
-          <label>Взрослые
+          <label>Adultes
             <input name="adults" type="number" min="1" value="2" required>
           </label>
-          <label>Дети
+          <label>Enfants
             <input name="children" type="number" min="0" value="0" required>
           </label>
-          <label>Младенцы
+          <label>Nourrissons
             <input name="infants" type="number" min="0" value="0" required>
           </label>
-          <label>Валюта
+          <label>Devise
             <input name="currency" value="RUB" maxlength="3" autocomplete="off" required>
           </label>
           <div class="form-actions">
-            <span class="fineprint" id="passenger-total">2 пассажира · туда-обратно</span>
-            <div class="quick-actions" aria-label="Ручные проверки">
-              <button class="secondary" type="button" id="personal-observe-button">Проверить в браузере</button>
-              <button class="secondary" type="button" id="deal-discovery-button">Найти спеццены</button>
-              <button class="primary" type="submit" id="submit-button">Найти билеты</button>
+            <span class="fineprint" id="passenger-total">2 passagers · aller-retour</span>
+            <div class="quick-actions" aria-label="Vérifications manuelles">
+              <button class="secondary" type="button" id="personal-observe-button">Vérifier dans le navigateur</button>
+              <button class="secondary" type="button" id="deal-discovery-button">Trouver des offres spéciales</button>
+              <button class="primary" type="submit" id="submit-button">Rechercher des billets</button>
             </div>
           </div>
         </form>
@@ -2426,33 +2426,33 @@ def render_index_html() -> str:
     <section class="panel results-panel" aria-labelledby="results-heading">
       <div class="panel-header">
         <div>
-          <h2 class="panel-title" id="results-heading">Лучшие варианты</h2>
-          <div class="panel-kicker">Цена, пересадки, риск, источник и свежесть — в одном месте.</div>
+          <h2 class="panel-title" id="results-heading">Meilleures offres</h2>
+          <div class="panel-kicker">Prix, escales, risques, source et fraîcheur réunis au même endroit.</div>
         </div>
-        <span class="small" id="results-count">0 вариантов</span>
+        <span class="small" id="results-count">0 offre</span>
       </div>
       <div class="result-list" id="results-list">
-        <div class="empty-state">Опишите поездку выше или задайте точный маршрут — найденные билеты появятся здесь.</div>
+        <div class="empty-state">Décrivez votre voyage ci-dessus ou définissez un itinéraire précis : les billets trouvés apparaîtront ici.</div>
       </div>
       <div class="denial-list" id="confirmation-list"></div>
       <div class="denial-list" id="live-list"></div>
       <div class="denial-list" id="denials-list"></div>
     </section>
 
-    <section class="utility-grid" aria-label="Личные данные и диагностика">
+    <section class="utility-grid" aria-label="Données personnelles et diagnostic">
       <section class="panel watches-panel" aria-labelledby="watches-heading">
         <div class="panel-header">
           <div>
-            <h2 class="panel-title" id="watches-heading">Отслеживания</h2>
-            <div class="panel-kicker">Сохраняйте маршрут и получайте изменения цены без повторного ввода.</div>
+            <h2 class="panel-title" id="watches-heading">Suivi des prix</h2>
+            <div class="panel-kicker">Enregistrez un itinéraire et recevez les variations de prix sans tout ressaisir.</div>
           </div>
         </div>
         <div class="watch-toolbar">
-          <button class="secondary" type="button" id="create-watch-button">Следить за маршрутом</button>
-          <button class="secondary" type="button" id="refresh-watches-button">Обновить список</button>
+          <button class="secondary" type="button" id="create-watch-button">Suivre cet itinéraire</button>
+          <button class="secondary" type="button" id="refresh-watches-button">Actualiser la liste</button>
         </div>
         <div class="watch-list" id="watch-list">
-          <div class="empty-state">Подключаем локальный профиль…</div>
+          <div class="empty-state">Connexion au profil local…</div>
         </div>
         <div class="watch-history" id="watch-history-list"></div>
       </section>
@@ -2460,42 +2460,42 @@ def render_index_html() -> str:
       <aside class="panel providers-panel" aria-labelledby="providers-heading">
         <div class="panel-header">
           <div>
-            <h2 class="panel-title" id="providers-heading">Источники и точность</h2>
-            <div class="panel-kicker">Какие данные доступны сейчас и требуют ли они проверки.</div>
+            <h2 class="panel-title" id="providers-heading">Sources et fiabilité</h2>
+            <div class="panel-kicker">Données actuellement disponibles et vérifications nécessaires.</div>
           </div>
         </div>
         <div class="provider-list" id="providers-list">
-          <div class="empty-state">Проверяю доступные источники...</div>
+          <div class="empty-state">Vérification des sources disponibles…</div>
         </div>
       </aside>
 
       <details class="panel utility-panel" aria-labelledby="admin-health-heading">
         <summary>
           <span>
-            <span class="panel-title" id="admin-health-heading">Диагностика</span>
-            <span class="panel-kicker">Состояние источников и фоновых задач без запуска поиска.</span>
+            <span class="panel-title" id="admin-health-heading">Diagnostic</span>
+            <span class="panel-kicker">État des sources et des tâches en arrière-plan, sans lancer de recherche.</span>
           </span>
         </summary>
         <div class="panel-toolbar">
-          <button class="secondary" type="button" id="refresh-admin-health-button">Обновить</button>
+          <button class="secondary" type="button" id="refresh-admin-health-button">Actualiser</button>
         </div>
         <div class="admin-health-list" id="admin-health-list">
-          <div class="empty-state">Загружаю состояние...</div>
+          <div class="empty-state">Chargement de l’état…</div>
         </div>
       </details>
 
       <details class="panel utility-panel" aria-labelledby="audit-heading">
         <summary>
           <span>
-            <span class="panel-title" id="audit-heading">Журнал действий</span>
-            <span class="panel-kicker">История операций внутри вашей локальной группы.</span>
+            <span class="panel-title" id="audit-heading">Journal des actions</span>
+            <span class="panel-kicker">Historique des opérations au sein de votre groupe local.</span>
           </span>
         </summary>
         <div class="panel-toolbar">
-          <button class="secondary" type="button" id="refresh-audit-button">Обновить</button>
+          <button class="secondary" type="button" id="refresh-audit-button">Actualiser</button>
         </div>
         <div class="admin-health-list" id="audit-list">
-          <div class="empty-state">Подключаем локальный профиль…</div>
+          <div class="empty-state">Connexion au profil local…</div>
         </div>
       </details>
     </section>
@@ -2564,18 +2564,18 @@ def render_index_html() -> str:
     const sessionTokenKey = "flight_hunter_session_token";
     const agentPlanStorageKey = "flight_hunter_agent_plan_id_v1";
     const agentRunStorageKey = "flight_hunter_agent_run_id_v1";
-    const placeSelectionError = "Сначала выберите города или аэропорты из списка.";
-    const placeLocale = "ru";
+    const placeSelectionError = "Sélectionnez d’abord une ville ou un aéroport dans la liste.";
+    const placeLocale = "fr";
     const placeLookupBatchLimit = 64;
     const placeCache = new Map();
     let placeDirectoryVersion = null;
 
     const manualConfirmationActions = [
-      {status: "confirmed", label: "Совпала"},
-      {status: "price_changed", label: "Изменилась"},
-      {status: "sold_out", label: "Нет мест"},
-      {status: "bought", label: "Купил"},
-      {status: "wrong_route", label: "Маршрут не тот"}
+      {status: "confirmed", label: "Identique"},
+      {status: "price_changed", label: "A changé"},
+      {status: "sold_out", label: "Complet"},
+      {status: "bought", label: "Acheté"},
+      {status: "wrong_route", label: "Itinéraire incorrect"}
     ];
 
     const reasonLabels = {
@@ -2590,16 +2590,16 @@ def render_index_html() -> str:
       stale_price: "stale",
       provider_single_adult_ticket: "single adult ticket",
       unknown_freshness: "freshness unknown",
-      requires_live_confirmation: "проверить перед покупкой",
-      baggage_unknown: "багаж неизвестен",
-      provider_disabled: "выключен",
-      credentials_missing: "нужен ключ",
-      access_not_approved: "доступ не подтвержден",
-      background_not_allowed: "фон запрещен"
+      requires_live_confirmation: "À vérifier avant l’achat",
+      baggage_unknown: "Bagages inconnus",
+      provider_disabled: "Désactivé",
+      credentials_missing: "Clé requise",
+      access_not_approved: "Accès non confirmé",
+      background_not_allowed: "Exécution en arrière-plan interdite"
     };
 
     const providerLabels = {
-      fake: "Демо-источник",
+      fake: "Source de démonstration",
       aviasales_search: "Aviasales mobile API",
       aviasales_search: "Aviasales Search",
       skyscanner_indicative: "Skyscanner Indicative",
@@ -2628,8 +2628,8 @@ def render_index_html() -> str:
     }
 
     function householdRoleLabel(role) {
-      return ({owner: "Владелец", admin: "Администратор", member: "Участник", viewer: "Просмотр"})[role]
-        || "Профиль";
+      return ({owner: "Propriétaire", admin: "Administrateur", member: "Membre", viewer: "Lecture seule"})[role]
+        || "Profil";
     }
 
     function updateInvitationAdminPanel(role) {
@@ -2640,8 +2640,8 @@ def render_index_html() -> str:
     function storeSession(session) {
       clearAgentSessionState();
       window.localStorage.setItem(sessionTokenKey, session.session_token);
-      accountLabel.textContent = "Семейный профиль";
-      authState.textContent = `Вход выполнен · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
+      accountLabel.textContent = "Profil familial";
+      authState.textContent = `Connexion réussie · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
       invitationLoginForm.hidden = true;
       authReconnectButton.hidden = false;
       authReconnectButton.disabled = false;
@@ -2700,11 +2700,11 @@ def render_index_html() -> str:
       agentActionList.replaceChildren();
       airportChoiceList.replaceChildren();
       chatLog.replaceChildren();
-      addMessage("bot", "Опишите поездку обычными словами — я соберу маршрут и проверю доступные варианты.");
+      addMessage("bot", "Décrivez votre voyage en langage naturel : je préparerai l’itinéraire et vérifierai les offres disponibles.");
     }
 
     function renderLocalProfilePendingConfirmationState() {
-      confirmationList.innerHTML = '<div class="empty-state">Подключаем локальный профиль…</div>';
+      confirmationList.innerHTML = '<div class="empty-state">Connexion au profil local…</div>';
     }
 
     async function loadSessionBoundData() {
@@ -2723,8 +2723,8 @@ def render_index_html() -> str:
       accountMenu.open = true;
       invitationLoginForm.hidden = false;
       authReconnectButton.hidden = true;
-      authState.textContent = "Введите имя и одноразовый код приглашения.";
-      statusLine.textContent = "требуется вход";
+      authState.textContent = "Saisissez votre nom et le code d’invitation à usage unique.";
+      statusLine.textContent = "Connexion requise";
       return false;
     }
 
@@ -2745,8 +2745,8 @@ def render_index_html() -> str:
         if (!response.ok) throw new Error(await codedMessage(response));
         const session = await response.json();
         if (!sessionIdentityIsCurrent(token, sessionGeneration)) return false;
-        accountLabel.textContent = "Семейный профиль";
-        authState.textContent = `Вход выполнен · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
+        accountLabel.textContent = "Profil familial";
+        authState.textContent = `Connexion réussie · ${householdRoleLabel(session.role)} · ${session.household_id.slice(0, 8)}`;
         invitationLoginForm.hidden = true;
         authReconnectButton.hidden = false;
         authReconnectButton.disabled = false;
@@ -2754,8 +2754,8 @@ def render_index_html() -> str:
         return true;
       } catch (error) {
         if (!sessionIdentityIsCurrent(token, sessionGeneration)) return false;
-        authState.textContent = `Профиль временно недоступен: ${error.message}`;
-        statusLine.textContent = "локальный профиль временно недоступен";
+        authState.textContent = `Profil temporairement indisponible : ${error.message}`;
+        statusLine.textContent = "Profil local temporairement indisponible";
         return false;
       }
     }
@@ -2770,8 +2770,8 @@ def render_index_html() -> str:
       invitationAdminPanel.hidden = true;
       invitationCreatedResult.textContent = "";
       accountMenu.open = true;
-      authState.textContent = "Введите одноразовый код приглашения для входа.";
-      statusLine.textContent = "требуется вход";
+      authState.textContent = "Saisissez le code d’invitation à usage unique pour vous connecter.";
+      statusLine.textContent = "Connexion requise";
       authReconnectButton.disabled = false;
       return false;
     }
@@ -2823,39 +2823,39 @@ def render_index_html() -> str:
     }
 
     function providerState(provider) {
-      if (provider.blocked_reasons.includes("credentials_missing")) return "Не подключен";
-      if (provider.blocked_reasons.includes("access_not_approved")) return "Нет доступа";
-      if (!provider.enabled) return "выключен";
-      if (provider.blocked_reasons.length > 0) return "ограничен";
-      return "готов";
+      if (provider.blocked_reasons.includes("credentials_missing")) return "Non connecté";
+      if (provider.blocked_reasons.includes("access_not_approved")) return "Accès refusé";
+      if (!provider.enabled) return "Désactivé";
+      if (provider.blocked_reasons.length > 0) return "Limité";
+      return "Prêt";
     }
 
     function providerHelp(provider) {
       if (provider.blocked_reasons.length === 0) {
-        return `${provider.data_kind} · можно использовать сейчас`;
+        return `${provider.data_kind} · utilisable actuellement`;
       }
       const notes = [];
       if (provider.blocked_reasons.includes("credentials_missing")) {
-        notes.push("нужен API key в .env");
+        notes.push("Clé API requise dans .env");
       }
       if (provider.blocked_reasons.includes("access_not_approved")) {
-        notes.push("доступ у провайдера не подтвержден");
+        notes.push("Accès fournisseur non confirmé");
       }
       if (
         provider.blocked_reasons.includes("provider_disabled")
         && !provider.blocked_reasons.includes("credentials_missing")
       ) {
-        notes.push("выключен feature flag");
+        notes.push("fonctionnalité désactivée par un indicateur");
       }
-      return `${notes.join("; ")}. Это не ошибка поиска, просто реальные источники пока не настроены.`;
+      return `${notes.join("; ")}. Ce n’est pas une erreur de recherche : les sources réelles ne sont simplement pas encore configurées.`;
     }
 
     function optionCountLabel(count) {
-      if (count % 10 === 1 && count % 100 !== 11) return `${count} вариант`;
+      if (count % 10 === 1 && count % 100 !== 11) return `${count} offre`;
       if ([2, 3, 4].includes(count % 10) && ![12, 13, 14].includes(count % 100)) {
-        return `${count} варианта`;
+        return `${count} offres`;
       }
-      return `${count} вариантов`;
+      return `${count} offres`;
     }
 
     function formatMinorAmount(minorUnits, currency) {
@@ -2869,19 +2869,19 @@ def render_index_html() -> str:
     }
 
     function formatIsoMinute(value) {
-      if (!value) return "нет срока";
+      if (!value) return "Aucune échéance";
       const parsed = new Date(value);
       if (Number.isNaN(parsed.getTime())) return value;
-      return parsed.toLocaleString("ru-RU", {
+      return parsed.toLocaleString("fr-FR", {
         dateStyle: "short",
         timeStyle: "short",
       });
     }
 
     function dealCandidateExpiryLabel(candidate) {
-      if (!candidate.expires_at) return "срок не указан";
+      if (!candidate.expires_at) return "Échéance non indiquée";
       const expired = Date.parse(candidate.expires_at) <= Date.now();
-      return `${expired ? "stale" : "candidate"} · до ${formatIsoMinute(candidate.expires_at)}`;
+      return `${expired ? "stale" : "candidate"} · jusqu’au ${formatIsoMinute(candidate.expires_at)}`;
     }
 
     function isoCountryFlag(countryCode) {
@@ -2937,7 +2937,7 @@ def render_index_html() -> str:
       const codeOnly = place?.display_name?.fallback_reason === "code_only"
         || displayName.toUpperCase() === rawCode;
       if (place?.resolved === false || !displayName || codeOnly) {
-        return `${rawCode} · Название не найдено`;
+        return `${rawCode} · Nom introuvable`;
       }
       const flag = isoCountryFlag(place?.country_code);
       const humanName = `${flag ? `${flag} ` : ""}${displayName}`;
@@ -3073,14 +3073,14 @@ def render_index_html() -> str:
         const kind = text(option?.ref?.kind);
         if (!/^[A-Z]{3}$/.test(code) || !["city", "airport"].includes(kind)) return;
         const displayName = text(option?.display_name?.text) || code;
-        const kindLabel = kind === "city" ? "Все аэропорты" : "Аэропорт";
+        const kindLabel = kind === "city" ? "Tous les aéroports" : "Aéroport";
         const flag = isoCountryFlag(option?.country_code);
         canonicalCode.value = code;
         canonicalKind.value = kind;
         cachePlaceOption(option);
         input.value = `${flag ? `${flag} ` : ""}${displayName} · ${kindLabel} · ${code}`;
         input.setAttribute("aria-invalid", "false");
-        status.textContent = `Выбрано: ${displayName}, ${kindLabel}, ${code}.`;
+        status.textContent = `Sélectionné : ${displayName}, ${kindLabel}, ${code}.`;
         closeListbox();
       };
 
@@ -3113,7 +3113,7 @@ def render_index_html() -> str:
           name.textContent = text(option.display_name?.text) || option.ref.code;
           const meta = document.createElement("span");
           meta.className = "place-option-meta";
-          const kindLabel = option.ref.kind === "city" ? "Все аэропорты" : "Аэропорт";
+          const kindLabel = option.ref.kind === "city" ? "Tous les aéroports" : "Aéroport";
           const cityName = text(option.city_name?.text);
           meta.textContent = [
             option.ref.kind === "airport" ? cityName : "",
@@ -3138,7 +3138,7 @@ def render_index_html() -> str:
         requestController = new AbortController();
         try {
           const response = await fetch(
-            `/api/v1/places/suggest?q=${encodeURIComponent(query)}&locale=ru&limit=10`,
+            `/api/v1/places/suggest?q=${encodeURIComponent(query)}&locale=fr&limit=10`,
             {signal: requestController.signal}
           );
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -3148,19 +3148,19 @@ def render_index_html() -> str:
             options = [];
             listbox.replaceChildren();
             closeListbox();
-            status.textContent = "Справочник мест сейчас недоступен.";
+            status.textContent = "Le répertoire des lieux est actuellement indisponible.";
             return;
           }
           renderOptions(Array.isArray(body.items) ? body.items : []);
           status.textContent = options.length
-            ? `Найдено вариантов: ${options.length}. Выберите город или аэропорт.`
-            : "Ничего не найдено.";
+            ? `Offres trouvées : ${options.length}. Choisissez une ville ou un aéroport.`
+            : "Aucun résultat.";
         } catch (error) {
           if (error.name === "AbortError") return;
           options = [];
           listbox.replaceChildren();
           closeListbox();
-          status.textContent = "Не удалось загрузить варианты мест.";
+          status.textContent = "Impossible de charger les lieux.";
         }
       };
 
@@ -3175,10 +3175,10 @@ def render_index_html() -> str:
         closeListbox();
         const query = input.value.trim();
         if (query.length < 2) {
-          status.textContent = query ? "Введите ещё один символ." : "";
+          status.textContent = query ? "Saisissez au moins un caractère supplémentaire." : "";
           return;
         }
-        status.textContent = "Ищу города и аэропорты...";
+        status.textContent = "Recherche de villes et d’aéroports…";
         const sequence = requestSequence;
         debounceTimer = window.setTimeout(() => {
           void requestOptions(query, sequence);
@@ -3257,8 +3257,8 @@ def render_index_html() -> str:
 
     function updatePassengerSummary() {
       const payload = buildSearchPayload();
-      const trip = payload.return_date ? "туда-обратно" : "в одну сторону";
-      passengerTotal.textContent = `${payload.passengers} пасс. · ${trip}`;
+      const trip = payload.return_date ? "aller-retour" : "aller simple";
+      passengerTotal.textContent = `${payload.passengers} pass. · ${trip}`;
     }
 
     function currentSlots() {
@@ -3325,18 +3325,18 @@ def render_index_html() -> str:
     function renderAgentRuntime(runtime) {
       const details = runtime || {};
       agentRuntime.textContent = details.model
-        ? `ИИ-модель · ${details.model}`
-        : "детерминированный локальный режим";
-      agentLoop.textContent = "полный запрос → сразу живой поиск";
+        ? `Modèle IA · ${details.model}`
+        : "Mode local déterministe";
+      agentLoop.textContent = "Demande complète → recherche immédiate en temps réel";
       agentLivePolicy.textContent = details.live_calls_allowed
-        ? "живой поиск уже запущен"
-        : "запустится из полного запроса";
+        ? "La recherche en temps réel est lancée"
+        : "Sera lancé à partir d’une demande complète";
       agentEdgeReady.textContent = details.cloudflare_ready
-        ? "локальное хранение · переносимый запуск"
-        : "только локально";
+        ? "Stockage local · exécution portable"
+        : "Local uniquement";
       agentMode.textContent = ["openai_responses", "codex_cli"].includes(details.backend)
-        ? "ИИ подключён"
-        : "локальный агент";
+        ? "IA connectée"
+        : "Agent local";
     }
 
     function renderProviders(providers) {
@@ -3661,7 +3661,7 @@ def render_index_html() -> str:
       if (!events || events.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "Audit СЃРѕР±С‹С‚РёР№ РїРѕРєР° РЅРµС‚.";
+        empty.textContent = "Aucun événement d’audit pour le moment.";
         auditList.append(empty);
         return;
       }
@@ -3701,19 +3701,19 @@ def render_index_html() -> str:
     }
 
     function watchStatus(watch) {
-      if (!watch.enabled) return {label: "выключен", tone: "off"};
-      if (watch.paused_until) return {label: "пауза", tone: "warn"};
-      if (watch.last_scan_status === "failed") return {label: "ошибка", tone: "warn"};
-      return {label: "активен", tone: "ok"};
+      if (!watch.enabled) return {label: "Désactivé", tone: "off"};
+      if (watch.paused_until) return {label: "En pause", tone: "warn"};
+      if (watch.last_scan_status === "failed") return {label: "Erreur", tone: "warn"};
+      return {label: "Actif", tone: "ok"};
     }
 
     function watchMeta(watch) {
       const trip = watch.return_date ? `${watch.departure_date} — ${watch.return_date}` : watch.departure_date;
       const scan = watch.last_scanned_at
-        ? `последний scan ${watch.last_scanned_at}`
-        : "scan ещё не запускался";
-      const paused = watch.paused_until ? ` · пауза до ${watch.paused_until}` : "";
-      return `${trip} · ${watch.passengers} пасс. · ${watch.currency} · v${watch.version} · ${scan}${paused}`;
+        ? `Dernière analyse ${watch.last_scanned_at}`
+        : "Aucune analyse lancée";
+      const paused = watch.paused_until ? ` · en pause jusqu’au ${watch.paused_until}` : "";
+      return `${trip} · ${watch.passengers} pass. · ${watch.currency} · v${watch.version} · ${scan}${paused}`;
     }
 
     async function lookupWatchPlaces(watches) {
@@ -3738,7 +3738,7 @@ def render_index_html() -> str:
       if (watchRecords.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "Активных watches пока нет.";
+        empty.textContent = "Aucun suivi actif pour le moment.";
         watchList.append(empty);
         return;
       }
@@ -3770,24 +3770,24 @@ def render_index_html() -> str:
         const pauseButton = document.createElement("button");
         pauseButton.className = "chip";
         pauseButton.type = "button";
-        pauseButton.textContent = watch.paused_until ? "Возобновить" : "Пауза";
+        pauseButton.textContent = watch.paused_until ? "Reprendre" : "Pause";
         pauseButton.addEventListener("click", () =>
           watch.paused_until ? resumeWatch(watch) : pauseWatch(watch)
         );
         const historyButton = document.createElement("button");
         historyButton.className = "chip";
         historyButton.type = "button";
-        historyButton.textContent = "История";
+        historyButton.textContent = "Historique";
         historyButton.addEventListener("click", () => loadWatchHistory(watch));
         const archiveButton = document.createElement("button");
         archiveButton.className = "chip";
         archiveButton.type = "button";
-        archiveButton.textContent = "Архив";
+        archiveButton.textContent = "Archives";
         archiveButton.addEventListener("click", () => archiveWatch(watch));
         const deleteButton = document.createElement("button");
         deleteButton.className = "chip";
         deleteButton.type = "button";
-        deleteButton.textContent = "Удалить";
+        deleteButton.textContent = "Supprimer";
         deleteButton.addEventListener("click", () => deleteWatch(watch));
         actions.append(pauseButton, historyButton, archiveButton, deleteButton);
         watchList.append(row);
@@ -3798,18 +3798,18 @@ def render_index_html() -> str:
       watchHistoryList.replaceChildren();
       appendSectionHeader(
         watchHistoryList,
-        "История watch",
+        "Historique du suivi",
         `${formatPlaceRouteFromCache(
           {kind: watch.origin_kind, code: watch.origin},
           {kind: watch.destination_kind, code: watch.destination},
           false,
           watch.directory_version
-        )}. Snapshots не являются live-гарантией.`
+        )}. Les instantanés ne garantissent pas les prix en temps réel.`
       );
       if (!snapshots || snapshots.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "История цен пока пустая.";
+        empty.textContent = "L’historique des prix est vide pour le moment.";
         watchHistoryList.append(empty);
         return;
       }
@@ -3817,8 +3817,8 @@ def render_index_html() -> str:
         const row = document.createElement("div");
         row.className = "denial-row small";
         const confirmation = snapshot.requires_live_confirmation
-          ? "нужна внешняя проверка"
-          : "подтверждение источника";
+          ? "Vérification externe requise"
+          : "Confirmation de la source";
         row.textContent =
           `${providerLabel(snapshot.provider_id)} · ${formatMinorAmount(snapshot.amount_minor, snapshot.currency)}`
           + ` · ${snapshot.freshness} · ${snapshot.observed_at} · ${confirmation}`;
@@ -3885,7 +3885,7 @@ def render_index_html() -> str:
     async function createWatchFromAgentAnalysis(action, button) {
       if (!action?.available) return;
       button.disabled = true;
-      statusLine.textContent = "создаю отслеживание по анализу...";
+      statusLine.textContent = "Création du suivi à partir de l’analyse…";
       try {
         const response = await fetch("/api/v1/watches", {
           method: "POST",
@@ -3902,12 +3902,12 @@ def render_index_html() -> str:
         });
         if (!response.ok) throw new Error(await codedMessage(response));
         const watch = await response.json();
-        statusLine.textContent = `отслеживание создано · v${watch.version}`;
+        statusLine.textContent = `Suivi créé · v${watch.version}`;
         await loadWatches();
         await loadAuditEvents();
         await loadWatchHistory(watch);
       } catch (error) {
-        statusLine.textContent = `ошибка отслеживания: ${error.message}`;
+        statusLine.textContent = `Erreur de suivi : ${error.message}`;
       } finally {
         button.disabled = false;
       }
@@ -3933,7 +3933,7 @@ def render_index_html() -> str:
     }
 
     async function deleteWatch(watch) {
-      if (!window.confirm("Удалить watch из активного списка?")) return;
+      if (!window.confirm("Supprimer ce suivi de la liste active ?")) return;
       await mutateWatch(
         watch,
         `/api/v1/watches/${watch.id}`,
@@ -4059,11 +4059,11 @@ def render_index_html() -> str:
 
     function manualConfirmationStatusLabel(status) {
       const labels = {
-        confirmed: "цена совпала",
-        price_changed: "цена изменилась",
-        sold_out: "нет мест",
-        bought: "куплено",
-        wrong_route: "маршрут не тот"
+        confirmed: "Prix identique",
+        price_changed: "Prix modifié",
+        sold_out: "Complet",
+        bought: "Acheté",
+        wrong_route: "Itinéraire incorrect"
       };
       return labels[status] || status;
     }
@@ -4073,7 +4073,7 @@ def render_index_html() -> str:
       actions.className = "confirmation-actions";
       const status = document.createElement("div");
       status.className = "confirmation-status";
-      status.textContent = "Ручная проверка";
+      status.textContent = "Vérification manuelle";
       manualConfirmationActions.forEach((item) => {
         const button = document.createElement("button");
         button.className = "chip";
@@ -4097,7 +4097,7 @@ def render_index_html() -> str:
         body.amount_minor = target.price.minor_units;
         body.currency = target.price.currency;
       }
-      statusNode.textContent = "сохраняю...";
+      statusNode.textContent = "Enregistrement…";
       try {
         const response = await fetch("/api/v1/manual-price-confirmations", {
           method: "POST",
@@ -4106,11 +4106,11 @@ def render_index_html() -> str:
         });
         if (!response.ok) throw new Error(await codedMessage(response));
         const saved = await response.json();
-        statusNode.textContent = `Сохранено: ${manualConfirmationStatusLabel(saved.status)}`;
+        statusNode.textContent = `Enregistré : ${manualConfirmationStatusLabel(saved.status)}`;
         await loadManualConfirmations();
         statusLine.textContent = "manual confirmation saved";
       } catch (error) {
-        statusNode.textContent = `Не сохранено: ${error.message}`;
+        statusNode.textContent = `Non enregistré : ${error.message}`;
         statusLine.textContent = "manual confirmation error";
       }
     }
@@ -4120,8 +4120,8 @@ def render_index_html() -> str:
       if (!confirmations || confirmations.length === 0) return;
       appendSectionHeader(
         confirmationList,
-        "Ручные подтверждения",
-        "Личная история проверок. Она не переписывает provider facts."
+        "Confirmations manuelles",
+        "Historique personnel des vérifications. Ne modifie pas les données du fournisseur."
       );
       confirmations.forEach((confirmation) => {
         const row = document.createElement("div");
@@ -4149,7 +4149,7 @@ def render_index_html() -> str:
         confirmationList.replaceChildren();
         const row = document.createElement("div");
         row.className = "denial-row small";
-        row.textContent = `Ручные подтверждения: ${error.message}`;
+        row.textContent = `Confirmations manuelles: ${error.message}`;
         confirmationList.append(row);
       }
     }
@@ -4275,7 +4275,7 @@ def render_index_html() -> str:
         const code = text(segment?.airline_code).toUpperCase();
         const safeCode = carrierCodePattern.test(code) ? code : "";
         const name = text(segment?.airline_name);
-        const normalizedName = name.toLocaleLowerCase("ru-RU");
+        const normalizedName = name.toLocaleLowerCase("fr-FR");
         const identity = safeCode
           ? `code:${safeCode}`
           : name
@@ -4324,7 +4324,7 @@ def render_index_html() -> str:
 
         const label = document.createElement("span");
         label.className = "carrier-label";
-        label.textContent = carrier.name || carrier.code || "Авиакомпания не указана";
+        label.textContent = carrier.name || carrier.code || "Compagnie aérienne non indiquée";
         chip.append(mark, label);
         strip.append(chip);
       });
@@ -4358,16 +4358,16 @@ def render_index_html() -> str:
 
       appendSectionHeader(
         resultsList,
-        "Цены из кэша",
+        "Prix issus du cache",
         freshnessSummary.needs_external_confirmation
-          ? "Нужна внешняя проверка перед покупкой."
-          : "Свежесть подтверждена источником."
+          ? "Une vérification externe est nécessaire avant l’achat."
+          : "La fraîcheur est confirmée par la source."
       );
 
       if (offers.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "Недостаточно данных: нет вариантов по текущему запросу.";
+        empty.textContent = "Données insuffisantes : aucune offre pour cette recherche.";
         resultsList.append(empty);
       }
 
@@ -4385,7 +4385,7 @@ def render_index_html() -> str:
             <div class="caveats"></div>
             <div class="risk-detail small"></div>
             <div class="result-actions">
-              <button class="secondary live-check-button" type="button">Проверить live</button>
+              <button class="secondary live-check-button" type="button">Vérifier en temps réel</button>
             </div>
           </div>
         `;
@@ -4395,14 +4395,14 @@ def render_index_html() -> str:
           {kind: lastSearchPayload?.destination_kind, code: offer.destination}
         );
         row.querySelector(".segment-route").textContent =
-          `Фактически: ${formatConcreteSegments(
+          `Détails réels : ${formatConcreteSegments(
             offer.segments,
             offer.origin,
             offer.destination
           )}`;
         row.querySelector(".result-meta").textContent =
           `${offer.departure_date}${offer.return_date ? " — " + offer.return_date : ""}`
-          + ` · ${offer.passengers} пасс. · ${providerLabel(offer.provider_id)}`
+          + ` · ${offer.passengers} pass. · ${providerLabel(offer.provider_id)}`
           + `${priceBasisLabel(offer)} · ${offer.freshness}`;
         row.querySelector(".price").textContent = offer.total_price.formatted;
         appendOfferBadges(row.querySelector(".caveats"), offer);
@@ -4417,13 +4417,13 @@ def render_index_html() -> str:
 
       appendSectionHeader(
         resultsList,
-        "Ссылки для проверки",
-        "Это внешние сайты, не найденные цены. Откройте и проверьте маршрут вручную."
+        "Liens de vérification",
+        "Ce sont des sites externes, pas des prix trouvés. Ouvrez-les et vérifiez l’itinéraire manuellement."
       );
       if (externalLinks.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "Пока нет внешних ссылок для проверки.";
+        empty.textContent = "Aucun lien externe à vérifier pour le moment.";
         resultsList.append(empty);
       }
       externalLinks.forEach((link) => {
@@ -4434,11 +4434,11 @@ def render_index_html() -> str:
             <div class="route"></div>
             <div class="small"></div>
           </div>
-          <div class="price">Цена неизвестна</div>
+          <div class="price">Prix inconnu</div>
           <div>
             <div class="caveats"><span class="badge warn">external check</span></div>
             <div class="result-actions">
-              <a class="secondary" target="_blank" rel="noopener noreferrer">Открыть на сайте</a>
+              <a class="secondary" target="_blank" rel="noopener noreferrer">Ouvrir le site</a>
             </div>
           </div>
         `;
@@ -4446,7 +4446,7 @@ def render_index_html() -> str:
         row.querySelector(".small").textContent =
           `${link.source_name} · ${link.origin} → ${link.destination} · `
           + `${link.departure_date}${link.return_date ? " — " + link.return_date : ""}`
-          + ` · ${link.passengers} пасс. · ${link.notes_ru || "Проверить на внешнем сайте."}`;
+          + ` · ${link.passengers} pass. · ${link.notes_ru || "Vérifier sur le site externe."}`;
         row.querySelector("a").href = link.url;
         appendManualConfirmationActions(row.querySelector(".result-actions"), externalLinkTarget(link));
         resultsList.append(row);
@@ -4454,13 +4454,13 @@ def render_index_html() -> str:
 
       appendSectionHeader(
         liveList,
-        "Свежие наблюдения из браузера",
-        "Personal Browser Observer запускается только после явного действия пользователя."
+        "Observations récentes du navigateur",
+        "Personal Browser Observer ne démarre qu’à la suite d’une action explicite de l’utilisateur."
       );
       if (observedOffers.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "Пока нет browser observation по этому запросу.";
+        empty.textContent = "Aucune observation du navigateur pour cette recherche.";
         liveList.append(empty);
       }
       observedOffers.forEach((offer) => {
@@ -4475,7 +4475,7 @@ def render_index_html() -> str:
         );
         const concreteRoute = document.createElement("div");
         concreteRoute.className = "small";
-        concreteRoute.textContent = `Фактически: ${formatPlaceRouteFromCache(
+        concreteRoute.textContent = `Détails réels : ${formatPlaceRouteFromCache(
           {kind: "airport", code: offer.origin},
           {kind: "airport", code: offer.destination},
           true
@@ -4483,8 +4483,8 @@ def render_index_html() -> str:
         const details = document.createElement("div");
         details.className = "small";
         details.textContent =
-          `${offer.source_name}: ${offer.total_price ? offer.total_price.formatted : "цена не найдена"}`
-          + ` · confidence=${offer.confidence} · ${offer.parser_warnings.join(", ") || "без предупреждений"}`;
+          `${offer.source_name}: ${offer.total_price ? offer.total_price.formatted : "prix introuvable"}`
+          + ` · confidence=${offer.confidence} · ${offer.parser_warnings.join(", ") || "aucun avertissement"}`;
         row.append(title, concreteRoute, details);
         appendManualConfirmationActions(row, browserObservationTarget(offer));
         liveList.append(row);
@@ -4534,7 +4534,7 @@ def render_index_html() -> str:
       );
       const concreteRoute = document.createElement("div");
       concreteRoute.className = "small";
-      concreteRoute.textContent = `Фактически: ${formatPlaceRouteFromCache(
+      concreteRoute.textContent = `Détails réels : ${formatPlaceRouteFromCache(
         {kind: "airport", code: offer.origin},
         {kind: "airport", code: offer.destination},
         true
@@ -4542,7 +4542,7 @@ def render_index_html() -> str:
       const details = document.createElement("div");
       details.className = "small";
       details.textContent = `Live observed · ${offer.total_price.formatted}`
-        + ` · наблюдалось ${observation.observed_at}`;
+        + ` · observé le ${observation.observed_at}`;
       row.append(title, concreteRoute, details);
       liveList.append(row);
     }
@@ -4552,35 +4552,35 @@ def render_index_html() -> str:
       appendSectionHeader(
         liveList,
         "Personal Browser Observer",
-        "Job обрабатывается worker CLI; ручной checkpoint можно продолжить или отменить."
+        "Le job est traité par le worker CLI ; le point de contrôle manuel peut être repris ou annulé."
       );
       const row = document.createElement("div");
       row.className = "denial-row small";
       const command = `uv run flight-hunter-run-personal-observation --job-id ${job.job_id}`;
       const waiting = job.status === "waiting_for_user";
       const flags = [
-        job.waiting_since ? `ждёт с ${job.waiting_since}` : null,
+        job.waiting_since ? `en attente depuis ${job.waiting_since}` : null,
         job.operator_resume_requested_at ? "resume requested" : null,
         job.operator_abort_requested_at ? "abort requested" : null,
       ].filter(Boolean).join(" · ");
-      row.textContent = `Job ${job.job_id} · ${job.status}${flags ? ` · ${flags}` : ""}. Команда: ${command}`;
+      row.textContent = `Job ${job.job_id} · ${job.status}${flags ? ` · ${flags}` : ""}. Commande : ${command}`;
       const controls = document.createElement("div");
       controls.className = "quick-actions";
       const refresh = document.createElement("button");
       refresh.className = "secondary";
       refresh.type = "button";
-      refresh.textContent = "Обновить";
+      refresh.textContent = "Actualiser";
       refresh.addEventListener("click", () => refreshPersonalObservation(job.job_id));
       const resume = document.createElement("button");
       resume.className = "secondary";
       resume.type = "button";
-      resume.textContent = "Продолжить";
+      resume.textContent = "Continuer";
       resume.disabled = !waiting || Boolean(job.operator_resume_requested_at || job.operator_abort_requested_at);
       resume.addEventListener("click", () => controlPersonalObservation(job.job_id, "resume"));
       const abort = document.createElement("button");
       abort.className = "secondary";
       abort.type = "button";
-      abort.textContent = "Отменить";
+      abort.textContent = "Annuler";
       abort.disabled = !waiting || Boolean(job.operator_resume_requested_at || job.operator_abort_requested_at);
       abort.addEventListener("click", () => controlPersonalObservation(job.job_id, "abort"));
       controls.append(refresh, resume, abort);
@@ -4597,8 +4597,8 @@ def render_index_html() -> str:
     function renderDealCandidates(candidates) {
       appendSectionHeader(
         denialsList,
-        "Сделки/форумы",
-        "Кандидаты требуют ручной проверки и не считаются источником истины цены."
+        "Bons plans / forums",
+        "Les offres candidates doivent être vérifiées manuellement et ne constituent pas une source de prix faisant autorité."
       );
       candidates.forEach((candidate) => {
         const row = document.createElement("div");
@@ -4609,12 +4609,12 @@ def render_index_html() -> str:
         const route = document.createElement("div");
         route.className = "small";
         route.textContent = candidate.extracted_origin || candidate.extracted_destination
-          ? `Маршрут: ${formatPlaceRouteFromCache(
+          ? `Itinéraire : ${formatPlaceRouteFromCache(
             {kind: "airport", code: candidate.extracted_origin},
             {kind: "airport", code: candidate.extracted_destination},
             true
           )}`
-          : "Маршрут в источнике не указан.";
+          : "L’itinéraire n’est pas indiqué par la source.";
         const expiry = document.createElement("div");
         expiry.className = "small";
         expiry.textContent = dealCandidateExpiryLabel(candidate);
@@ -4653,27 +4653,36 @@ def render_index_html() -> str:
       const body = await response.json();
       agentPresets = body.presets || [];
       if (!body.mode || !body.mode.enabled) {
-        agentMode.textContent = "локальный агент";
+        agentMode.textContent = "Agent local";
       }
       presetList.replaceChildren();
       const examples = {
-        flexible_dates: "Найди самый дешёвый билет из Санкт-Петербурга в Париж около 15 сентября, проверь даты ±3 дня",
-        nearby_airports: "Найди самый дешёвый путь из Москвы в Милан и проверь аэропорты в радиусе 150 км",
-        buy_timing: "Когда лучше покупать билет из Санкт-Петербурга в Стамбул на 12 октября? Проверь текущие цены",
-        split_ticket: "Найди дешёвый путь из Санкт-Петербурга в Лиссабон, включая отдельные билеты и самостоятельные пересадки",
-        hidden_city: "Проверь hidden-city варианты из Москвы в Париж без багажа и сначала покажи риски",
-        error_fare_sources: "Где сейчас искать аномально дешёвые билеты из России в Азию?",
-        geo_currency: "Сравни стоимость рейса Москва — Дубай в доступных валютах и странах сайта"
+        flexible_dates: "Trouve le billet le moins cher de Paris à Paris autour du 15 septembre, avec une flexibilité de ±3 jours",
+        nearby_airports: "Trouve l’itinéraire le moins cher de Moscou à Milan et vérifie les aéroports dans un rayon de 150 km",
+        buy_timing: "Quand vaut-il mieux acheter un billet de Paris à Istanbul pour le 12 octobre ? Vérifie les prix actuels.",
+        split_ticket: "Trouve un itinéraire économique de Varsovie à Lisbonne, avec des billets séparés et des correspondances autonomes.",
+        hidden_city: "Vérifie les options hidden-city de Moscou à Paris sans bagage et présente d’abord les risques.",
+        error_fare_sources: "Où chercher actuellement des billets anormalement bon marché de Russie vers l’Asie ?",
+        geo_currency: "Compare le prix d’un vol Moscou–Dubaï dans les devises et pays disponibles sur le site."
       };
       agentPresets.forEach((preset) => {
         const button = document.createElement("button");
         button.className = "chip";
         button.type = "button";
-        button.textContent = preset.title_ru;
-        button.title = "Подставить пример в запрос";
+        const presetTitlesFr = {
+          flexible_dates: "Dates flexibles",
+          nearby_airports: "Aéroports à proximité",
+          buy_timing: "Quand acheter ?",
+          split_ticket: "Billets séparés",
+          hidden_city: "Options hidden-city",
+          error_fare_sources: "Tarifs anormalement bas",
+          geo_currency: "Devises et pays"
+        };
+        button.textContent = presetTitlesFr[preset.id] || "Scénario de recherche";
+        button.title = "Insérer un exemple dans la demande";
         button.addEventListener("click", () => {
           const input = document.querySelector("#assistant-form textarea");
-          input.value = examples[preset.id] || preset.description_ru || preset.title_ru;
+          input.value = examples[preset.id] || "Décrivez l’itinéraire, les dates et vos préférences.";
           input.focus();
           input.setSelectionRange(input.value.length, input.value.length);
         });
@@ -4683,12 +4692,12 @@ def render_index_html() -> str:
 
     function choosePreset(prompt) {
       const raw = prompt.toLowerCase();
-      if (raw.includes("аэроп")) return "nearby_airports";
-      if (raw.includes("когда") || raw.includes("покуп")) return "buy_timing";
-      if (raw.includes("стык") || raw.includes("разб")) return "split_ticket";
-      if (raw.includes("скры") || raw.includes("hidden")) return "hidden_city";
-      if (raw.includes("валют") || raw.includes("страна")) return "geo_currency";
-      if (raw.includes("ошиб") || raw.includes("error")) return "error_fare_sources";
+      if (raw.includes("aéroport")) return "nearby_airports";
+      if (raw.includes("quand") || raw.includes("acheter")) return "buy_timing";
+      if (raw.includes("correspondance") || raw.includes("séparé")) return "split_ticket";
+      if (raw.includes("hidden")) return "hidden_city";
+      if (raw.includes("devise") || raw.includes("pays")) return "geo_currency";
+      if (raw.includes("erreur") || raw.includes("error")) return "error_fare_sources";
       return "flexible_dates";
     }
 
@@ -4710,31 +4719,31 @@ def render_index_html() -> str:
 
     function agentPlanStateLabel(state) {
       const labels = {
-        draft: "Нужно уточнить маршрут",
-        awaiting_approval: "Маршрут готов к поиску",
-        consumed: "Маршрут принят, поиск выполняется",
-        expired: "План истёк",
-        superseded: "Есть более новая ревизия"
+        draft: "Itinéraire à préciser",
+        awaiting_approval: "Itinéraire prêt pour la recherche",
+        consumed: "Itinéraire accepté, recherche en cours",
+        expired: "Le plan a expiré",
+        superseded: "Une version plus récente existe"
       };
-      return labels[state] || state || "Неизвестно";
+      return labels[state] || state || "Inconnu";
     }
 
     function agentScopeLabel(scope) {
-      if (!scope || scope.length === 0) return "Неизвестно";
+      if (!scope || scope.length === 0) return "Inconnu";
       return scope.map((leg, index) => {
         const requestedOrigin = [leg.origin_kind, leg.origin_value].filter(Boolean).join(": ");
         const requestedDestination = [leg.destination_kind, leg.destination_value]
           .filter(Boolean).join(": ");
         const origin = leg.frozen && leg.origin_airports.length
           ? leg.origin_airports.join(", ")
-          : requestedOrigin || "не задано";
+          : requestedOrigin || "non défini";
         const destination = leg.anywhere
-          ? "куда угодно"
+          ? "n’importe où"
           : leg.frozen && leg.destination_airports.length
             ? leg.destination_airports.join(", ")
-            : requestedDestination || "не задано";
-        const nearby = leg.nearby_radius_km > 0 ? ` · радиус ${leg.nearby_radius_km} км` : "";
-        const freeze = leg.frozen ? "заморожено" : "ещё не заморожено";
+            : requestedDestination || "non défini";
+        const nearby = leg.nearby_radius_km > 0 ? ` · rayon de ${leg.nearby_radius_km} km` : "";
+        const freeze = leg.frozen ? "figé" : "pas encore figé";
         return `${index + 1}. ${origin} → ${destination}${nearby} · ${freeze}`;
       }).join("; ");
     }
@@ -4745,10 +4754,10 @@ def render_index_html() -> str:
       const ranges = legs.map((leg) => {
         if (!leg.date_start) return null;
         const end = leg.date_end && leg.date_end !== leg.date_start ? ` — ${leg.date_end}` : "";
-        const flex = leg.flex_days > 0 ? ` · ±${leg.flex_days} дн.` : "";
+        const flex = leg.flex_days > 0 ? ` · ±${leg.flex_days} jours` : "";
         return `${leg.date_start}${end}${flex}`;
       }).filter(Boolean);
-      return `${summary.date_mode || "Неизвестно"}${ranges.length ? ` · ${ranges.join("; ")}` : ""}`;
+      return `${summary.date_mode || "Inconnu"}${ranges.length ? ` · ${ranges.join("; ")}` : ""}`;
     }
 
     function agentEstimateLabel(plan) {
@@ -4761,14 +4770,14 @@ def render_index_html() -> str:
           const calendar = budget.details && budget.details.calendar_searches;
           const exact = budget.details && budget.details.exact_searches;
           const limit = budget.details && budget.details.limit;
-          return `Не исполняется: ${logical ?? "?"} операций `
-            + `(${calendar ?? "?"} календарных, ${exact ?? "?"} точных) `
-            + `при лимите ${limit ?? "?"}`;
+          return `Non exécutable : ${logical ?? "?"} opérations `
+            + `(${calendar ?? "?"} calendaires, ${exact ?? "?"} exactes) `
+            + `dans la limite de ${limit ?? "?"}`;
         }
-        return "Недостаточно данных";
+        return "Données insuffisantes";
       }
-      return `${plan.estimate.logical_operations} операций · `
-        + `${plan.estimate.http_attempts} HTTP-попыток`;
+      return `${plan.estimate.logical_operations} opérations · `
+        + `${plan.estimate.http_attempts} tentatives HTTP`;
     }
 
     function agentClarificationLabel(plan) {
@@ -4801,39 +4810,39 @@ def render_index_html() -> str:
       document.getElementById("agent-plan-scope").textContent = agentScopeLabel(summary.scope || []);
       document.getElementById("agent-plan-date-mode").textContent = agentDateLabel(plan);
       document.getElementById("agent-plan-passengers").textContent = passengers.total
-        ? `${passengers.adults} взр. · ${passengers.children} дет. · `
-          + `${passengers.infants} мл. · всего ${passengers.total} · ${passengers.currency}`
-        : "Неизвестно";
-      document.getElementById("agent-plan-coverage").textContent = plan.coverage || "Неизвестно";
+        ? `${passengers.adults} adultes · ${passengers.children} enfants · `
+          + `${passengers.infants} nourrissons · au total ${passengers.total} · ${passengers.currency}`
+        : "Inconnu";
+      document.getElementById("agent-plan-coverage").textContent = plan.coverage || "Inconnu";
       const strategyLabels = {
-        nearby_airports: "ближайшие аэропорты",
-        flexible_dates: "гибкие даты",
-        split_ticket: "отдельные билеты",
-        self_transfer: "самостоятельные пересадки",
+        nearby_airports: "aéroports proches",
+        flexible_dates: "dates flexibles",
+        split_ticket: "billets séparés",
+        self_transfer: "correspondances autonomes",
         hidden_city: "hidden-city"
       };
       const selectedStrategies = (plan.enabled_strategies || [])
         .map((value) => strategyLabels[value] || value);
-      if (summary.baggage_preference === "checked") selectedStrategies.push("с багажом");
-      if (summary.baggage_preference === "carry_on") selectedStrategies.push("только ручная кладь");
-      if (summary.baggage_preference === "none") selectedStrategies.push("без багажа");
-      if (summary.wants_watch === true) selectedStrategies.push("слежение за ценой");
+      if (summary.baggage_preference === "checked") selectedStrategies.push("avec bagage en soute");
+      if (summary.baggage_preference === "carry_on") selectedStrategies.push("bagage cabine uniquement");
+      if (summary.baggage_preference === "none") selectedStrategies.push("sans bagage");
+      if (summary.wants_watch === true) selectedStrategies.push("suivi des prix");
       document.getElementById("agent-plan-strategies").textContent =
-        selectedStrategies.join(", ") || "Стандартный маршрут";
+        selectedStrategies.join(", ") || "Itinéraire standard";
       document.getElementById("agent-plan-hidden-city").textContent = hiddenCityEnabled
-        ? "Включён: только без регистрируемого багажа; сегменты после выхода могут отменить"
-        : "Выключен";
+        ? "Activé : sans bagage enregistré uniquement ; les segments suivants peuvent être annulés"
+        : "Désactivé";
       document.getElementById("agent-plan-estimate").textContent = agentEstimateLabel(plan);
       document.getElementById("agent-plan-rpm").textContent = provider.requests_per_minute == null
-        ? "Неизвестно"
-        : `${provider.requests_per_minute} запросов/мин`;
+        ? "Inconnu"
+        : `${provider.requests_per_minute} requêtes/min`;
       document.getElementById("agent-plan-deadline").textContent = plan.estimate
-        ? `${plan.estimate.deadline_seconds} сек.`
-        : "Неизвестно";
+        ? `${plan.estimate.deadline_seconds} s`
+        : "Inconnu";
       document.getElementById("agent-plan-source").textContent = provider.source_id
         ? `${provider.source_id} · ${provider.capability_version} · ${provider.cost_model_version}`
-        : "Неизвестно";
-      document.getElementById("agent-plan-expiry").textContent = plan.expires_at || "Неизвестно";
+        : "Inconnu";
+      document.getElementById("agent-plan-expiry").textContent = plan.expires_at || "Inconnu";
 
       const warningRegion = document.getElementById("agent-hidden-city-warning");
       const warningList = document.getElementById("agent-hidden-city-warning-list");
@@ -4853,25 +4862,25 @@ def render_index_html() -> str:
         || !executeReady
         || (hiddenCityEnabled && !warningAck.checked);
       executeButton.title = executeReady && !hiddenCityEnabled
-        ? "Запустить ровно эту замороженную ревизию"
+        ? "Lancer exactement cette version figée"
         : hiddenCityEnabled
-          ? "Для hidden-city нужно отдельное подтверждение риска"
-          : "Сначала устраните уточнения или создайте новый план";
+          ? "Une confirmation distincte du risque est nécessaire pour le hidden-city"
+          : "Répondez d’abord aux demandes de précision ou créez un nouveau plan";
       const cloneButton = document.getElementById("agent-plan-full");
       cloneButton.disabled = !cloneReady;
       cloneButton.title = cloneReady
-        ? "Создать новую full-ревизию из завершённого quick-плана"
-        : "Full-ревизия доступна после завершения или истечения quick-плана";
+        ? "Créer une nouvelle version complète à partir du plan rapide terminé"
+        : "La version complète est disponible après la fin ou l’expiration du plan rapide";
       const editButton = document.getElementById("agent-plan-edit");
       editButton.disabled = !editReady;
-      editButton.title = editReady ? "Уточнить запрос и создать новую ревизию" : "Ревизия закрыта";
+      editButton.title = editReady ? "Préciser la demande et créer une nouvelle version" : "Version clôturée";
       document.getElementById("agent-risky-results").hidden = !hiddenCityEnabled;
       document.getElementById("agent-confirmed-results").hidden = true;
       document.getElementById("agent-confirmed-results-list").textContent =
-        "Подтверждённых вариантов ещё нет.";
+        "Aucune offre confirmée pour le moment.";
       document.getElementById("agent-risky-results-list").textContent = hiddenCityEnabled
-        ? "Подтверждённых вариантов ещё нет. Рискованные варианты не смешиваются с обычными."
-        : "Нет подтверждённых рискованных вариантов.";
+        ? "Aucune offre confirmée. Les offres à risque sont séparées des offres classiques."
+        : "Aucune offre à risque confirmée.";
     }
 
     function beginAgentPlanEdit() {
@@ -4881,10 +4890,10 @@ def render_index_html() -> str:
       ) return;
       agentEditMode = true;
       const input = document.querySelector("#assistant-form textarea");
-      input.placeholder = "Опиши изменение для текущей ревизии плана";
+      input.placeholder = "Décrivez la modification à apporter à la version actuelle du plan";
       input.focus();
       document.getElementById("agent-plan-status").textContent =
-        "Режим изменения: следующий запрос создаст новую ревизию этого плана.";
+        "Mode modification : la prochaine demande créera une nouvelle version de ce plan.";
     }
 
     function renderAirportChoices(optionsByRole) {
@@ -4895,7 +4904,7 @@ def render_index_html() -> str:
           node.className = "choice-card";
           node.type = "button";
           const title = document.createElement("strong");
-          title.textContent = `${role === "origin" ? "Откуда" : "Куда"} · ${option.iata_code}`;
+          title.textContent = `${role === "origin" ? "Départ" : "Destination"} · ${option.iata_code}`;
           const meta = document.createElement("span");
           meta.className = "small";
           const duplicatePrefix = `${option.iata_code} - `;
@@ -4914,7 +4923,7 @@ def render_index_html() -> str:
       if (!airportChoiceList.children.length) {
         const empty = document.createElement("div");
         empty.className = "choice-card";
-        empty.textContent = "Пока вариантов нет";
+        empty.textContent = "Aucune offre pour le moment";
         airportChoiceList.append(empty);
       }
     }
@@ -4930,8 +4939,8 @@ def render_index_html() -> str:
         const meta = document.createElement("div");
         meta.className = "small";
         const gate = action.requires_user_action
-          ? "нужен явный клик"
-          : "можно выполнить без live-вызова";
+          ? "clic explicite requis"
+          : "exécutable sans appel en temps réel";
         meta.textContent = `${gate} · ${action.policy_decision}`;
         node.append(title, document.createTextNode("\\n"), meta);
         node.addEventListener("click", () => {
@@ -4942,7 +4951,7 @@ def render_index_html() -> str:
       if (!agentActionList.children.length) {
         const empty = document.createElement("div");
         empty.className = "action-card";
-        empty.textContent = "Агент ждёт маршрут";
+        empty.textContent = "L’agent attend un itinéraire";
         agentActionList.append(empty);
       }
     }
@@ -4974,12 +4983,12 @@ def render_index_html() -> str:
 
     function agentRunErrorMessage(code, fallback) {
       const messages = {
-        aviasales_search_rate_limited: "Aviasales временно ограничил частоту запросов.",
-        aviasales_search_blocked: "Aviasales заблокировал запрос; данные не подменены.",
-        aviasales_search_unavailable: "Aviasales сейчас недоступен; показаны только подтверждённые данные.",
-        agent_run_deadline_exceeded: "Дедлайн запуска истёк до завершения всей области."
+        aviasales_search_rate_limited: "Aviasales a temporairement limité la fréquence des requêtes.",
+        aviasales_search_blocked: "Aviasales a bloqué la requête ; les données n’ont pas été remplacées.",
+        aviasales_search_unavailable: "Aviasales est indisponible ; seules les données confirmées sont affichées.",
+        agent_run_deadline_exceeded: "Le délai de lancement a expiré avant la fin de tout le périmètre."
       };
-      return messages[code] || fallback || code || "Неизвестная ошибка запуска";
+      return messages[code] || fallback || code || "Erreur de lancement inconnue";
     }
 
     function renderAgentStages(activeIndex, state = "active") {
@@ -5010,17 +5019,17 @@ def render_index_html() -> str:
       const operations = run.operation_counts || {};
       const attempted = operations.attempted || 0;
       const total = operations.total || 0;
-      const progress = total > 0 ? ` Проверено операций: ${attempted} из ${total}.` : "";
+      const progress = total > 0 ? ` Opérations vérifiées : ${attempted} sur ${total}.` : "";
       const messages = {
-        queued: "Маршрут понятен. Поиск поставлен в очередь.",
-        running: `Проверяю живые цены и сравниваю маршруты.${progress}`,
-        cancel_requested: "Останавливаю поиск и сохраняю уже найденные варианты.",
-        completed: "Готово. Ниже только варианты, подтверждённые источником.",
-        partial: "Поиск завершён частично. Показываю всё, что удалось подтвердить.",
-        failed: "Поиск не завершился. Выдуманных вариантов не добавлено.",
-        cancelled: "Поиск остановлен. Уже подтверждённые данные сохранены."
+        queued: "Itinéraire compris. Recherche mise en file d’attente.",
+        running: `Vérification des prix en temps réel et comparaison des itinéraires.${progress}`,
+        cancel_requested: "Arrêt de la recherche et sauvegarde des offres déjà trouvées.",
+        completed: "Terminé. Seules les offres confirmées par la source sont affichées ci-dessous.",
+        partial: "Recherche partiellement terminée. Voici toutes les offres qui ont pu être confirmées.",
+        failed: "La recherche n’a pas abouti. Aucune offre n’a été inventée.",
+        cancelled: "Recherche arrêtée. Les données déjà confirmées ont été conservées."
       };
-      return messages[run.status] || `Состояние поиска: ${run.status}.`;
+      return messages[run.status] || `État de la recherche : ${run.status}.`;
     }
 
     function renderAgentRun(run) {
@@ -5034,18 +5043,18 @@ def render_index_html() -> str:
       const stage = agentRunStage(run);
       renderAgentStages(stage, terminalSuccess ? "done" : terminalProblem ? "error" : "active");
       progress.textContent = agentRunProgressMessage(run);
-      progress.title = `Запуск ${String(run.run_id).slice(0, 8)}`;
+      progress.title = `Lancement ${String(run.run_id).slice(0, 8)}`;
       document.getElementById("agent-run-meta").textContent =
-        `Запуск ${run.run_id} · статус ${run.status} · дедлайн ${formatIsoMinute(run.deadline_at)}`;
+        `Lancement ${run.run_id} · statut ${run.status} · échéance ${formatIsoMinute(run.deadline_at)}`;
       cancelButton.disabled = !["queued", "running"].includes(run.status);
       cancelButton.hidden = !["queued", "running", "cancel_requested"].includes(run.status);
       cancelButton.title = run.status === "cancel_requested"
-        ? "Отмена уже запрошена"
-        : "Отменить выполняющийся запуск";
+        ? "Annulation déjà demandée"
+        : "Annuler la recherche en cours";
       partialErrors.hidden = !terminalProblem && !run.error_code;
       partialErrors.textContent = partialErrors.hidden
         ? ""
-        : agentRunErrorMessage(run.error_code, run.public_message || `Состояние: ${run.status}`);
+        : agentRunErrorMessage(run.error_code, run.public_message || `État : ${run.status}`);
     }
 
     function renderAgentFareAnalysis(analysis) {
@@ -5055,7 +5064,7 @@ def render_index_html() -> str:
       list.replaceChildren();
       if (!analysis || requestedModes.length === 0) {
         region.hidden = true;
-        list.textContent = "Анализ не запрашивался.";
+        list.textContent = "Aucune analyse demandée.";
         return;
       }
       region.hidden = false;
@@ -5067,9 +5076,9 @@ def render_index_html() -> str:
       };
       if (analysis.scope_status === "unsupported_trip_structure") {
         appendLine(
-          "Исторический анализ цены полного маршрута пока недоступен для open-jaw, "
-          + "multi-city и составных split/self-transfer билетов. Цена отдельного участка "
-          + "не выдаётся за цену всей поездки.",
+          "L’analyse historique du prix total n’est pas encore disponible pour les itinéraires open-jaw, "
+          + "multi-city et les billets combinés split/self-transfer. Le prix d’un segment seul "
+          + "n’est pas présenté comme le prix du voyage complet.",
           "warn"
         );
         return;
@@ -5078,7 +5087,7 @@ def render_index_html() -> str:
         `${formatMinorAmount(
           analysis.primary_amount.minor_units,
           analysis.primary_amount.currency
-        )} · ${analysis.passengers} пасс. · ${analysis.provider_id} · `
+        )} · ${analysis.passengers} pass. · ${analysis.provider_id} · `
         + `${String(analysis.freshness).toUpperCase()} · ${formatIsoMinute(analysis.observed_at)}`
       );
       const buyTiming = analysis.buy_timing;
@@ -5086,19 +5095,19 @@ def render_index_html() -> str:
         if (!buyTiming || buyTiming.status === "insufficient_data") {
           const sampleCount = buyTiming?.sample_count ?? 0;
           const watchHint = buyTiming?.watch_action_available
-            ? " Можно создать отдельный мониторинг текущей цены; "
-              + "он не увеличивает выборку этого анализа."
+            ? " Vous pouvez créer un suivi distinct du prix actuel ; "
+              + "cela n’augmente pas l’échantillon de cette analyse."
             : "";
           appendLine(
-            `Лучшее время покупки: Недостаточно данных (${sampleCount} наблюдений; `
-            + `нужно ${buyTiming?.thresholds?.minimum_observations ?? 40}, `
-            + `${buyTiming?.thresholds?.minimum_history_span_days ?? 21} дней и `
-            + `${buyTiming?.thresholds?.minimum_distinct_dates ?? 14} дат).${watchHint}`,
+            `Meilleur moment pour acheter : données insuffisantes (${sampleCount} observations ; `
+            + `nécessaires : ${buyTiming?.thresholds?.minimum_observations ?? 40}, `
+            + `${buyTiming?.thresholds?.minimum_history_span_days ?? 21} jours et `
+            + `${buyTiming?.thresholds?.minimum_distinct_dates ?? 14} dates).${watchHint}`,
             "warn"
           );
         } else if (buyTiming.status === "historically_low") {
           appendLine(
-            `Текущая цена исторически низкая: не выше 20-го процентиля `
+            `Le prix actuel est historiquement bas : inférieur ou égal au 20e percentile `
             + `(${formatMinorAmount(
               buyTiming.twentieth_percentile_minor_units,
               analysis.primary_amount.currency
@@ -5106,37 +5115,37 @@ def render_index_html() -> str:
             "ok"
           );
         } else {
-          appendLine("Сигнала «покупать сейчас» по накопленной истории нет.");
+          appendLine("L’historique accumulé ne permet pas de recommander d’acheter maintenant.");
         }
         const weekdayNames = [
-          "понедельник",
-          "вторник",
-          "среда",
-          "четверг",
-          "пятница",
-          "суббота",
-          "воскресенье"
+          "lundi",
+          "mardi",
+          "mercredi",
+          "jeudi",
+          "vendredi",
+          "samedi",
+          "dimanche"
         ];
         if (Number.isInteger(buyTiming?.recommended_weekday)) {
           appendLine(
-            `По истории выгоднее бронировать в ${weekdayNames[buyTiming.recommended_weekday]}: `
-            + `медиана ниже примерно на ${buyTiming.weekday_savings_percent}%.`
+            `D’après l’historique, il est plus avantageux de réserver le ${weekdayNames[buyTiming.recommended_weekday]}: `
+            + `la médiane est inférieure d’environ ${buyTiming.weekday_savings_percent}%.`
           );
         }
         if (Number.isInteger(buyTiming?.recommended_four_hour_bucket)) {
           const startHour = buyTiming.recommended_four_hour_bucket;
           const endHour = (startHour + 4) % 24;
           appendLine(
-            `Выгодное окно бронирования: ${String(startHour).padStart(2, "0")}:00–`
+            `Créneau de réservation avantageux : ${String(startHour).padStart(2, "0")}:00–`
             + `${String(endHour).padStart(2, "0")}:00 (${buyTiming.timezone}); `
-            + `медиана ниже примерно на ${buyTiming.four_hour_savings_percent}%.`
+            + `la médiane est inférieure d’environ ${buyTiming.four_hour_savings_percent}%.`
           );
         }
         if (buyTiming?.watch_action_available && analysis.watch_action?.available) {
           const watchButton = document.createElement("button");
           watchButton.type = "button";
           watchButton.className = "secondary";
-          watchButton.textContent = "Создать отдельный мониторинг цены";
+          watchButton.textContent = "Créer un suivi distinct du prix";
           watchButton.addEventListener("click", () => {
             void createWatchFromAgentAnalysis(analysis.watch_action, watchButton);
           });
@@ -5146,14 +5155,14 @@ def render_index_html() -> str:
       const anomaly = analysis.anomaly;
       if (requestedModes.includes("error_fare")) {
         if (!anomaly || anomaly.status === "insufficient_data") {
-          appendLine("Проверка аномалии: Недостаточно данных.", "warn");
+          appendLine("Vérification d’anomalie : données insuffisantes.", "warn");
         } else if (anomaly.status === "suspected_anomaly") {
           appendLine(
-            "Подозрение на аномально низкую цену — это не гарантия ошибочного тарифа.",
+            "Un prix anormalement bas suspecté ne garantit pas qu’il s’agisse d’une erreur tarifaire.",
             "warn"
           );
         } else {
-          appendLine("Цена не прошла строгие пороги подозрения на аномалию.");
+          appendLine("Le prix ne dépasse pas les seuils stricts de détection d’anomalie.");
         }
       }
       const currency = analysis.currency_comparison;
@@ -5171,16 +5180,16 @@ def render_index_html() -> str:
             )
           : null;
         const comparedAmounts = candidateAmount
-          ? ` Базовый вариант: ${referenceAmount}; альтернативный: ${candidateAmount}.`
-          : ` Базовый вариант: ${referenceAmount}.`;
+          ? ` Offre de référence : ${referenceAmount}; alternative : ${candidateAmount}.`
+          : ` Offre de référence : ${referenceAmount}.`;
         if (!currency || currency.status === "fx_provider_unavailable") {
           appendLine(
-            `Сравнение валют: FX-провайдер не настроен. Экономия не рассчитана.${comparedAmounts}`,
+            `Comparaison des devises : le fournisseur de taux de change n’est pas configuré. Les économies ne sont pas calculées.${comparedAmounts}`,
             "warn"
           );
         } else if (currency.status === "not_comparable") {
           appendLine(
-            `Сравнение валют: варианты материально несопоставимы.${comparedAmounts}`,
+            `Comparaison des devises : les offres ne sont pas directement comparables.${comparedAmounts}`,
             "warn"
           );
         } else if (
@@ -5191,7 +5200,7 @@ def render_index_html() -> str:
             ? ` (${currency.savings_percent}%)`
             : "";
           appendLine(
-            `Сравнение валют: подтверждённая экономия `
+            `Comparaison des devises : économies confirmées `
             + `${formatMinorAmount(
               currency.savings_minor_units,
               currency.comparison_currency
@@ -5200,7 +5209,7 @@ def render_index_html() -> str:
           );
         } else {
           appendLine(
-            `Сравнение валют: положительная экономия не подтверждена.${comparedAmounts}`
+            `Comparaison des devises : aucune économie positive n’a été confirmée.${comparedAmounts}`
           );
         }
       }
@@ -5226,12 +5235,12 @@ def render_index_html() -> str:
 
     function appendAgentRankingBadges(container, candidate) {
       const labels = {
-        balanced: ["Лучший вариант", "ok"],
-        cheapest: ["Самый дешёвый", "ok"],
-        fastest: ["Самый быстрый", "ok"],
-        low_risk: ["Меньше риска", "ok"],
-        split_self_transfer: ["Отдельные билеты", "warn"],
-        risky: ["Повышенный риск", "high"]
+        balanced: ["Meilleure offre", "ok"],
+        cheapest: ["La moins chère", "ok"],
+        fastest: ["La plus rapide", "ok"],
+        low_risk: ["Risque réduit", "ok"],
+        split_self_transfer: ["Billets séparés", "warn"],
+        risky: ["Risque élevé", "high"]
       };
       const winners = (candidate.rankings || []).filter((ranking) => ranking.rank === 1);
       winners.forEach((ranking) => {
@@ -5243,16 +5252,16 @@ def render_index_html() -> str:
       });
       const confirmed = document.createElement("span");
       confirmed.className = "badge off";
-      confirmed.textContent = "Подтверждено источником";
+      confirmed.textContent = "Confirmé par la source";
       container.append(confirmed);
     }
 
     function agentProtectionLabel(value) {
       return ({
-        explicitly_protected: "Пересадка защищена единым билетом",
-        self_transfer: "Самостоятельная пересадка",
-        unknown: "Защита пересадки неизвестна"
-      })[value] || "Защита пересадки неизвестна";
+        explicitly_protected: "Correspondance protégée par un billet unique",
+        self_transfer: "Correspondance autonome",
+        unknown: "Protection de la correspondance inconnue"
+      })[value] || "Protection de la correspondance inconnue";
     }
 
     function agentAirportChanges(segments) {
@@ -5275,7 +5284,7 @@ def render_index_html() -> str:
       if (!token || !currentAgentPlan || !currentAgentRun || button.disabled) return;
       const originalLabel = button.textContent;
       button.disabled = true;
-      button.textContent = "Открываю билет…";
+      button.textContent = "Ouverture du billet…";
       try {
         const response = await fetch(
           `${agentPlanUrl(currentAgentPlan.plan_id)}/runs/${encodeURIComponent(currentAgentRun.run_id)}/booking-actions/resolve`,
@@ -5288,11 +5297,11 @@ def render_index_html() -> str:
         if (!response.ok) throw new Error(await codedMessage(response));
         const body = await response.json();
         if (body.status !== "resolved" || !body.url) {
-          throw new Error("Ссылка на билет больше недоступна");
+          throw new Error("Le lien du billet n’est plus disponible");
         }
         const target = new URL(body.url, window.location.origin);
         if (!["http:", "https:"].includes(target.protocol)) {
-          throw new Error("Источник вернул неподдерживаемую ссылку");
+          throw new Error("La source a renvoyé un lien non pris en charge");
         }
         window.location.assign(target.href);
       } catch (error) {
@@ -5300,7 +5309,7 @@ def render_index_html() -> str:
         button.textContent = originalLabel;
         const errors = document.getElementById("agent-partial-errors");
         errors.hidden = false;
-        errors.textContent = `Не удалось открыть билет: ${error.message}`;
+        errors.textContent = `Impossible d’ouvrir le billet : ${error.message}`;
       }
     }
 
@@ -5317,8 +5326,8 @@ def render_index_html() -> str:
       region.hidden = results.state === "not_ready";
       if (results.state !== "ready" || candidates.length === 0) {
         list.textContent = results.state === "unavailable"
-          ? "Подтверждённые варианты недоступны: сохранённые данные не прошли проверку."
-          : "По этому запросу подтверждённых вариантов пока нет.";
+          ? "Les offres confirmées sont indisponibles : les données enregistrées n’ont pas passé la validation."
+          : "Aucune offre confirmée pour cette recherche pour le moment.";
         return;
       }
       const visibleCandidates = candidates.slice(0, agentVisibleResultCount);
@@ -5340,12 +5349,12 @@ def render_index_html() -> str:
             {kind: "airport", code: leg.destination},
             true
           )
-        )).join(" · ") || "Маршрут не указан";
+        )).join(" · ") || "Itinéraire non indiqué";
         const price = document.createElement("div");
         price.className = "agent-result-price";
         price.textContent = Number.isInteger(amount.minor_units) && amount.currency
           ? formatMinorAmount(amount.minor_units, amount.currency)
-          : "Цена не подтверждена";
+          : "Prix non confirmé";
         head.append(route, price);
 
         const badges = document.createElement("div");
@@ -5358,14 +5367,14 @@ def render_index_html() -> str:
         const baggageValues = [...new Set((candidate.baggage_summaries || []).filter(Boolean))];
         const sources = (candidate.sources || [])
           .map((source) => providerLabels[source] || source)
-          .join(", ") || "источник не указан";
+          .join(", ") || "source non indiquée";
         [
-          `${candidate.passengers || 1} пасс.`,
-          transferCount === 0 ? "Без пересадок" : `${transferCount} пересадок`,
+          `${candidate.passengers || 1} pass.`,
+          transferCount === 0 ? "Sans escale" : `${transferCount} escales`,
           agentProtectionLabel(candidate.protection_status),
-          baggageValues.length ? `Багаж: ${baggageValues.join(", ")}` : "Багаж: данных нет",
-          `Источник: ${sources}`,
-          `Проверено: ${formatIsoMinute(candidate.observed_at)}`
+          baggageValues.length ? `Bagages : ${baggageValues.join(", ")}` : "Bagages : aucune donnée",
+          `Source : ${sources}`,
+          `Vérifié le : ${formatIsoMinute(candidate.observed_at)}`
         ].forEach((value) => {
           const fact = document.createElement("span");
           fact.className = "agent-result-fact";
@@ -5388,18 +5397,18 @@ def render_index_html() -> str:
           const warning = document.createElement("div");
           warning.className = "agent-result-warning";
           const parts = [];
-          if (separateTickets > 1) parts.push(`${separateTickets} отдельных билета — перепроверьте пересадки`);
+          if (separateTickets > 1) parts.push(`${separateTickets} billets séparés — vérifiez les correspondances`);
           airportChanges.forEach((change) => {
             const route = formatPlaceRouteFromCache(
               {kind: "airport", code: change.arrival},
               {kind: "airport", code: change.departure},
               true
             );
-            parts.push(`Смена аэропорта ${route}: стоимость наземного переезда не подтверждена`);
+            parts.push(`Changement d’aéroport ${route}: coût du transfert terrestre non confirmé`);
           });
-          if (unknownCosts > 0) parts.push(`не подтверждена стоимость ${unknownCosts} обязательных расходов`);
-          if (candidate.price_comparison_status === "non_comparable") parts.push("итоговая цена несопоставима с обычным единым билетом");
-          warning.textContent = parts.join(" · ") || "В итоговой стоимости есть неподтверждённые обязательные расходы.";
+          if (unknownCosts > 0) parts.push(`coût non confirmé pour ${unknownCosts} frais obligatoires`);
+          if (candidate.price_comparison_status === "non_comparable") parts.push("le prix total n’est pas comparable à celui d’un billet unique classique");
+          warning.textContent = parts.join(" · ") || "Le prix total comprend des frais obligatoires non confirmés.";
           card.append(warning);
         }
 
@@ -5407,7 +5416,7 @@ def render_index_html() -> str:
           const details = document.createElement("details");
           details.className = "agent-result-segments";
           const summary = document.createElement("summary");
-          summary.textContent = `Показать ${segments.length} сегм.`;
+          summary.textContent = `Afficher ${segments.length} segments`;
           const segmentList = document.createElement("div");
           segmentList.className = "agent-segment-list";
           segments.forEach((segment) => {
@@ -5435,7 +5444,7 @@ def render_index_html() -> str:
           const booking = document.createElement("button");
           booking.className = "primary";
           booking.type = "button";
-          booking.textContent = "Перейти к билету";
+          booking.textContent = "Accéder au billet";
           booking.addEventListener("click", () => {
             void resolveAgentBooking(candidate.booking_action.token, booking);
           });
@@ -5448,13 +5457,13 @@ def render_index_html() -> str:
       const pagination = document.createElement("div");
       pagination.className = "agent-result-pagination";
       const summary = document.createElement("span");
-      summary.textContent = `Показано ${visibleCandidates.length} из ${candidates.length}`;
+      summary.textContent = `Affichés ${visibleCandidates.length} sur ${candidates.length}`;
       pagination.append(summary);
       if (visibleCandidates.length < candidates.length) {
         const more = document.createElement("button");
         more.type = "button";
         more.className = "secondary";
-        more.textContent = `Показать ещё ${Math.min(agentResultPageSize, candidates.length - visibleCandidates.length)}`;
+        more.textContent = `Afficher davantage ${Math.min(agentResultPageSize, candidates.length - visibleCandidates.length)}`;
         more.addEventListener("click", () => {
           agentVisibleResultCount += agentResultPageSize;
           renderAgentConfirmedResults(results);
@@ -5474,16 +5483,16 @@ def render_index_html() -> str:
       if (results.state !== "ready" || candidates.length === 0) {
         region.hidden = !(currentAgentPlan?.summary?.hidden_city_enabled === true);
         list.textContent = results.state === "unavailable"
-          ? "Hidden-city результаты недоступны: сохранённые evidence не прошли проверку."
-          : "Подтверждённых hidden-city вариантов нет.";
+          ? "Les résultats hidden-city sont indisponibles : les éléments enregistrés n’ont pas passé la validation."
+          : "Aucune offre hidden-city confirmée.";
         return;
       }
       region.hidden = false;
       list.className = "agent-hidden-city-result-list";
       const warningLabels = {
-        checked_baggage_continues: "Сданный багаж может улететь до конечного аэропорта билета.",
-        later_segments_may_be_cancelled: "Пропуск сегмента может отменить следующие сегменты.",
-        carrier_contract_risk: "Маршрут может конфликтовать с правилами тарифа или перевозчика."
+        checked_baggage_continues: "Les bagages enregistrés peuvent être acheminés jusqu’à l’aéroport final du billet.",
+        later_segments_may_be_cancelled: "Ne pas prendre un segment peut entraîner l’annulation des segments suivants.",
+        carrier_contract_risk: "L’itinéraire peut contrevenir aux conditions tarifaires ou aux règles de la compagnie."
       };
       candidates.forEach((candidate) => {
         const card = document.createElement("article");
@@ -5500,18 +5509,18 @@ def render_index_html() -> str:
           code: candidate.ticketed_destination
         }) || {kind: "airport", code: candidate.ticketed_destination};
         title.textContent =
-          `Выйти в ${formatPlaceLabel(desiredPlace, true)}; билет оформлен до `
+          `Descendre à ${formatPlaceLabel(desiredPlace, true)} ; le billet est émis jusqu’à `
           + `${formatPlaceLabel(ticketedPlace, true)}`;
         const facts = document.createElement("div");
         facts.className = "small";
         const amount = candidate.total_amount || {};
         const actionability = candidate.actionability === "eligible"
-          ? "условно применим без регистрируемого багажа"
-          : "только исследование: багаж не подтверждён";
+          ? "potentiellement applicable sans bagage enregistré"
+          : "recherche uniquement : bagages non confirmés";
         facts.textContent =
           `${formatMinorAmount(amount.minor_units, amount.currency)} · `
-          + `${candidate.passengers} пасс. · LIVE · ${candidate.source_id} · `
-          + `наблюдалось ${candidate.observed_at} · ${actionability}`;
+          + `${candidate.passengers} pass. · LIVE · ${candidate.source_id} · `
+          + `observé le ${candidate.observed_at} · ${actionability}`;
         const route = document.createElement("div");
         route.className = "small";
         const flown = (candidate.flown_segments || [])
@@ -5528,7 +5537,7 @@ def render_index_html() -> str:
             true
           ))
           .join(" · ");
-        route.textContent = `Летим: ${flown || "неизвестно"} · пропускаем: ${skipped || "неизвестно"}`;
+        route.textContent = `Trajet effectué : ${flown || "inconnu"} · segment ignoré : ${skipped || "inconnu"}`;
         const warnings = document.createElement("ul");
         (candidate.warnings || []).forEach((code) => {
           const item = document.createElement("li");
@@ -5540,8 +5549,8 @@ def render_index_html() -> str:
         const actions = document.createElement("div");
         actions.className = "small";
         actions.textContent = actionsDisabled
-          ? "Покупка и отслеживание отключены для hidden-city результата."
-          : "Действия заблокированы: некорректный контракт результата.";
+          ? "L’achat et le suivi sont désactivés pour les résultats hidden-city."
+          : "Actions bloquées : contrat de résultat invalide.";
         card.append(title);
         if (hiddenCitySegments.length > 0) {
           appendCarrierStrip(card, hiddenCitySegments);
@@ -5624,7 +5633,7 @@ def render_index_html() -> str:
       const revisedPlan = await response.json();
       if (!agentSessionIsCurrent(sessionGeneration)) return;
       renderAgentPlan(revisedPlan);
-      renderAgentRunPlaceholder("Новая ревизия ждёт явного запуска.");
+      renderAgentRunPlaceholder("La nouvelle version attend un lancement explicite.");
     }
 
     async function editAgentPlan(prompt) {
@@ -5658,8 +5667,8 @@ def render_index_html() -> str:
       const plan = await response.json();
       if (!agentSessionIsCurrent(sessionGeneration)) return;
       renderAgentPlan(plan);
-      renderAgentRunPlaceholder("Изменённая ревизия ждёт явного запуска.");
-      addMessage("bot", `Создана ревизия ${plan.revision}: ${agentPlanStateLabel(plan.state)}.`);
+      renderAgentRunPlaceholder("La version modifiée attend un lancement explicite.");
+      addMessage("bot", `Version créée ${plan.revision}: ${agentPlanStateLabel(plan.state)}.`);
     }
 
     async function executeAgentPlan() {
@@ -5759,7 +5768,7 @@ def render_index_html() -> str:
       const fullPlan = await response.json();
       if (!agentSessionIsCurrent(sessionGeneration)) return;
       renderAgentPlan(fullPlan);
-      renderAgentRunPlaceholder("Новая full-ревизия ждёт явного запуска.");
+      renderAgentRunPlaceholder("La nouvelle version complète attend un lancement explicite.");
     }
 
     async function reloadAgentPlan() {
@@ -5831,7 +5840,7 @@ def render_index_html() -> str:
       }
       if (!run) {
         window.localStorage.removeItem(agentRunStorageKey);
-        renderAgentRunPlaceholder("Запуск ещё не создан.");
+        renderAgentRunPlaceholder("Aucune recherche n’a encore été lancée.");
         return;
       }
       if (!agentSessionIsCurrent(sessionGeneration)) return;
@@ -5927,7 +5936,7 @@ def render_index_html() -> str:
       currentAgentRun = null;
       window.localStorage.removeItem(agentRunStorageKey);
       document.getElementById("agent-run-progress").textContent = message;
-      document.getElementById("agent-run-meta").textContent = "Запуск ещё не создан.";
+      document.getElementById("agent-run-meta").textContent = "Aucune recherche n’a encore été lancée.";
       renderAgentStages(stageIndex);
       document.getElementById("agent-run-cancel").disabled = true;
       document.getElementById("agent-run-cancel").hidden = true;
@@ -5943,13 +5952,13 @@ def render_index_html() -> str:
 
     async function requestAgentChat(prompt) {
       if (!(await ensureLocalSession())) {
-        addMessage("bot", "Не удалось подключить локальный профиль. Нажмите «Переподключить профиль» и попробуйте ещё раз.");
+        addMessage("bot", "Impossible de connecter le profil local. Cliquez sur « Reconnecter le profil » et réessayez.");
         return;
       }
       const sessionGeneration = agentSessionGeneration;
       lastAgentPrompt = prompt;
       addMessage("user", prompt);
-      statusLine.textContent = "понимаю маршрут...";
+      statusLine.textContent = "Analyse de l’itinéraire…";
       const payload = buildSearchPayload();
       const turnBody = {
         message: prompt,
@@ -5969,8 +5978,8 @@ def render_index_html() -> str:
       submit.setAttribute("aria-busy", "true");
       document.getElementById("main-search").classList.add("search-active");
       document.getElementById("agent-plan-card").hidden = false;
-      document.getElementById("agent-plan-status").textContent = "Разбираю маршрут и ограничения";
-      renderAgentRunPlaceholder("Понимаю маршрут и проверяю, хватает ли данных для поиска.", 0);
+      document.getElementById("agent-plan-status").textContent = "Analyse de l’itinéraire et des contraintes";
+      renderAgentRunPlaceholder("Analyse de l’itinéraire et vérification des informations nécessaires à la recherche.", 0);
       try {
         const response = await agentSessionFetch(
           "/api/v1/agent/chat/turn",
@@ -6002,24 +6011,24 @@ def render_index_html() -> str:
         if (["run_started", "watch_created"].includes(body.outcome) && body.run) {
           renderAgentRun(body.run);
           if (body.idempotent_replay) {
-            addMessage("bot", "Этот же запрос уже был запущен — продолжаю существующий поиск без дубля.");
+            addMessage("bot", "Cette demande a déjà été lancée : je reprends la recherche existante sans créer de doublon.");
           }
           if (["queued", "running", "cancel_requested"].includes(body.run.status)) {
             statusLine.textContent = body.outcome === "watch_created"
-              ? "поиск и слежение запущены"
-              : "ищу варианты...";
+              ? "Recherche et suivi lancés"
+              : "Recherche des offres…";
             window.setTimeout(() => pollAgentRun(body.run, 1000, sessionGeneration), 1000);
           } else {
             await loadAgentRunResults(body.proposed_plan.plan_id, body.run.run_id, sessionGeneration);
-            statusLine.textContent = "готово";
+            statusLine.textContent = "Terminé";
           }
         } else {
           renderAgentRunPlaceholder(body.reply_ru, 0);
-          statusLine.textContent = "нужно уточнение";
+          statusLine.textContent = "Précisions nécessaires";
         }
         if ((body.warnings || []).length > 0) {
           const warningLabels = {
-            agent_watch_scope_not_materializable: "Поиск запущен, но для слежения нужен точный город или аэропорт и конкретная дата."
+            agent_watch_scope_not_materializable: "La recherche a démarré, mais le suivi nécessite une ville ou un aéroport précis et une date spécifique."
           };
           const message = body.warnings.map((code) => warningLabels[code] || code).join(" ");
           addMessage("bot", message);
@@ -6032,9 +6041,9 @@ def render_index_html() -> str:
         if (!agentSessionIsCurrent(sessionGeneration)) return;
         renderAgentStages(0, "error");
         document.getElementById("agent-run-progress").textContent =
-          "Не удалось начать поиск. Запрос можно отправить ещё раз — дубль не создастся.";
-        addMessage("bot", `Не удалось начать поиск: ${error.message}`);
-        statusLine.textContent = "ошибка агента";
+          "Impossible de démarrer la recherche. Vous pouvez renvoyer la demande : aucun doublon ne sera créé.";
+        addMessage("bot", `Impossible de démarrer la recherche : ${error.message}`);
+        statusLine.textContent = "Erreur de l’agent";
       } finally {
         submit.disabled = false;
         submit.setAttribute("aria-busy", "false");
@@ -6043,12 +6052,12 @@ def render_index_html() -> str:
 
     async function requestAgentPlan(presetId, visiblePrompt) {
       if (!(await ensureLocalSession())) {
-        addMessage("bot", "Не удалось подключить локальный профиль. Нажмите «Переподключить профиль» и повторите сценарий.");
+        addMessage("bot", "Impossible de connecter le profil local. Cliquez sur « Reconnecter le profil » et réessayez.");
         return;
       }
       const sessionGeneration = agentSessionGeneration;
       addMessage("user", visiblePrompt);
-      statusLine.textContent = "ИИ думает...";
+      statusLine.textContent = "L’IA réfléchit…";
       try {
         const response = await agentSessionFetch(
           "/api/v1/agent/plan",
@@ -6068,12 +6077,12 @@ def render_index_html() -> str:
         const plan = await response.json();
         if (!agentSessionIsCurrent(sessionGeneration)) return;
         renderAgentPlan(plan);
-        renderAgentRunPlaceholder("План создан, запуск ещё не выполнялся.");
-        statusLine.textContent = "готово";
+        renderAgentRunPlaceholder("Le plan est créé, mais la recherche n’a pas encore été lancée.");
+        statusLine.textContent = "Terminé";
       } catch (error) {
         if (!agentSessionIsCurrent(sessionGeneration)) return;
-        addMessage("bot", `Не смог собрать план: ${error.message}`);
-        statusLine.textContent = "ошибка";
+        addMessage("bot", `Impossible de préparer le plan : ${error.message}`);
+        statusLine.textContent = "Erreur";
       }
     }
 
@@ -6081,7 +6090,7 @@ def render_index_html() -> str:
       event.preventDefault();
       if (!validateTypedPlaceSelections()) return;
       submitButton.disabled = true;
-      statusLine.textContent = "поиск...";
+      statusLine.textContent = "Recherche…";
       const payload = buildSearchPayload();
       lastSearchPayload = payload;
 
@@ -6095,15 +6104,15 @@ def render_index_html() -> str:
         const body = await response.json();
         await lookupSearchResultPlaces(body);
         renderResults(body);
-        statusLine.textContent = "готово";
+        statusLine.textContent = "Terminé";
       } catch (error) {
         resultsList.replaceChildren();
         confirmationList.replaceChildren();
         const node = document.createElement("div");
         node.className = "error-state";
-        node.textContent = `Ошибка поиска: ${error.message}`;
+        node.textContent = `Erreur de recherche : ${error.message}`;
         resultsList.append(node);
-        statusLine.textContent = "ошибка";
+        statusLine.textContent = "Erreur";
       } finally {
         submitButton.disabled = false;
       }
@@ -6116,7 +6125,7 @@ def render_index_html() -> str:
         liveList.replaceChildren();
         const row = document.createElement("div");
         row.className = "denial-row small";
-        row.textContent = "Live: demo observer выключен или нет активного разрешения.";
+        row.textContent = "Temps réel : l’observateur de démonstration est désactivé ou aucune autorisation active n’existe.";
         liveList.append(row);
         return;
       }
@@ -6169,7 +6178,7 @@ def render_index_html() -> str:
         liveList.replaceChildren();
         const row = document.createElement("div");
         row.className = "denial-row small";
-        row.textContent = "Personal observer: сначала выполните поиск.";
+        row.textContent = "Observateur personnel : lancez d’abord une recherche.";
         liveList.append(row);
         return;
       }
@@ -6244,7 +6253,7 @@ def render_index_html() -> str:
         denialsList.replaceChildren();
         const row = document.createElement("div");
         row.className = "denial-row small";
-        row.textContent = "Deal discovery: сначала выполните поиск.";
+        row.textContent = "Recherche de bons plans : lancez d’abord une recherche.";
         denialsList.append(row);
         return;
       }
@@ -6315,7 +6324,7 @@ def render_index_html() -> str:
       if (!displayName || !invitationCode) return;
 
       submitButton.disabled = true;
-      authState.textContent = "Проверяем код приглашения…";
+      authState.textContent = "Vérification du code d’invitation…";
       try {
         const response = await fetch("/api/v1/auth/accept-invitation", {
           method: "POST",
@@ -6329,20 +6338,20 @@ def render_index_html() -> str:
 
         const session = await response.json();
         if (!session.session_token || !session.household_id || !session.role) {
-          throw new Error("Ответ сервера авторизации некорректен");
+          throw new Error("Réponse incorrecte du serveur d’authentification");
         }
         storeSession(session);
         invitationLoginForm.reset();
-        statusLine.textContent = "профиль подключен";
+        statusLine.textContent = "Profil connecté";
         try {
           await loadSessionBoundData();
         } catch (loadError) {
-          authState.textContent = `Вход выполнен, но часть данных не загрузилась: ${loadError.message}`;
+          authState.textContent = `Connexion réussie, mais certaines données n’ont pas pu être chargées : ${loadError.message}`;
         }
       } catch (error) {
         invitationLoginForm.hidden = false;
         authReconnectButton.hidden = true;
-        authState.textContent = `Не удалось войти: ${error.message}`;
+        authState.textContent = `Connexion impossible : ${error.message}`;
       } finally {
         submitButton.disabled = false;
       }
@@ -6412,7 +6421,7 @@ def render_index_html() -> str:
       if (!sessionToken()) return;
       const message = event.reason instanceof Error ? event.reason.message : String(event.reason);
       document.getElementById("agent-partial-errors").hidden = false;
-      document.getElementById("agent-partial-errors").textContent = `Ошибка действия: ${message}`;
+      document.getElementById("agent-partial-errors").textContent = `Erreur lors de l’action : ${message}`;
       statusLine.textContent = "agent-operation-error";
     });
     if ("serviceWorker" in navigator) {
@@ -6430,7 +6439,7 @@ def render_web_manifest() -> dict[str, object]:
     return {
         "name": "Flight Hunter",
         "short_name": "Flight Hunter",
-        "description": "Локальный помощник для поиска и отслеживания авиабилетов.",
+        "description": "Assistant local de recherche et de suivi des billets d’avion.",
         "start_url": "/",
         "scope": "/",
         "display": "standalone",
