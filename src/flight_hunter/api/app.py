@@ -1451,13 +1451,13 @@ def create_app(
             directory,
             code=body.origin,
             kind=body.origin_kind,
-            locale="ru",
+            locale="fr",
         )
         requested_destination = _resolve_request_place(
             directory,
             code=body.destination,
             kind=body.destination_kind,
-            locale="ru",
+            locale="fr",
         )
         return directory, requested_origin, requested_destination
 
@@ -1627,12 +1627,12 @@ def create_app(
                     try:
                         await repository.add_household(
                             household_id=household_id,
-                            name="Profil personnel",
+                            name="Личный профиль",
                             created_at=now,
                         )
                         await repository.add_user(
                             user_id=user_id,
-                            display_name="Propriétaire",
+                            display_name="Владелец",
                             created_at=now,
                         )
                         await repository.add_membership(
@@ -2739,7 +2739,7 @@ def create_app(
     @app.get("/api/v1/places/suggest", response_model=PlaceEnvelopeResponse)
     async def places_suggest(
         q: str = Query(default="", max_length=80),
-        locale: str = Query(default="ru", min_length=2, max_length=16),
+        locale: str = Query(default="fr", min_length=2, max_length=16),
         limit: int = Query(default=10, ge=1, le=20),
     ) -> PlaceEnvelopeResponse:
         try:
@@ -3475,7 +3475,7 @@ def create_app(
     @app.get("/api/v1/aviasales/suggest", response_model=AviasalesSuggestResponse)
     def aviasales_suggest(
         q: str = Query(min_length=1, max_length=80),
-        locale: str = Query(default="ru", min_length=2, max_length=8),
+        locale: str = Query(default="fr", min_length=2, max_length=8),
         max_results: int = Query(default=5, ge=1, le=20),
     ) -> AviasalesSuggestResponse | JSONResponse:
         provider, error = _aviasales_search_provider_or_error(settings, provider_instances)
@@ -3617,7 +3617,7 @@ def create_app(
         origin_type: str = Query(default="CITY", min_length=3, max_length=16),
         market: str = Query(default="RU", min_length=2, max_length=8),
         currency: str = Query(default="rub", min_length=3, max_length=3),
-        language: str = Query(default="ru", min_length=2, max_length=8),
+        language: str = Query(default="fr", min_length=2, max_length=8),
         one_way: bool = True,
     ) -> AviasalesGraphqlBlocksResponse | JSONResponse:
         provider, error = _aviasales_search_provider_or_error(settings, provider_instances)
@@ -3706,13 +3706,13 @@ def create_app(
                 directory,
                 code=body.origin,
                 kind=body.origin_kind,
-                locale="ru",
+                locale="fr",
             )
             requested_destination = _resolve_request_place(
                 directory,
                 code=body.destination,
                 kind=body.destination_kind,
-                locale="ru",
+                locale="fr",
             )
             service = WatchService(
                 HouseholdWatchRepository(session),
@@ -3849,7 +3849,7 @@ def create_app(
                                 None if "origin" in body.model_fields_set else current.origin_kind
                             )
                         ),
-                        locale="ru",
+                        locale="fr",
                     )
                     updates.update(
                         origin=requested_origin.ref.code,
@@ -3874,7 +3874,7 @@ def create_app(
                                 else current.destination_kind
                             )
                         ),
-                        locale="ru",
+                        locale="fr",
                     )
                     updates.update(
                         destination=requested_destination.ref.code,
